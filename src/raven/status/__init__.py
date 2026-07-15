@@ -1,5 +1,8 @@
 """Global status class"""
 
-from raven.status._status import Status
+from raven.status._status import Status, StatusRegistry
 
-__all__ = ["Status"]
+__all__ = [
+    "Status",
+    "StatusRegistry"
+]

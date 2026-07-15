@@ -41,6 +41,11 @@ class Raven:
             s: Status | None = None,
             global_cached_session: SessionCache | None = None
         ):
+        """
+         - **base_model_parameters** and **embedding_model_parameters** support the same parameters as **llama_cpp.Llama** class.
+         - Do not pass in model_name in the **base_model_parameters** or **embedding_model_parameters**. model_name is handled explicitly in the **ModelManager** class.
+        """
+        
         self.s = s
         self._knowledge_base = KnowledgeBase()
         self._model_manager = ModelManager(s=self.s)

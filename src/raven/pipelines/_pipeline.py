@@ -138,7 +138,7 @@ class IngestionPipeline:
 
                 self.grammar = LlamaGrammar.from_json_schema(json.dumps(schema))
 
-                self.set_status("ingestion_grammar_enforced")                                         #type: ignore
+                self.set_status(self.s.registry.INGESTION_GRAMMAR_ENFORCED)                                         #type: ignore
                 logger.info("Ingestion Pipeline initialized with grammar stabilization")
             else:
                 logger.info("Ingestion Pipeline initialized without grammar stabilization")
@@ -152,9 +152,9 @@ class IngestionPipeline:
 
         logger.info("Reading files...")
 
-        self.set_status("subdividing_file")                                                         #type: ignore
+        self.set_status(self.s.registry.SUBDIVIDING_FILE)                                                         #type: ignore
         file_subdivisions = self._subdivide_file_by_tokens(file_path, SUBFILE_SIZE)
-        self.set_status("file_subdivided")                                                           #type: ignore
+        self.set_status(self.s.registry.FILE_SUBDIVIDED)                                                           #type: ignore
 
         logger.info("Running inference")
 
@@ -162,7 +162,7 @@ class IngestionPipeline:
 
         file_subdivisions_dicts = []
 
-        self.set_status("ingestion_inference_running")                                               #type: ignore
+        self.set_status(self.s.registry.INGESTION_INFERENCE_RUNNING)                                               #type: ignore
         
         for i, subfile_text in enumerate(file_subdivisions):
             logger.info(f"Running inference on subfile: {i+1}/{len(file_subdivisions)}")
@@ -204,7 +204,7 @@ class IngestionPipeline:
                     else:
                         logger.error(f"Sub-File {i+1} skipped after {max_retries} failed attempts")
 
-        self.set_status("ingestion_inference_complete")                                          #type: ignore
+        self.set_status(self.s.registry.INGESTION_INFERENCE_COMPLETE)                                          #type: ignore
         
         file_json = {
             "sections": file_subdivisions_dicts
@@ -214,13 +214,13 @@ class IngestionPipeline:
 
         self.knowledge = self.knowledge_base.get_knowledge(knowledge_name)
 
-        self.set_status("ingesting")                                                             #type: ignore
+        self.set_status(self.s.registry.INGESTING)                                                             #type: ignore
         self.knowledge.ingest(
             file_name,
             file_json,                                                 
             embedder= self.embedding_model
         )
-        self.set_status("ingestion_complete")                                                    #type: ignore
+        self.set_status(self.s.registry.INGESTION_COMPLETE)                                                    #type: ignore
         logger.info("Ingestion Complete")
 
     def set_status(self, status):
