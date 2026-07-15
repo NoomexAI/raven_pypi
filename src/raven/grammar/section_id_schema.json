@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "properties": {
+    "section_id_list": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "description": "An array containing [section_id, knowledge_name]",
+        "minItems": 2,
+        "maxItems": 2,
+        "items": [
+          {
+            "type": "string",
+            "description": "The unique identifier of the section"
+          },
+          {
+            "type": "string",
+            "description": "The name of the knowledge base"
+          }
+        ]
+      }
+    }
+  },
+  "required": ["section_id_list"]
+}

@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "noomexai-raven"
+version = "0.1.0"
+description = "RAVEN — Retrieval Augmented Adaptive Epistemic Navigation. Privacy-first, fully offline RAG backend."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE.txt"]
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.24",
+    "wtpsplit-lite>=0.2.0",
+    "sqlite-vec>=0.1.6",
+    "curl-cffi>=0.9.0",
+    "platformdirs>=4.2.0",
+    "tqdm>=4.65.0",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries",
+]
+
+[project.urls]
+Homepage = "https://github.com/NoomexAI/RAVEN"
+Repository = "https://github.com/NoomexAI/RAVEN"
+Issues = "https://github.com/NoomexAI/RAVEN/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["raven*"]
+
+[tool.setuptools.package-data]
+raven = ["grammar/*.json"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+select = ["E", "F", "I", "W", "UP", "B", "C4"]
+ignore = ["E501", "B008"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
