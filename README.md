@@ -173,6 +173,12 @@ s = Status(registry= status_registry)
 
 # Now you can use your custom status field
 print(s.registry.CUSTOM_STATUS)
+
+# You can use that filed instead of hardcoding strings everywhere
+def custom_func(status):
+    print("Custom fucn called")
+
+s.on_status(s.registry.CUSTOM_STATUS, custom_func)
 ```
 
 ## Logging
