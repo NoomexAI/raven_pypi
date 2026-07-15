@@ -3,6 +3,7 @@ from raven.core._model_manager import ModelManager
 from raven.session._conversation_manager import ConversationManager
 from raven.session._chat_session import ChatSession
 from raven.pipelines._pipeline import IngestionPipeline, RetrievalPipeline
+from raven.reconstructor._reconstructor import Reconstructor
 from raven.status._status import Status
 
 from llama_cpp import LLAMA_POOLING_TYPE_MEAN
@@ -63,6 +64,8 @@ class Raven:
             base_model = self._base_model,
             embedding_model = self._embedding_model
         )
+
+        self._reconstructor = Reconstructor(self._knowledge_base)
 
         if not global_cached_session:
             self.cached_session = SessionCache()
@@ -129,3 +132,10 @@ class Raven:
             self.chat_session = self.cached_session.last_cached_session
 
         return self.chat_session                                                                                #type: ignore
+
+
+    def reconstruct(self, tool_result, tool_name):
+        return self._reconstructor.reconstruct(
+            retrieval_result = tool_result,
+            tool_name = tool_name
+        )
