@@ -30,7 +30,7 @@ classifiers = [
 [project.urls]
 Homepage = "https://github.com/NoomexAI/raven_pypi"
 Repository = "https://github.com/NoomexAI/raven_pypi"
-Issues = "https://github.com/NoomexAI/raven_pypiissues"
+Issues = "https://github.com/NoomexAI/raven_pypi/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
