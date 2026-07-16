@@ -72,109 +72,109 @@ while True:
 
  - To enable default status tracking, use the **Status** class from **raven.status**.
 
-```python
-import raven
-from raven.status import Status
+ ```python
+ import raven
+ from raven.status import Status
 
-s = Status()
-s.on_change = lambda status: print("\n\n", status)
+ s = Status()
+ s.on_change = lambda status: print("\n\n", status)
 
-# s.on_change runs every time s.status = "<new_status>" is defined
+ # s.on_change runs every time s.status = "<new_status>" is defined
 
-api = raven.Raven(s=s)
-```
+ api = raven.Raven(s=s)
+ ```
 
  - on_status method and custom status
 
-```python
-from raven.status import Status
+ ```python
+ from raven.status import Status
 
-def alert(status):
-    print("Error found.")
+ def alert(status):
+     print("Error found.")
 
-s.on_status("Error", alert)
+ s.on_status("Error", alert)
 
-s.status = "Error"              # triggers the alert function and prints the message
-```
+ s.status = "Error"              # triggers the alert function and prints the message
+ ```
 
-This way you can define custom status and trigger functions on that status
+ This way you can define custom status and trigger functions on that status
 
  - Custom status fields (advanced)
 
-There are 27 status fields defined in the **StatusRegistry** dataclass.
+ There are 27 status fields defined in the **StatusRegistry** dataclass.
 
-```python
-@dataclass
-class StatusRegistry:                       # exposed via raven.status
-    # Model Manager
-    LOADING_BASE_MODEL: str = "loading_base_model"
-    BASE_MODEL_LOADED: str = "base_model_loaded"
-    LOADING_EMBEDDING_MODEL: str = "loading_embedding_model"
-    EMBEDDING_MODEL_LOADED: str = "embedding_model_loaded"
-    LOADING_SBD_MODEL: str = "loading_sbd_model"
-    SBD_MODEL_LOADED: str = "sbd_model_loaded"
-    DOWNLOADING_BASE_MODEL: str = "downloading_base_model"
-    BASE_MODEL_DOWNLOADED: str = "base_model_downloaded"
-    DOWNLOADING_EMBEDDING_MODEL: str = "downloading_embedding_model"
-    EMBEDDING_MODEL_DOWNLOADED: str = "embedding_model_downloaded"
-    DOWNLOADING_SBD_MODEL: str = "downloading_sbd_model"
-    SBD_MODEL_DOWNLOADED: str = "sbd_model_downloaded"
+ ```python
+ @dataclass
+ class StatusRegistry:                       # exposed via raven.status
+     # Model Manager
+     LOADING_BASE_MODEL: str = "loading_base_model"
+     BASE_MODEL_LOADED: str = "base_model_loaded"
+     LOADING_EMBEDDING_MODEL: str = "loading_embedding_model"
+     EMBEDDING_MODEL_LOADED: str = "embedding_model_loaded"
+     LOADING_SBD_MODEL: str = "loading_sbd_model"
+     SBD_MODEL_LOADED: str = "sbd_model_loaded"
+     DOWNLOADING_BASE_MODEL: str = "downloading_base_model"
+     BASE_MODEL_DOWNLOADED: str = "base_model_downloaded"
+     DOWNLOADING_EMBEDDING_MODEL: str = "downloading_embedding_model"
+     EMBEDDING_MODEL_DOWNLOADED: str = "embedding_model_downloaded"
+     DOWNLOADING_SBD_MODEL: str = "downloading_sbd_model"
+     SBD_MODEL_DOWNLOADED: str = "sbd_model_downloaded"
 
-    # Ingestion Pipeline
-    INGESTION_GRAMMAR_ENFORCED: str = "ingestion_grammar_enforced"
-    SUBDIVIDING_FILE: str = "subdividing_file"
-    FILE_SUBDIVIDED: str = "file_subdivided"
-    INGESTION_INFERENCE_RUNNING: str = "ingestion_inference_running"
-    INGESTION_INFERENCE_COMPLETE: str = "ingestion_inference_complete"
-    INGESTING: str = "ingesting"
-    INGESTION_COMPLETE: str = "ingestion_complete"
+     # Ingestion Pipeline
+     INGESTION_GRAMMAR_ENFORCED: str = "ingestion_grammar_enforced"
+     SUBDIVIDING_FILE: str = "subdividing_file"
+     FILE_SUBDIVIDED: str = "file_subdivided"
+     INGESTION_INFERENCE_RUNNING: str = "ingestion_inference_running"
+     INGESTION_INFERENCE_COMPLETE: str = "ingestion_inference_complete"
+     INGESTING: str = "ingesting"
+     INGESTION_COMPLETE: str = "ingestion_complete"
 
-    # Chat Session
-    GENERATING_TITLE: str = "generating_title"
-    TITLE_GENERATED: str = "title_generated"
-    GENERATING_RESPONSE: str = "generating_response"
-    THINKING_START: str = "thinking_start"
-    THINKING_END: str = "thinking_end"
-    TOOL_CALL_DETECTED: str = "tool_call_detected"
-    RETRIEVED_SECTIONS: str = "retrieved_sections"
-    RESPONSE_COMPLETE: str = "response_complete"
-```
+     # Chat Session
+     GENERATING_TITLE: str = "generating_title"
+     TITLE_GENERATED: str = "title_generated"
+     GENERATING_RESPONSE: str = "generating_response"
+     THINKING_START: str = "thinking_start"
+     THINKING_END: str = "thinking_end"
+     TOOL_CALL_DETECTED: str = "tool_call_detected"
+     RETRIEVED_SECTIONS: str = "retrieved_sections"
+     RESPONSE_COMPLETE: str = "response_complete"
+ ```
 
-You can access those status fileds using **s.registry** parameter.
+ You can access those status fileds using **s.registry** parameter.
 
-```python
-from raven.status import Status
+ ```python
+ from raven.status import Status
 
-s = Status()
-print(s.registry.LOADING_BASE_MODEL)
+ s = Status()
+ print(s.registry.LOADING_BASE_MODEL)
+ 
+ # To see all of the fields
+ print(s.registry.list_all())
+ ```
 
-# To see all of the fields
-print(s.registry.list_all())
-```
+ You can define your own status fields by creating a custom dataclass that inherits from **StatusRegistry**.
 
-You can define your own status fields by creating a custom dataclass that inherits from **StatusRegistry**.
+ ```python
+ from raven.status import Status, StatusRegistry
+ from dataclasses import dataclass
 
-```python
-from raven.status import Status, StatusRegistry
-from dataclasses import dataclass
+ @dataclass
+ class ExtendedStatusRegistry(StatusRegistry):
+     CUSTOM_STATUS: str = "custom_status"
 
-@dataclass
-class ExtendedStatusRegistry(StatusRegistry):
-    CUSTOM_STATUS: str = "custom_status"
+ status_registry = ExtendedStatusRegistry()
 
-status_registry = ExtendedStatusRegistry()
+ s = Status(registry= status_registry)
 
-s = Status(registry= status_registry)
+ # Now you can use your custom status field
+ print(s.registry.CUSTOM_STATUS)
 
-# Now you can use your custom status field
-print(s.registry.CUSTOM_STATUS)
+ # You can use that filed instead of hardcoding strings everywhere
+ def custom_func(status):
+     print("Custom fucn called")
 
-# You can use that filed instead of hardcoding strings everywhere
-def custom_func(status):
-    print("Custom fucn called")
-
-s.on_status(s.registry.CUSTOM_STATUS, custom_func)
-```
+ s.on_status(s.registry.CUSTOM_STATUS, custom_func)
+ ```
 
 ## Logging
 
@@ -275,231 +275,231 @@ For development environment it's better to use individual components explicitly 
 
  - **Initialization** - This is the part where you initialize all the components according to their dependency order.
  
-```python
-from raven.core import KnowledgeBase, ModelManager, setup_logging
-from raven.pipelines import IngestionPipeline
-from raven.session import ConversationManager, ChatSession
-from raven.reconstructor import Reconstructor
+ ```python
+ from raven.core import KnowledgeBase, ModelManager, setup_logging
+ from raven.pipelines import IngestionPipeline
+ from raven.session import ConversationManager, ChatSession
+ from raven.reconstructor import Reconstructor
 
-setup_logging()
+ setup_logging()
 
-# ============== KnowledgeBase and ModelManager ===================
+ # ============== KnowledgeBase and ModelManager ===================
 
-knowledge_base = KnowledgeBase()
-model_manager = ModelManager()
+ knowledge_base = KnowledgeBase()
+ model_manager = ModelManager()
 
-# ============== Models ============================================
+ # ============== Models ============================================
 
-base_model = model_manager.initiate_base_model()                
-# supports 3 base models: gemma-4-E2B-it, gemma-4-E4B-it, Qwen2.5-7B-instruct (experimental) in .gguf format.
+ base_model = model_manager.initiate_base_model()                
+ # supports 3 base models: gemma-4-E2B-it, gemma-4-E4B-it, Qwen2.5-7B-instruct (experimental) in .gguf format.
 
-embedding_model = model_manager.initiate_embedding_model()
-sbd_model = model_manager.initiate_sbd_model()
+ embedding_model = model_manager.initiate_embedding_model()
+ sbd_model = model_manager.initiate_sbd_model()
 
-# ==============IngestionPipeline ==================================
+ # ==============IngestionPipeline ==================================
 
-# Only Initialize ingestion if you plan to ingest files in Knowledges
-ingestion = IngestionPipeline(
-    knowledge_base= knowledge_base,
-    base_model= base_model,
-    embedding_model= embedding_model,
-    sbd_model= sbd_model
-)
+ # Only Initialize ingestion if you plan to ingest files in Knowledges
+ ingestion = IngestionPipeline(
+     knowledge_base= knowledge_base,
+     base_model= base_model,
+     embedding_model= embedding_model,
+     sbd_model= sbd_model
+ )
 
-# =============== ConversationManager ===============================
+ # =============== ConversationManager ===============================
 
-conversation_manager = ConversationManager(
-    knowledge_base= knowledge_base,
-    base_model= base_model,
-    embedding_model= embedding_model
-)
-```
+ conversation_manager = ConversationManager(
+     knowledge_base= knowledge_base,
+     base_model= base_model,
+     embedding_model= embedding_model
+ )
+ ```
 
  - **Generation loop** - This is where we used the initialized components to perform operations
 
-```python
+ ```python
 
-# Creating new knowledge (Not necessary if you want to retrieve info from a previously created knowledge)
-knowledge_base.create_knowledge("engineering", user_summary="contains engineering files")
-knowledge_base.create_knowledge("medical", user_summary= "contains medical files")
+ # Creating new knowledge (Not necessary if you want to retrieve info from a previously created knowledge)
+ knowledge_base.create_knowledge("engineering", user_summary="contains engineering files")
+ knowledge_base.create_knowledge("medical", user_summary= "contains medical files")
 
-# Ingesting files
-ingestion.ingest(
-    knowledge_name= "engineering",
-    file_path= r"path/to/file.txt"
-)
-ingestion.ingest(
-    knowledge_name= "medical",
-    file_path= r"path/to/file.txt"
-)
+ # Ingesting files
+ ingestion.ingest(
+     knowledge_name= "engineering",
+     file_path= r"path/to/file.txt"
+ )
+ ingestion.ingest(
+     knowledge_name= "medical",
+     file_path= r"path/to/file.txt"
+ )
 
-# Creating Converstaion
-conversation_id = conversation_manager.create_conversation()
+ # Creating Converstaion
+ conversation_id = conversation_manager.create_conversation()
 
-# To open an existing conversation, set the conversation_id = the base name of the corresponding .conv file in the ./RAVEN/Conversations directory
+ # To open an existing conversation, set the conversation_id = the base name of the corresponding .conv file in the ./RAVEN/Conversations directory
 
-conversation = conversation_manager.get_conversation(conversation_id)
+ conversation = conversation_manager.get_conversation(conversation_id)
 
-# Initializing Session with that conversation
-session = ChatSession(
-    conversation= conversation,
-    knowledge_base= knowledge_base,
-    base_model= base_model,
-    embedding_model= embedding_model,
-)
+ # Initializing Session with that conversation
+ session = ChatSession(
+     conversation= conversation,
+     knowledge_base= knowledge_base,
+     base_model= base_model,
+     embedding_model= embedding_model,
+ )
 
-# Interacting with the model in that session
-# For normal chat loop
-while True:
-    user_query = input("\nUser: ")
+ # Interacting with the model in that session
+ # For normal chat loop
+ while True:
+     user_query = input("\nUser: ")
     
-    result = session.generate_response(user_query, retrieval_mode='auto')
+     result = session.generate_response(user_query, retrieval_mode='auto')
 
-    print("\nThinking:\n")
-    print(result.think)
+     print("\nThinking:\n")
+     print(result.think)
 
-    print("\nResponse:\n")
-    print(result.response)
+     print("\nResponse:\n")
+     print(result.response)
 
-    tool_name, tool_result = result.tool_name, result.tool_result
+     tool_name, tool_result = result.tool_name, result.tool_result
 
-    reconstructor = Reconstructor(knowledge_base)
-    reconstructed = reconstructor.reconstruct(tool_result, tool_name)
-    print(f"\nReconstructed:\n{reconstructed}\n")
-
-
-# For streaming chat loop
-while True:
-    user_query = input("\nUser:")
-    stream = session.generate_response_stream(user_query, retrieval_mode="auto")
-
-    tool_name = None
-    tool_result = None
-
-    print("\nRaven:")
-    for result in stream:
-
-        if result.think:
-            print(result.think, end="", flush=True)
-        if result.response:
-            print(result.response, end="", flush=True)
-
-        if result.tool_result and result.tool_name:
-            tool_name = result.tool_name
-            tool_result = result.tool_result
+     reconstructor = Reconstructor(knowledge_base)
+     reconstructed = reconstructor.reconstruct(tool_result, tool_name)
+     print(f"\nReconstructed:\n{reconstructed}\n")
 
 
-    reconstructor = Reconstructor(knowledge_base)
-    reconstructed = reconstructor.reconstruct(tool_result, tool_name)
-    print(f"\nReconstructed:\n{reconstructed}\n")
-```
+ # For streaming chat loop
+ while True:
+     user_query = input("\nUser:")
+     stream = session.generate_response_stream(user_query, retrieval_mode="auto")
+ 
+     tool_name = None
+     tool_result = None
 
-So, a complete code for the components setup will look like the following.
+     print("\nRaven:")
+     for result in stream:
 
-```python
-import os
-os.environ["RAVEN_HOME"] = r"./RAVEN"
+         if result.think:
+             print(result.think, end="", flush=True)
+         if result.response:
+             print(result.response, end="", flush=True)
 
-from raven.core import KnowledgeBase, ModelManager, setup_logging
-from raven.pipelines import IngestionPipeline
-from raven.session import ConversationManager, ChatSession
-from raven.reconstructor import Reconstructor
-
-setup_logging()
-
-# Initialize knowledge base and model manager
-knowledge_base = KnowledgeBase()
-model_manager = ModelManager()
-
-print("Initializing models...\n")
-base_model = model_manager.initiate_base_model()                
-# supports 3 base models: gemma-4-E2B-it, gemma-4-E4B-it, Qwen2.5-7B-instruct (experimental) in .gguf format.
-
-embedding_model = model_manager.initiate_embedding_model()
-sbd_model = model_manager.initiate_sbd_model()
-print("Models initialised\n")
+         if result.tool_result and result.tool_name:
+             tool_name = result.tool_name
+             tool_result = result.tool_result
 
 
-knowledge_base.create_knowledge("engineering", user_summary="contains engineering files")
-knowledge_base.create_knowledge("medical", user_summary= "contains medical files")
+     reconstructor = Reconstructor(knowledge_base)
+     reconstructed = reconstructor.reconstruct(tool_result, tool_name)
+     print(f"\nReconstructed:\n{reconstructed}\n")
+ ```
 
-ingestion = IngestionPipeline(
-    knowledge_base= knowledge_base,
-    base_model= base_model,
-    embedding_model= embedding_model,
-    sbd_model= sbd_model
-)
+  - Complete code for a component setup
 
-print("Ingesting...\n")
-ingestion.ingest(
-    knowledge_name= "engineering",
-    file_path= r"path/to/file.txt"
-)
-ingestion.ingest(
-    knowledge_name= "medical",
-    file_path= r"path/to/file.txt"
-)
-print("Ingestion complete\n")
+ ```python
+ import os
+ os.environ["RAVEN_HOME"] = r"./RAVEN"
 
-conversation_manager = ConversationManager(
-    knowledge_base= knowledge_base,
-    base_model= base_model,
-    embedding_model= embedding_model
-)
-conversation_id = conversation_manager.create_conversation()
-conversation = conversation_manager.get_conversation(conversation_id)
+ from raven.core import KnowledgeBase, ModelManager, setup_logging
+ from raven.pipelines import IngestionPipeline
+ from raven.session import ConversationManager, ChatSession
+ from raven.reconstructor import Reconstructor
 
-session = ChatSession(
-    conversation= conversation,
-    knowledge_base= knowledge_base,
-    base_model= base_model,
-    embedding_model= embedding_model,
-)
+ setup_logging()
 
-# For normal chat loop
-while True:
-    user_query = input("\nUser: ")
-    
-    result = session.generate_response(user_query, retrieval_mode='auto')
+ # Initialize knowledge base and model manager
+ knowledge_base = KnowledgeBase()
+ model_manager = ModelManager()
 
-    print("\nThinking:\n")
-    print(result.think)
+ print("Initializing models...\n")
+ base_model = model_manager.initiate_base_model()                
+ # supports 3 base models: gemma-4-E2B-it, gemma-4-E4B-it, Qwen2.5-7B-instruct (experimental) in .gguf format.
 
-    print("\nResponse:\n")
-    print(result.response)
-
-    tool_name, tool_result = result.tool_name, result.tool_result
-
-    reconstructor = Reconstructor(knowledge_base)
-    reconstructed = reconstructor.reconstruct(tool_result, tool_name)
-    print(f"\nReconstructed:\n{reconstructed}\n")
+ embedding_model = model_manager.initiate_embedding_model()
+ sbd_model = model_manager.initiate_sbd_model()
+ print("Models initialised\n")
 
 
-# For streaming chat loop
-while True:
-    user_query = input("\nUser:")
-    stream = session.generate_response_stream(user_query, retrieval_mode="auto")
+ knowledge_base.create_knowledge("engineering", user_summary="contains engineering files")
+ knowledge_base.create_knowledge("medical", user_summary= "contains medical files")
 
-    tool_name = None
-    tool_result = None
+ ingestion = IngestionPipeline(
+     knowledge_base= knowledge_base,
+     base_model= base_model,
+     embedding_model= embedding_model,
+     sbd_model= sbd_model
+ )
 
-    print("\nRaven:")
-    for result in stream:
+ print("Ingesting...\n")
+ ingestion.ingest(
+     knowledge_name= "engineering",
+     file_path= r"path/to/file.txt"
+ )
+ ingestion.ingest(
+     knowledge_name= "medical",
+     file_path= r"path/to/file.txt"
+ )
+ print("Ingestion complete\n")
 
-        if result.think:
-            print(result.think, end="", flush=True)
-        if result.response:
-            print(result.response, end="", flush=True)
+ conversation_manager = ConversationManager(
+     knowledge_base= knowledge_base,
+     base_model= base_model,
+     embedding_model= embedding_model
+ )
+ conversation_id = conversation_manager.create_conversation()
+ conversation = conversation_manager.get_conversation(conversation_id)
 
-        if result.tool_result and result.tool_name:
-            tool_name = result.tool_name
-            tool_result = result.tool_result
+ session = ChatSession(
+     conversation= conversation,
+     knowledge_base= knowledge_base,
+     base_model= base_model,
+     embedding_model= embedding_model,
+ )
+
+ # For normal chat loop
+ while True:
+     user_query = input("\nUser: ")
+     
+     result = session.generate_response(user_query, retrieval_mode='auto')
+
+     print("\nThinking:\n")
+     print(result.think)
+
+     print("\nResponse:\n")
+     print(result.response)
+
+     tool_name, tool_result = result.tool_name, result.tool_result
+
+     reconstructor = Reconstructor(knowledge_base)
+     reconstructed = reconstructor.reconstruct(tool_result, tool_name)
+     print(f"\nReconstructed:\n{reconstructed}\n")
 
 
-    reconstructor = Reconstructor(knowledge_base)
-    reconstructed = reconstructor.reconstruct(tool_result, tool_name)
-    print(f"\nReconstructed:\n{reconstructed}\n")
-```
+ # For streaming chat loop
+ while True:
+     user_query = input("\nUser:")
+     stream = session.generate_response_stream(user_query, retrieval_mode="auto")
+
+     tool_name = None
+     tool_result = None
+
+     print("\nRaven:")
+     for result in stream:
+
+         if result.think:
+             print(result.think, end="", flush=True)
+         if result.response:
+             print(result.response, end="", flush=True)
+ 
+         if result.tool_result and result.tool_name:
+             tool_name = result.tool_name
+             tool_result = result.tool_result
+
+
+     reconstructor = Reconstructor(knowledge_base)
+     reconstructed = reconstructor.reconstruct(tool_result, tool_name)
+     print(f"\nReconstructed:\n{reconstructed}\n")
+ ```
 
 ## Status in components
 
