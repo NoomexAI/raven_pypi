@@ -66,11 +66,6 @@ while True:
 
     print("\nResponse:\n")
     print(result.response)
-
-    tool_name, tool_result = result.tool_name, result.tool_result
-
-    print("\nReconstruct:\n")
-    print(api.reconstruct(tool_result, tool_name))
 ```
 
 ## Status
@@ -150,7 +145,7 @@ You can access those status fileds using **s.registry** parameter.
 ```python
 from raven.status import Status
 
-s = status()
+s = Status()
 print(s.registry.LOADING_BASE_MODEL)
 
 # To see all of the fields
@@ -213,6 +208,46 @@ while True:
 
     # generate_response_stream returns a Generator[ChatResult] object
 
+    print("\nRaven:")
+    for result in stream:
+        if result.think:
+            print(result.think, end="", flush=True)
+        if result.response:
+            print(result.response, end="", flush=True)
+```
+
+## Source Reconstruction
+
+RAVEN features a source reconstruction functionality that let's you reconstruct the source after retrieval. The sections from the reconstructed source that the model used for answering your question has a **"highlighted": True** field.
+
+```python
+import raven
+
+api = raven.Raven()
+session = api.session()
+
+while True:
+    user_query = input("\nUser: ")
+    result = session.generate_response(user_query, retrieval_mode='auto')
+
+    print("\nThinking:\n")
+    print(result.think)
+
+    print("\nResponse:\n")
+    print(result.response)
+
+    # Reconstructor needs the tool_result and tool_name to work
+    tool_name, tool_result = result.tool_name, result.tool_result
+
+    print("\nReconstructed:\n")
+    print(api.reconstruct(tool_result, tool_name))
+
+
+# For streaming
+while True:
+    user_query = input("\nUser:")
+    stream = session.generate_response_stream(user_query, retrieval_mode="auto")
+
     tool_name = None
     tool_result = None
 
@@ -227,14 +262,139 @@ while True:
         if result.tool_result and result.tool_name:
             tool_name = result.tool_name
             tool_result = result.tool_result
-    
-    print("\nReconstruct:\n")
-    print(api.reconstruct(tool_result, tool_name))
+
+
+    reconstructor = Reconstructor(knowledge_base)
+    reconstructed = reconstructor.reconstruct(tool_result, tool_name)
+    print(f"\nReconstructed:\n{reconstructed}\n")
 ```
 
 ## Components
 
 For development environment it's better to use individual components explicitly to control the data flow.
+
+ - **Initialization** - This is the part where you initialize all the components according to their dependency order.
+ 
+```python
+from raven.core import KnowledgeBase, ModelManager, setup_logging
+from raven.pipelines import IngestionPipeline
+from raven.session import ConversationManager, ChatSession
+from raven.reconstructor import Reconstructor
+
+setup_logging()
+
+# ============== KnowledgeBase and ModelManager ===================
+
+knowledge_base = KnowledgeBase()
+model_manager = ModelManager()
+
+# ============== Models ============================================
+
+base_model = model_manager.initiate_base_model()                
+# supports 3 base models: gemma-4-E2B-it, gemma-4-E4B-it, Qwen2.5-7B-instruct (experimental) in .gguf format.
+
+embedding_model = model_manager.initiate_embedding_model()
+sbd_model = model_manager.initiate_sbd_model()
+
+# ==============IngestionPipeline ==================================
+
+# Only Initialize ingestion if you plan to ingest files in Knowledges
+ingestion = IngestionPipeline(
+    knowledge_base= knowledge_base,
+    base_model= base_model,
+    embedding_model= embedding_model,
+    sbd_model= sbd_model
+)
+
+# =============== ConversationManager ===============================
+
+conversation_manager = ConversationManager(
+    knowledge_base= knowledge_base,
+    base_model= base_model,
+    embedding_model= embedding_model
+)
+```
+
+ - **Generation loop** - This is where we used the initialized components to perform operations
+
+```python
+
+# Creating new knowledge (Not necessary if you want to retrieve info from a previously created knowledge)
+knowledge_base.create_knowledge("engineering", user_summary="contains engineering files")
+knowledge_base.create_knowledge("medical", user_summary= "contains medical files")
+
+# Ingesting files
+ingestion.ingest(
+    knowledge_name= "engineering",
+    file_path= r"path/to/file.txt"
+)
+ingestion.ingest(
+    knowledge_name= "medical",
+    file_path= r"path/to/file.txt"
+)
+
+# Creating Converstaion
+conversation_id = conversation_manager.create_conversation()
+
+# To open an existing conversation, set the conversation_id = the base name of the corresponding .conv file in the ./RAVEN/Conversations directory
+
+conversation = conversation_manager.get_conversation(conversation_id)
+
+# Initializing Session with that conversation
+session = ChatSession(
+    conversation= conversation,
+    knowledge_base= knowledge_base,
+    base_model= base_model,
+    embedding_model= embedding_model,
+)
+
+# Interacting with the model in that session
+# For normal chat loop
+while True:
+    user_query = input("\nUser: ")
+    
+    result = session.generate_response(user_query, retrieval_mode='auto')
+
+    print("\nThinking:\n")
+    print(result.think)
+
+    print("\nResponse:\n")
+    print(result.response)
+
+    tool_name, tool_result = result.tool_name, result.tool_result
+
+    reconstructor = Reconstructor(knowledge_base)
+    reconstructed = reconstructor.reconstruct(tool_result, tool_name)
+    print(f"\nReconstructed:\n{reconstructed}\n")
+
+
+# For streaming chat loop
+while True:
+    user_query = input("\nUser:")
+    stream = session.generate_response_stream(user_query, retrieval_mode="auto")
+
+    tool_name = None
+    tool_result = None
+
+    print("\nRaven:")
+    for result in stream:
+
+        if result.think:
+            print(result.think, end="", flush=True)
+        if result.response:
+            print(result.response, end="", flush=True)
+
+        if result.tool_result and result.tool_name:
+            tool_name = result.tool_name
+            tool_result = result.tool_result
+
+
+    reconstructor = Reconstructor(knowledge_base)
+    reconstructed = reconstructor.reconstruct(tool_result, tool_name)
+    print(f"\nReconstructed:\n{reconstructed}\n")
+```
+
+So, a complete code for the components setup will look like the following.
 
 ```python
 import os
