@@ -417,12 +417,15 @@ class ChatSession:
     def generate_response(self, user_text: str, retrieval_mode = "auto") -> ChatResult:                     #type: ignore
         try:
             if not self.title_generated:
-                self.set_status(self.s.registry.GENERATING_TITLE)                                                          #type: ignore
+                if self.s is not None:
+                    self.s.status = self.s.registry.GENERATING_TITLE                                                          #type: ignore
+                
                 title = self._generate_title(user_text)
 
                 if title:
                     self.conversation.update_title(title)
-                    self.set_status(self.s.registry.TITLE_GENERATED)                                                       #type: ignore
+                    if self.s is not None:
+                        self.s.status = self.s.registry.TITLE_GENERATED                                                       #type: ignore
                 else:
                     logger.error(f"Invalid title: {title}")
                     raise ValueError(f"Invalid title: {title}")
@@ -439,7 +442,8 @@ class ChatSession:
 
             active_tools = self.get_active_tools(retrieval_mode)
 
-            self.set_status(self.s.registry.GENERATING_RESPONSE)                                                          #type: ignore 
+            if self.s is not None:
+                self.s.status = self.s.registry.GENERATING_RESPONSE                                                          #type: ignore 
             initial_response = self.base_model.create_chat_completion(
                 messages=self.messages,
                 tools=active_tools,
@@ -484,7 +488,8 @@ class ChatSession:
                     self.conversation.append_message("tool_result", f"tool_name: {tool_name}, tool_result: {tool_result}")
 
                     if not tool_name in ['get_memory', 'save_preference']:
-                        self.set_status(self.s.registry.RETRIEVED_SECTIONS)                                                 #type: ignore
+                        if self.s is not None:
+                            self.s.status = self.s.registry.RETRIEVED_SECTIONS                                                 #type: ignore
                 
                     final_response = self.base_model.create_chat_completion(
                         messages=self.messages,
@@ -515,7 +520,8 @@ class ChatSession:
                     if tool_name not in ["get_memory", "save_preference"]:
                         self.conversation.save_retrieved_sections(message_id, tool_result)                  #type: ignore
 
-                    self.set_status(self.s.registry.RESPONSE_COMPLETE)                                                    #type: ignore
+                    if self.s is not None:
+                        self.s.status = self.s.registry.RESPONSE_COMPLETE                                                    #type: ignore
                     logger.info(f"Response generated for conversation: {self.conversation.conversation_id}")
                     return ChatResult(response=response, think=thinking_block, tool_result=tool_result, tool_name=tool_name)
 
@@ -526,7 +532,8 @@ class ChatSession:
 
                 self.total_tokens += len(self.base_model.tokenize(response.encode("utf-8")))
 
-                self.set_status(self.s.registry.RESPONSE_COMPLETE)                                                        #type: ignore
+                if self.s is not None:
+                    self.s.status = self.s.registry.RESPONSE_COMPLETE                                                        #type: ignore
                 logger.info(f"Response generated for conversation: {self.conversation.conversation_id}")
                 return ChatResult(response=response, think= thinking_block)
 
@@ -538,12 +545,14 @@ class ChatSession:
     def generate_response_stream(self, user_text: str, retrieval_mode= "auto"):
         try:
             if not self.title_generated:
-                self.set_status(self.s.registry.GENERATING_TITLE)                                                          #type: ignore
+                if self.s is not None:
+                    self.s.status = self.s.registry.GENERATING_TITLE                                                          #type: ignore
                 title = self._generate_title(user_text)
 
                 if title:
                     self.conversation.update_title(title)
-                    self.set_status(self.s.registry.TITLE_GENERATED)                                                       #type: ignore
+                    if self.s is not None:
+                        self.s.status = self.s.registry.TITLE_GENERATED                                                       #type: ignore
                 else:
                     logger.error(f"Invalid title: {title}")
                     raise ValueError(f"Invalid title: {title}")
@@ -556,7 +565,8 @@ class ChatSession:
 
             self._trim_messages()
 
-            self.set_status(self.s.registry.GENERATING_RESPONSE)                                                       #type: ignore
+            if self.s is not None:
+                self.s.status = self.s.registry.GENERATING_RESPONSE                                                       #type: ignore
             initial_stream = self.base_model.create_chat_completion(
                 messages=self.messages,
                 tools=self.get_active_tools(retrieval_mode),
@@ -592,12 +602,14 @@ class ChatSession:
 
                 if "<|channel>" in delta:
                     in_thinking = True
-                    self.set_status(self.s.registry.THINKING_START)                                                    #type: ignore
+                    if self.s is not None:
+                        self.s.status = self.s.registry.THINKING_START                                                    #type: ignore
                     continue
 
                 if "<channel|>" in delta:
                     in_thinking = False
-                    self.set_status(self.s.registry.THINKING_END)                                                      #type: ignore
+                    if self.s is not None:
+                        self.s.status = self.s.registry.THINKING_END                                                      #type: ignore
                     continue
 
                 if in_thinking:
@@ -615,10 +627,12 @@ class ChatSession:
                         yield ChatResult(response=delta)
 
             if tool_call_detected:
-                self.set_status(self.s.registry.TOOL_CALL_DETECTED)                                                            #type: ignore
+                if self.s is not None:
+                    self.s.status = self.s.registry.TOOL_CALL_DETECTED                                                            #type: ignore
                 tool_name, tool_result = self.parse_tool_call(accumulated)
                 
-                self.set_status(self.s.registry.RETRIEVED_SECTIONS)                                                            #type: ignore
+                if self.s is not None:
+                    self.s.status = self.s.registry.RETRIEVED_SECTIONS                                                            #type: ignore
 
                 self.total_tokens += len(self.base_model.tokenize(f"tool_name:{tool_name}, tool_result: {tool_result}".encode("utf-8")))
                 self.messages.append({"role": "tool_result", "content": f"tool_name:{tool_name}, tool_result: {tool_result}"})
@@ -649,12 +663,14 @@ class ChatSession:
 
                     if "<|channel>" in delta:
                         in_thinking = True
-                        self.set_status(self.s.registry.THINKING_START)                                                #type: ignore
+                        if self.s is not None:
+                            self.s.status = self.s.registry.THINKING_START                                                #type: ignore
                         continue
 
                     if "<channel|>" in delta:
                         in_thinking = False
-                        self.set_status(self.s.registry.THINKING_END)                                                  #type: ignore
+                        if self.s is not None:
+                            self.s.status = self.s.registry.THINKING_END                                                  #type: ignore
                         continue
 
                     if in_thinking:
@@ -671,7 +687,8 @@ class ChatSession:
             if tool_call_detected and tool_name not in ["get_memory", "save_preference"] and tool_result:
                 self.conversation.save_retrieved_sections(message_id, tool_result)                          #type: ignore
 
-            self.set_status(self.s.registry.RESPONSE_COMPLETE)                                                             #type: ignore
+            if self.s is not None:
+                self.s.status = self.s.registry.RESPONSE_COMPLETE                                                             #type: ignore
             logger.info(f"Streaming response complete for conversation: {self.conversation.conversation_id}")
             yield ChatResult(tool_result=tool_result, tool_name=tool_name)
 
@@ -810,10 +827,3 @@ class ChatSession:
         except Exception as e:
             logger.error(f"Failed to trim messages: {e}")
             raise
-
-    
-    def set_status(self, status):
-        if self.s:
-            self.s.status =status
-        else:
-            return

@@ -1,6 +1,7 @@
 import os
 from importlib.resources import files
 from platformdirs import PlatformDirs
+from dataclasses import dataclass, fields
 
 RAVEN_HOME = os.environ.get("RAVEN_HOME")
 
@@ -36,6 +37,27 @@ DEFAULT_MODEL_PARAMETERS = {
     "n_threads": 6,
 }
 
+
+# Retrieval Modes
+@dataclass
+class RetrievalModes:
+    AUTO: str = "auto"
+
+    LOCAL_EMBEDDED_RETRIEVAL: str = "local_embedded_retrieval"
+    LOCAL_HIERARCHICAL_RETRIEVAL: str = "local_hierarchical_retrieval"
+    LOCAL_AGREEMENT_BASED_RETRIEVAL: str = "local_agreement_retrieval"
+    LOCAL_VECTOR_CONDITIONED_RETRIEVAL: str = "local_vector_conditioned_retrieval"
+
+    GLOBAL_EMBEDDED_RETRIEVAL: str = "global_embedded_retrieval"
+    GLOBAL_HIERARCHICAL_RETRIEVAL: str = "global_hierarchical_retrieval"
+    GLOBAL_AGREEMENT_BASED_RETRIEVAL: str = "global_agreement_retrieval"
+    GLOBAL_VECTOR_CONDITIONED_RETRIEVAL: str = "global_vector_conditioned_retrieval"
+
+    def list_all(self) -> dict[str, str]:
+        return {f.name: getattr(self, f.name) for f in fields(self)}
+
+
+# Base Model Catalog
 MODEL_CATALOG = [
     {
         "display_name": "Gemma 4 E2B-it",
@@ -60,6 +82,7 @@ MODEL_CATALOG = [
     },
 ]
 
+# Prompts
 INGESTION_SYSTEM_PROMPT = """<|think|>
     You are a precise data extraction agent. Your task is to process unstructured text into a strict, machine-readable JSON object.
     You'll be provided with indexed text chunks of a file.

@@ -1,5 +1,6 @@
 from raven.core._knowledge_base import KnowledgeBase
 from raven.core._model_manager import ModelManager
+from raven.core.constants import RetrievalModes
 from raven.session._conversation_manager import ConversationManager
 from raven.session._chat_session import ChatSession
 from raven.pipelines._pipeline import IngestionPipeline, RetrievalPipeline
@@ -49,6 +50,7 @@ class Raven:
         self.s = s
         self._knowledge_base = KnowledgeBase()
         self._model_manager = ModelManager(s=self.s)
+        self.retrieval_mode = RetrievalModes()
 
         self._base_model = self._model_manager.initiate_base_model(base_model_name, **base_model_parameters)                               #type: ignore
         self._embedding_model = self._model_manager.initiate_embedding_model(**embedding_model_parameters)

@@ -1,4 +1,4 @@
-from raven.core._constants import BASE_MODEL_DIR, EMBEDDING_MODEL_DIR, SBD_MODEL_DIR, MODEL_CATALOG
+from raven.core.constants import BASE_MODEL_DIR, EMBEDDING_MODEL_DIR, SBD_MODEL_DIR, MODEL_CATALOG
 from raven.core._downloader import Downloader
 
 from raven.status._status import Status
@@ -72,14 +72,16 @@ class ModelManager:
         parameters.update(kwargs)
 
         start_time = time.time()
-        self.set_status(self.s.registry.LOADING_BASE_MODEL)                                                                #type: ignore
+        if self.s is not None:
+            self.s.status = self.s.registry.LOADING_BASE_MODEL                                                                #type: ignore
         try:
             self.base_model = Llama(
                 model_path=self.base_model_path,
                 **parameters
             )
             logger.info(f"Base model loaded in: {time.time() - start_time:.2f}s")
-            self.set_status(self.s.registry.BASE_MODEL_LOADED)                                                             #type: ignore
+            if self.s is not None:
+                self.s.status = self.s.registry.BASE_MODEL_LOADED                                                             #type: ignore
             return self.base_model
         except Exception as e:
             logger.error(f"Failed to load base model: {e}")
@@ -108,14 +110,16 @@ class ModelManager:
         parameters.update(kwargs)
 
         start_time = time.time()
-        self.set_status(self.s.registry.LOADING_EMBEDDING_MODEL)                                                           #type: ignore
+        if self.s is not None:
+            self.s.status = self.s.registry.LOADING_EMBEDDING_MODEL                                                           #type: ignore
         try:
             self.embedding_model = Llama(
                 model_path= self.embedding_model_path,
                 **parameters
             )
             logger.info(f"Embedding model loaded in: {time.time() - start_time:.2f}s")
-            self.set_status(self.s.registry.EMBEDDING_MODEL_LOADED)                                                        #type: ignore
+            if self.s is not None:
+                self.s.status = self.s.registry.EMBEDDING_MODEL_LOADED                                                        #type: ignore
             return self.embedding_model
         except Exception as e:
             logger.error(f"Failed to load embedding model: {e}")
@@ -136,7 +140,8 @@ class ModelManager:
         logger.info(f"Loading SBD model: sat-3l-sm")
 
         start_time = time.time()
-        self.set_status(self.s.registry.LOADING_SBD_MODEL)                                                                 #type: ignore
+        if self.s is not None:
+            self.s.status = self.s.registry.LOADING_SBD_MODEL                                                                 #type: ignore
         try:
             self.sbd_model = SaT(self.sbd_model_path)
             logger.info(f"SBD model loaded in: {time.time() - start_time:.2f}s")
@@ -144,7 +149,8 @@ class ModelManager:
             os.environ["HF_HUB_OFFLINE"] = "0"
             constants.HF_HUB_OFFLINE = False
 
-            self.set_status(self.s.registry.SBD_MODEL_LOADED)                                                              #type: ignore
+            if self.s is not None:
+                self.s.status = self.s.registry.SBD_MODEL_LOADED                                                              #type: ignore
             return self.sbd_model
         except Exception as e:
             logger.error(f"Failed to load SBD model: {e}")
@@ -159,12 +165,14 @@ class ModelManager:
         logger.info(f"Downloading default model: {display_name}")
         
         try:
-            self.set_status(self.s.registry.DOWNLOADING_BASE_MODEL)                                                        #type: ignore
+            if self.s is not None:
+                self.s.status = self.s.registry.DOWNLOADING_BASE_MODEL                                                        #type: ignore
             Downloader.download(entry["repo_id"], entry["file_name"], self.base_model_dir)
             logger.info(f"Default model downloaded: {display_name}")
             self.base_models = os.listdir(self.base_model_dir) if os.path.exists(self.base_model_dir) else []
 
-            self.set_status(self.s.registry.BASE_MODEL_DOWNLOADED)                                                         #type: ignore
+            if self.s is not None:
+                self.s.status = self.s.registry.BASE_MODEL_DOWNLOADED                                                         #type: ignore
             logger.info("Initializing models")
         except Exception as e:
             logger.error(f"Failed to download {display_name}: {e}")
@@ -178,11 +186,13 @@ class ModelManager:
         logger.info(f"Downloading embedding model: {embedding_model_name}")
         
         try:
-            self.set_status(self.s.registry.DOWNLOADING_EMBEDDING_MODEL)                                                   #type: ignore
+            if self.s is not None:
+                self.s.status = self.s.registry.DOWNLOADING_EMBEDDING_MODEL                                                   #type: ignore
             Downloader.download(repo_id, embedding_model_name, self.embedding_model_dir)
             self.embedding_models = os.listdir(self.embedding_model_dir) if os.path.exists(self.embedding_model_dir) else []
 
-            self.set_status(self.s.registry.EMBEDDING_MODEL_DOWNLOADED)                                                    #type: ignore
+            if self.s is not None:
+                self.s.status = self.s.registry.EMBEDDING_MODEL_DOWNLOADED                                                    #type: ignore
             logger.info(f"Embedding model downloaded: {embedding_model_name}")
         except Exception as e:
             logger.error(f"Failed to download embedding model: {e}")
@@ -198,7 +208,8 @@ class ModelManager:
             ("model_optimized.onnx", "segment-any-text/sat-3l-sm"),
         ]
         
-        self.set_status(self.s.registry.DOWNLOADING_SBD_MODEL)                                                             #type: ignore
+        if self.s is not None:
+            self.s.status = self.s.registry.DOWNLOADING_SBD_MODEL                                                             #type: ignore
         for file_name, repo_id in files_to_download:
             logger.info(f"Downloading SBD file: {file_name}")
             
@@ -208,11 +219,7 @@ class ModelManager:
                 logger.error(f"Failed to download SBD file {file_name}: {e}")
                 raise
         
-        self.set_status(self.s.registry.SBD_MODEL_DOWNLOADED)                                                              #type: ignore
+        if self.s is not None:
+            self.s.status = self.s.registry.SBD_MODEL_DOWNLOADED                                                              #type: ignore
         logger.info("SBD model downloaded: sat-3l-sm")
         self.sbd_models = os.listdir(self.sbd_model_dir) if os.path.exists(self.sbd_model_dir) else []
-
-    
-    def set_status(self, status):
-        if self.s:
-            self.s.status = status

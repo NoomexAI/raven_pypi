@@ -1,4 +1,5 @@
 from dataclasses import dataclass, fields
+from typing import TypeVar, Generic
 
 @dataclass
 class StatusRegistry:
@@ -40,14 +41,18 @@ class StatusRegistry:
         return {f.name: getattr(self, f.name) for f in fields(self)}
 
 
-class Status:
-    def __init__(self, initial_status=None, on_change=None, registry: StatusRegistry|None=None):
+
+
+T = TypeVar("T", bound=StatusRegistry)
+
+class Status(Generic[T]):
+    def __init__(self, initial_status=None, on_change=None, registry: T | None=None):
         self._status = initial_status
         self._listeners = {}
         self.on_change = on_change
 
         if registry is None:
-            self.registry = StatusRegistry()
+            self.registry: T = StatusRegistry()             #type: ignore
         else:
             if not isinstance(registry, StatusRegistry):
                 raise RuntimeError("registry must be an instance of StatusRegistry")

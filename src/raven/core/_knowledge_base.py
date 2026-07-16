@@ -7,7 +7,7 @@ import logging
 from llama_cpp import Llama
 from sqlite3 import Cursor
 
-from raven.core._constants import CHUNK_SIZE, CHUNK_OVERLAP, KNOWLEDGE_BASE_DIR
+from raven.core.constants import CHUNK_SIZE, CHUNK_OVERLAP, KNOWLEDGE_BASE_DIR
 
 logger = logging.getLogger(__name__)
 

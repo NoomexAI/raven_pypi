@@ -216,6 +216,41 @@ while True:
             print(result.response, end="", flush=True)
 ```
 
+## Retrieval Modes
+
+Raven features 4 main retrieval modes each one with a **local** and **global** variant. Local modes are for searching a single **Knowledge** database where Global modes are for searching across the whole **KnowledgeBase**.
+
+```python
+@dataclass
+class RetrievalModes:                               # defined in raven.core.constants. also exposed through api.retrieval_mode
+    AUTO: str = "auto"
+
+    LOCAL_EMBEDDED_RETRIEVAL: str = "local_embedded_retrieval"
+    LOCAL_HIERARCHICAL_RETRIEVAL: str = "local_hierarchical_retrieval"
+    LOCAL_AGREEMENT_BASED_RETRIEVAL: str = "local_agreement_retrieval"
+    LOCAL_VECTOR_CONDITIONED_RETRIEVAL: str = "local_vector_conditioned_retrieval"
+
+    GLOBAL_EMBEDDED_RETRIEVAL: str = "global_embedded_retrieval"
+    GLOBAL_HIERARCHICAL_RETRIEVAL: str = "global_hierarchical_retrieval"
+    GLOBAL_AGREEMENT_BASED_RETRIEVAL: str = "global_agreement_retrieval"
+    GLOBAL_VECTOR_CONDITIONED_RETRIEVAL: str = "global_vector_conditioned_retrieval"
+
+    def list_all(self) -> dict[str, str]:
+        return {f.name: getattr(self, f.name) for f in fields(self)}
+```
+
+You can use either the strings or the fields. To use the fields, you can use **api.retrieval_mode**.
+
+```python
+# Two ways to use retrieval modes
+result = session.generate_response(user_query, retrieval_mode= 'auto')
+result = session.generate_response(user_query, retrieval_mode= api.retrieval_mode.AUTO)
+
+# Same works for streaming
+stream = session.generate_response_stream(user_query, retrieval_mode= "local_hierarchical_retrieval")
+stream = session.generate_response_stream(user_query, retrieval_mode= api.retrieval_mode.LOCAL_HIERARCHICAL_RETRIEVAL)
+```
+
 ## Source Reconstruction
 
 RAVEN features a source reconstruction functionality that let's you reconstruct the source after retrieval. The sections from the reconstructed source that the model used for answering your question has a **"highlighted": True** field.
@@ -280,8 +315,12 @@ For development environment it's better to use individual components explicitly 
  from raven.pipelines import IngestionPipeline
  from raven.session import ConversationManager, ChatSession
  from raven.reconstructor import Reconstructor
+ from raven.core.constants import RetrievalModes
 
  setup_logging()
+
+ # ============== Retrieval modes =================================
+ retrieval_mode = RetrievalMode()                                       # if you plan to use fileds.
 
  # ============== KnowledgeBase and ModelManager ===================
 
@@ -353,7 +392,7 @@ For development environment it's better to use individual components explicitly 
  while True:
      user_query = input("\nUser: ")
     
-     result = session.generate_response(user_query, retrieval_mode='auto')
+     result = session.generate_response(user_query, retrieval_mode = retrieval_mode.AUTO)
 
      print("\nThinking:\n")
      print(result.think)
@@ -371,7 +410,7 @@ For development environment it's better to use individual components explicitly 
  # For streaming chat loop
  while True:
      user_query = input("\nUser:")
-     stream = session.generate_response_stream(user_query, retrieval_mode="auto")
+     stream = session.generate_response_stream(user_query, retrieval_mode= retieval_mode.AUTO)
  
      tool_name = None
      tool_result = None

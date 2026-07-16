@@ -1,6 +1,6 @@
 import logging
 import os
-from raven.core._constants import ROOT_DIR
+from raven.core.constants import ROOT_DIR
 
 def setup_logging():
     os.makedirs(ROOT_DIR, exist_ok=True)

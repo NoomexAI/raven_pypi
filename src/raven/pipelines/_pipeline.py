@@ -8,8 +8,8 @@ import logging
 import time
 from wtpsplit_lite import SaT
 
-from raven.core._constants import INGESTION_SYSTEM_PROMPT, SUBFILE_SIZE, GRAMMAR_DIR, SENTENCES_PER_CHUNK
-from raven.core._constants import HIERARCHICAL_RETRIEVAL_SYSTEM_PROMPT, HIERARCHICAL_RETRIEVAL_SUMMARY_SYSTEM_PROMPT
+from raven.core.constants import INGESTION_SYSTEM_PROMPT, SUBFILE_SIZE, GRAMMAR_DIR, SENTENCES_PER_CHUNK
+from raven.core.constants import HIERARCHICAL_RETRIEVAL_SYSTEM_PROMPT, HIERARCHICAL_RETRIEVAL_SUMMARY_SYSTEM_PROMPT
 from raven.core._knowledge_base import KnowledgeBase
 from raven.status._status import Status
 
@@ -138,7 +138,8 @@ class IngestionPipeline:
 
                 self.grammar = LlamaGrammar.from_json_schema(json.dumps(schema))
 
-                self.set_status(self.s.registry.INGESTION_GRAMMAR_ENFORCED)                                         #type: ignore
+                if self.s is not None:
+                    self.s.status = self.s.registry.INGESTION_GRAMMAR_ENFORCED                                         #type: ignore
                 logger.info("Ingestion Pipeline initialized with grammar stabilization")
             else:
                 logger.info("Ingestion Pipeline initialized without grammar stabilization")
@@ -152,9 +153,11 @@ class IngestionPipeline:
 
         logger.info("Reading files...")
 
-        self.set_status(self.s.registry.SUBDIVIDING_FILE)                                                         #type: ignore
+        if self.s is not None:
+            self.s.status = self.s.registry.SUBDIVIDING_FILE                                                         #type: ignore
         file_subdivisions = self._subdivide_file_by_tokens(file_path, SUBFILE_SIZE)
-        self.set_status(self.s.registry.FILE_SUBDIVIDED)                                                           #type: ignore
+        if self.s is not None:
+            self.s.status = self.s.registry.FILE_SUBDIVIDED                                                           #type: ignore
 
         logger.info("Running inference")
 
@@ -162,7 +165,8 @@ class IngestionPipeline:
 
         file_subdivisions_dicts = []
 
-        self.set_status(self.s.registry.INGESTION_INFERENCE_RUNNING)                                               #type: ignore
+        if self.s is not None:
+            self.s.status = self.s.registry.INGESTION_INFERENCE_RUNNING                                               #type: ignore
         
         for i, subfile_text in enumerate(file_subdivisions):
             logger.info(f"Running inference on subfile: {i+1}/{len(file_subdivisions)}")
@@ -204,7 +208,8 @@ class IngestionPipeline:
                     else:
                         logger.error(f"Sub-File {i+1} skipped after {max_retries} failed attempts")
 
-        self.set_status(self.s.registry.INGESTION_INFERENCE_COMPLETE)                                          #type: ignore
+        if self.s is not None:
+            self.s.status = self.s.registry.INGESTION_INFERENCE_COMPLETE                                          #type: ignore
         
         file_json = {
             "sections": file_subdivisions_dicts
@@ -214,18 +219,17 @@ class IngestionPipeline:
 
         self.knowledge = self.knowledge_base.get_knowledge(knowledge_name)
 
-        self.set_status(self.s.registry.INGESTING)                                                             #type: ignore
+        if self.s is not None:
+            self.s.status = self.s.registry.INGESTING                                                             #type: ignore
         self.knowledge.ingest(
             file_name,
             file_json,                                                 
             embedder= self.embedding_model
         )
-        self.set_status(self.s.registry.INGESTION_COMPLETE)                                                    #type: ignore
+        if self.s is not None:
+            self.s.status = self.s.registry.INGESTION_COMPLETE                                                    #type: ignore
         logger.info("Ingestion Complete")
 
-    def set_status(self, status):
-        if self.s:
-            self.s.status = status
 
 
 

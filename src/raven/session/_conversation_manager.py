@@ -9,7 +9,7 @@ import uuid
 import shutil
 import gc
 
-from raven.core._constants import CONVERSATION_DIR
+from raven.core.constants import CONVERSATION_DIR
 
 
 logger = logging.getLogger(__name__)

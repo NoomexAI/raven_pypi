@@ -1,6 +1,6 @@
 """Pipeline submodule: ingestion and retrieval pipelines."""
 
-from raven.pipelines._pipeline import (
+from ._pipeline import (
     IngestionPipeline,
     RetrievalPipeline,
     EmbeddedRetrievalPipeline,
