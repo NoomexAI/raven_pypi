@@ -34,9 +34,11 @@ from .pipeline import (
 from .reconstructor import Reconstructor
 from .chat_session import ChatSession
 from .local_ollama import LocalOllama
+from .high_level_api import Raven
 
 __all__ = [
     "ChatSession",
+    "Raven",
     "Conversation",
     "ConversationManager",
     "DEFAULT_BASE_MODEL",

@@ -46,13 +46,9 @@ class ModelManager:
         self,
         bus: EventBus,
         server: LocalOllama | None = None,
-        embed_model: str | None = None,
-        base_model: str | None = None,
     ) -> None:
         self._bus = bus
         self.server = server or LocalOllama()
-        self.embed_model_name = embed_model or DEFAULT_EMBED_MODEL
-        self.base_model_name = base_model or DEFAULT_BASE_MODEL
         self._client = ollama.AsyncClient(host=self.server.base_url)
         self._loaded_embed: OllamaEmbedding | None = None
         self._loaded_base: Ollama | None = None
@@ -159,7 +155,7 @@ class ModelManager:
 
     async def load_embed_model(self, model: str | None = None) -> OllamaEmbedding:
         """Return a loaded OllamaEmbedding for ``model`` (default embed model). Cached."""
-        name = model or self.embed_model_name
+        name = model or DEFAULT_EMBED_MODEL
         if self._loaded_embed is not None and self._loaded_embed.model_name == name:
             return self._loaded_embed
         await self._ensure_available(name)
@@ -172,7 +168,7 @@ class ModelManager:
 
     async def load_base_model(self, model: str | None = None) -> Ollama:
         """Return a loaded Ollama LLM for ``model`` (default base model). Cached."""
-        name = model or self.base_model_name
+        name = model or DEFAULT_BASE_MODEL
         if self._loaded_base is not None and self._loaded_base.model == name:
             return self._loaded_base
         await self._ensure_available(name)
@@ -181,13 +177,13 @@ class ModelManager:
 
     async def unload_embed_model(self, model: str | None = None) -> None:
         """Free ``model`` from VRAM (keep_alive=0) and drop the cached handle."""
-        name = model or self.embed_model_name
+        name = model or DEFAULT_EMBED_MODEL
         await self._unload(name, kind="embed")
         if self._loaded_embed is not None and self._loaded_embed.model_name == name:
             self._loaded_embed = None
 
     async def unload_base_model(self, model: str | None = None) -> None:
-        name = model or self.base_model_name
+        name = model or DEFAULT_BASE_MODEL
         await self._unload(name, kind="generate")
         if self._loaded_base is not None and self._loaded_base.model == name:
             self._loaded_base = None

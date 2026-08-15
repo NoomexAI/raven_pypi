@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from llama_index.core.agent import FunctionAgent
@@ -181,7 +181,8 @@ class ChatSession:
         self._load_facts()
         self._memory = self._build_memory()
         self._messages_seen = len(
-            self._memory.primary_memory.chat_store.get_messages("messages")
+            cast(ChatSummaryMemoryBuffer, self._memory.primary_memory)
+            .chat_store.get_messages("messages")
         )
         self._tools = self._build_tools()
         self._agent = self._build_agent(self._tools)
@@ -270,18 +271,19 @@ class ChatSession:
             )
             return await self._tool_result(mode, result)
 
-        if full_retrieval:
-            async def _global_call(user_query: str, full_retrieval: bool = False) -> str:
-                result = await self._retrieve(
-                    mode, user_query=user_query, full_retrieval=full_retrieval
-                )
-                return await self._tool_result(mode, result)
-        else:
-            async def _global_call(user_query: str) -> str:
-                result = await self._retrieve(mode, user_query=user_query)
-                return await self._tool_result(mode, result)
+        async def _global_call(user_query: str) -> str:
+            result = await self._retrieve(mode, user_query=user_query)
+            return await self._tool_result(mode, result)
 
-        fn = _local_call if local else _global_call
+        async def _global_call_full(user_query: str, full_retrieval: bool = False) -> str:
+            result = await self._retrieve(
+                mode, user_query=user_query, full_retrieval=full_retrieval
+            )
+            return await self._tool_result(mode, result)
+
+        fn = _local_call
+        if not local:
+            fn = _global_call_full if full_retrieval else _global_call
         return FunctionTool.from_defaults(
             async_fn=fn,
             name=mode,
@@ -396,22 +398,21 @@ class ChatSession:
         """Run one turn. Emits chat.* events on the bus, returns the final reply."""
         op_id = op_id or uuid4().hex
         self._op_id = op_id
-
-        if not self.title_generated:
-            await self._generate_title(user_text)
-            self.title_generated = True
-
-        agent = self._agent
-        if retrieval_mode and retrieval_mode != "auto":
-            if retrieval_mode not in RETRIEVAL_TOOLS:
-                raise ValueError(f"unknown retrieval_mode: {retrieval_mode}")
-            single = [t for t in self._tools if t.metadata.name == retrieval_mode]
-            agent = self._build_agent(single, initial_tool_choice=retrieval_mode)
-
-        handler = agent.run(user_msg=user_text, memory=self._memory)
-
-        final_output: AgentOutput | None = None
         try:
+            if not self.title_generated:
+                await self._generate_title(user_text)
+                self.title_generated = True
+
+            agent = self._agent
+            if retrieval_mode and retrieval_mode != "auto":
+                if retrieval_mode not in RETRIEVAL_TOOLS:
+                    raise ValueError(f"unknown retrieval_mode: {retrieval_mode}")
+                single = [t for t in self._tools if t.metadata.name == retrieval_mode]
+                agent = self._build_agent(single, initial_tool_choice=retrieval_mode)
+
+            handler = agent.run(user_msg=user_text, memory=self._memory)
+
+            final_output: AgentOutput | None = None
             async for ev in handler.stream_events():
                 if isinstance(ev, AgentStream):
                     if ev.thinking_delta:
@@ -463,14 +464,15 @@ class ChatSession:
     # ---- persistence --------------------------------------------------
 
     async def _persist(self, handler) -> None:
-        summary = self._memory.primary_memory
+        summary = cast(ChatSummaryMemoryBuffer, self._memory.primary_memory)
         all_messages = summary.chat_store.get_messages("messages")
         new_messages = all_messages[self._messages_seen :]
         self._messages_seen = len(all_messages)
         if new_messages:
             await self._facts_block.aput(new_messages)
         await asyncio.to_thread(
-            summary.chat_store.persist, str(self.conversation.messages_path)
+            cast(SimpleChatStore, summary.chat_store).persist,
+            str(self.conversation.messages_path),
         )
         facts_path = self.conversation.dir_path / "facts.json"
         await asyncio.to_thread(
