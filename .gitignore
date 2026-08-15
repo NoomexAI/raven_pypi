@@ -78,3 +78,18 @@ Desktop.ini
 
 # Opencode
 .opencode/
+
+# v1 reference clone
+/v1/
+
+# Knowledge data (vector stores + file.json + meta.json)
+/data/knowledge_base/
+/data/conversations/
+
+# Ollama bundle (models + local runtime)
+/ollama/
+
+# Tests, fixtures, and temp runtime data
+/tests/
+/test_docs/
+/_tmp_root/

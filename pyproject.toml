@@ -4,19 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "noomexai-raven"
-version = "0.1.0"
+version = "0.2.0"
 description = "RAVEN — Retrieval Augmented Adaptive Epistemic Navigation. Privacy-first, fully offline RAG backend."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE.txt"]
 requires-python = ">=3.11"
 dependencies = [
-    "numpy>=1.24",
-    "wtpsplit-lite>=0.2.0",
-    "sqlite-vec>=0.1.6",
+    "llama-index-core>=0.14,<0.15",
+    "llama-index-llms-ollama>=0.10,<0.11",
+    "llama-index-embeddings-ollama>=0.9,<0.10",
+    "llama-index-vector-stores-qdrant>=0.10,<0.11",
+    "qdrant-client>=1.12",
+    "ollama>=0.5",
     "curl-cffi>=0.9.0",
-    "platformdirs>=4.2.0",
-    "tqdm>=4.65.0",
+    "pydantic>=2.0",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -35,9 +37,6 @@ Issues = "https://github.com/NoomexAI/raven_pypi/issues"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["raven*"]
-
-[tool.setuptools.package-data]
-raven = ["grammar/*.json"]
 
 [tool.ruff]
 target-version = "py311"
