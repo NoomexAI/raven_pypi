@@ -20,6 +20,7 @@ from ._paths import data_root
 from .events import Event, EventBus, EventType
 
 COLLECTION_NAME = "chunks"
+PERSISTENCE_VERSION = 1
 
 # Payload keys: Qdrant stores ONLY the vector + these IDs.
 # Every text/metadata value lives in file.json (the relational side).
@@ -75,6 +76,7 @@ class Knowledge:
 
         self._qdrant = qdrant_client.QdrantClient(path=str(self.qdrant_dir))
         self._file_meta: dict[str, Any] = self._load_file_meta()
+        self._mutation_lock = asyncio.Lock()
 
     @property
     def safe_name(self) -> str:
@@ -138,6 +140,7 @@ class Knowledge:
 
     def _meta(self) -> dict[str, Any]:
         meta = self._read_meta()
+        meta.setdefault("schema_version", PERSISTENCE_VERSION)
         meta.setdefault("name", self.name)
         meta.setdefault("created_at", datetime.now().isoformat())
         meta.setdefault("embed_model", self.embed_model.model_name)
@@ -207,7 +210,31 @@ class Knowledge:
         asyncio.create_task(self._ingest_task(file_name, sections, op_id))
         return op_id
 
+    async def ingest_foreground(
+        self,
+        file_name: str,
+        sections: list[dict[str, Any]],
+        op_id: str | None = None,
+    ) -> str:
+        """Run storage ingestion in the caller's task.
+
+        ``ingest`` remains compatible with the original background-task API;
+        service operations use this method instead.
+        """
+        op_id = op_id or uuid4().hex
+        await self._ingest_task(file_name, sections, op_id)
+        return op_id
+
     async def _ingest_task(
+        self,
+        file_name: str,
+        sections: list[dict[str, Any]],
+        op_id: str,
+    ) -> None:
+        async with self._mutation_lock:
+            await self._ingest_task_unlocked(file_name, sections, op_id)
+
+    async def _ingest_task_unlocked(
         self,
         file_name: str,
         sections: list[dict[str, Any]],
@@ -234,7 +261,7 @@ class Knowledge:
             embed = self.embed_model
             vectors = await embed.aget_text_embedding_batch([r[1] for r in chunk_records])
             if doc_count:
-                self._ensure_collection(dim=len(vectors[0]))
+                await asyncio.to_thread(self._ensure_collection, len(vectors[0]))
             points = [
                 qmodels.PointStruct(
                     id=rid,
@@ -250,9 +277,10 @@ class Knowledge:
                 )
             ]
 
-            self._upsert_points(points)
+            await asyncio.to_thread(self._upsert_points, points)
             chunk_total = len(points)
 
+            original_file_meta = json.loads(json.dumps(self._file_meta))
             files = self._files_registry()
             sections_dict = self._sections_dict()
             files[file_name] = {
@@ -273,7 +301,21 @@ class Knowledge:
                     "definitions": section.get("definitions", []),
                     "raw_content": section.get("raw_content", ""),
                 }
-            self._save_file_meta(self._file_meta)
+            try:
+                await asyncio.to_thread(self._save_file_meta, self._file_meta)
+            except Exception:
+                self._file_meta = original_file_meta
+                # Compensate for a successful vector write when the relational
+                # registry cannot be committed.
+                await asyncio.to_thread(
+                    self._qdrant.delete,
+                    collection_name=COLLECTION_NAME,
+                    points_selector=qmodels.FilterSelector(
+                        filter=self._filter(KEY_FILE_ID, file_id)
+                    ),
+                    wait=True,
+                )
+                raise
 
             emit(
                 EventType.KNOWLEDGE_FILE_INGESTED,
@@ -396,6 +438,15 @@ class Knowledge:
         if not self._collection_exists():
             return 0
         return self._qdrant.count(collection_name=COLLECTION_NAME, exact=True).count
+
+    async def asearch(self, query_vector: list[float], top_k: int = 5) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self.search, query_vector, top_k)
+
+    async def acount(self) -> int:
+        return await asyncio.to_thread(self.count)
+
+    async def aclose(self) -> None:
+        await asyncio.to_thread(self.close)
 
     def close(self) -> None:
         self._qdrant.close()
@@ -526,6 +577,10 @@ class KnowledgeBase:
                 }
             )
         return result
+
+    async def alist(self) -> list[dict[str, Any]]:
+        """Non-blocking knowledge listing for async retrieval/service paths."""
+        return await asyncio.to_thread(self.list)
 
     async def delete(self, name: str) -> None:
         safe = _safe_name(name)

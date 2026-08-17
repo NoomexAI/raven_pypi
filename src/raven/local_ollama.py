@@ -218,10 +218,10 @@ class LocalOllama:
     def _extract(self, archive: Path, temp: Path) -> None:
         if archive.suffix == ".zip":
             with zipfile.ZipFile(archive) as z:
-                z.extractall(temp)
+                self._safe_extract_zip(z, temp)
         elif archive.name.endswith(".tgz"):
             with tarfile.open(archive, "r:*") as t:
-                t.extractall(temp)
+                self._safe_extract_tar(t, temp)
         elif archive.name.endswith(".tar.zst"):
             import zstandard as zstd  # type: ignore[import-not-found]
 
@@ -229,9 +229,32 @@ class LocalOllama:
             with open(archive, "rb") as src, open(tar_path, "wb") as dst:
                 zstd.ZstdDecompressor().copy_stream(src, dst)
             with tarfile.open(tar_path, "r:") as t:
-                t.extractall(temp)
+                self._safe_extract_tar(t, temp)
         else:
             raise RuntimeError(f"unsupported archive format: {archive.name}")
+
+    @staticmethod
+    def _safe_extract_tar(archive: tarfile.TarFile, destination: Path) -> None:
+        root = destination.resolve()
+        for member in archive.getmembers():
+            if member.issym() or member.islnk():
+                raise RuntimeError(f"archive links are not allowed: {member.name}")
+            target = (destination / member.name).resolve()
+            if target != root and root not in target.parents:
+                raise RuntimeError(f"archive member escapes extraction directory: {member.name}")
+        archive.extractall(destination)
+
+    @staticmethod
+    def _safe_extract_zip(archive: zipfile.ZipFile, destination: Path) -> None:
+        root = destination.resolve()
+        for member in archive.infolist():
+            file_type = (member.external_attr >> 16) & 0o170000
+            if file_type == 0o120000:
+                raise RuntimeError(f"archive links are not allowed: {member.filename}")
+            target = (destination / member.filename).resolve()
+            if target != root and root not in target.parents:
+                raise RuntimeError(f"archive member escapes extraction directory: {member.filename}")
+        archive.extractall(destination)
 
     def _locate(self, temp: Path) -> tuple[Path, Path | None]:
         exe = "ollama.exe" if os.name == "nt" else "ollama"

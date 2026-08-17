@@ -12,6 +12,10 @@ from pydantic import BaseModel, Field
 
 
 class EventType(str, Enum):
+    OPERATION_STARTED = "operation.started"
+    OPERATION_COMPLETED = "operation.completed"
+    OPERATION_CANCELLED = "operation.cancelled"
+
     MODEL_PULL_PROGRESS = "model.pull.progress"
     MODEL_PULL_COMPLETE = "model.pull.complete"
     MODEL_LIST = "model.list"
@@ -71,6 +75,9 @@ class Event(BaseModel):
     op_id: str = Field(default_factory=lambda: uuid4().hex)
     session_id: str | None = None
     ts: float = Field(default_factory=time.time)
+    # Assigned by EventBus per operation.  Keeping this optional preserves the
+    # in-process API for callers that construct Event objects themselves.
+    event_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,11 +86,14 @@ class _Subscriber:
     loop: asyncio.AbstractEventLoop
     op_id: str | None = None
     type: EventType | None = None
+    after_event_id: int = 0
 
     def wants(self, event: Event) -> bool:
         if self.op_id is not None and event.op_id != self.op_id:
             return False
         if self.type is not None and event.type is not self.type:
+            return False
+        if event.event_id is not None and event.event_id <= self.after_event_id:
             return False
         return True
 
@@ -100,12 +110,34 @@ class EventBus:
         self._queue_size = queue_size
         self._loop = loop
         self._closed = False
+        self._op_sequences: dict[str, int] = {}
+        self._listeners: set[Any] = set()
+
+    def add_listener(self, listener: Any) -> None:
+        """Register a synchronous callback invoked for every published event."""
+        self._listeners.add(listener)
+
+    def remove_listener(self, listener: Any) -> None:
+        self._listeners.discard(listener)
 
     def publish(self, event: Event) -> None:
         if self._closed:
             raise RuntimeError("bus is closed")
 
+        if event.op_id:
+            next_id = self._op_sequences.get(event.op_id, 0) + 1
+            self._op_sequences[event.op_id] = next_id
+            if event.event_id is None:
+                event.event_id = next_id
+
         self._history.append(event)
+
+        for listener in list(self._listeners):
+            try:
+                listener(event)
+            except Exception:
+                # Observers must never be able to break domain work.
+                pass
 
         # Iterate over a snapshot list to prevent set modification errors during iteration
         for sub in list(self._subscribers):
@@ -140,7 +172,7 @@ class EventBus:
             loop.call_soon_threadsafe(self.publish, event)
         else:
             # Fallback if loop isn't active yet
-            self._history.append(event)
+            self.publish(event)
 
     def history(self, op_id: str | None = None, type: EventType | None = None) -> list[Event]:
         return [
@@ -149,17 +181,30 @@ class EventBus:
             if (op_id is None or e.op_id == op_id) and (type is None or e.type is type)
         ]
 
+    def history_after(self, op_id: str, after_event_id: int = 0) -> list[Event]:
+        return [
+            e
+            for e in self._history
+            if e.op_id == op_id and (e.event_id is None or e.event_id > after_event_id)
+        ]
+
+    def history_bounds(self, op_id: str) -> tuple[int | None, int | None]:
+        values = [e.event_id for e in self._history if e.op_id == op_id and e.event_id is not None]
+        return (min(values), max(values)) if values else (None, None)
+
     def subscribe(
         self,
         op_id: str | None = None,
         type: EventType | None = None,
+        after_event_id: int = 0,
     ) -> AsyncIterator[Event]:
-        return self._subscribe(op_id, type)
+        return self._subscribe(op_id, type, after_event_id)
 
     async def _subscribe(
         self,
         op_id: str | None,
         type: EventType | None,
+        after_event_id: int,
     ) -> AsyncIterator[Event]:
         loop = asyncio.get_running_loop()
         if self._closed:
@@ -172,6 +217,7 @@ class EventBus:
             loop=loop,
             op_id=op_id,
             type=type,
+            after_event_id=after_event_id,
         )
         self._subscribers.add(sub)
         try:

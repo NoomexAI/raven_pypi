@@ -32,6 +32,7 @@ from .pipeline import (
     VectorConditionedRetrievalPipeline,
 )
 from .reconstructor import Reconstructor
+from .operations import OperationManager, OperationRecord, OperationStatus
 from .chat_session import ChatSession
 from .local_ollama import LocalOllama
 from .high_level_api import Raven
@@ -58,6 +59,9 @@ __all__ = [
     "AgreementBasedRetrievalPipeline",
     "VectorConditionedRetrievalPipeline",
     "Reconstructor",
+    "OperationManager",
+    "OperationRecord",
+    "OperationStatus",
     "LOCAL_EMBEDDED_RETRIEVAL",
     "LOCAL_HIERARCHICAL_RETRIEVAL",
     "LOCAL_AGREEMENT_RETRIEVAL",

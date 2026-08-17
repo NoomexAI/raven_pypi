@@ -13,6 +13,7 @@ from .events import Event, EventBus, EventType
 from .knowledge import KnowledgeBase
 
 DEFAULT_TITLE = "New Conversation"
+PERSISTENCE_VERSION = 1
 
 
 class Conversation:
@@ -46,6 +47,7 @@ class Conversation:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "schema_version": PERSISTENCE_VERSION,
             "conversation_id": self.conversation_id,
             "type": self.type,
             "knowledge_name": self.knowledge_name,

@@ -15,7 +15,7 @@ from llama_index.llms.ollama import Ollama
 from pydantic import BaseModel, Field
 
 from .events import Event, EventBus, EventType
-from .knowledge import Knowledge, KnowledgeBase
+from .knowledge import KnowledgeBase
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +98,19 @@ class IngestionPipeline:
         asyncio.create_task(self._ingest_task(knowledge_name, file_path, op_id))
         return op_id
 
+    async def ingest_foreground(
+        self, knowledge_name: str, file_path: str, op_id: str | None = None
+    ) -> str:
+        """Run ingestion in the caller's task.
+
+        The legacy ``ingest`` API still starts a background task.  Server
+        operations use this foreground variant so cancellation and ownership
+        stay with :class:`raven.operations.OperationManager`.
+        """
+        op_id = op_id or uuid4().hex
+        await self._ingest_task(knowledge_name, file_path, op_id)
+        return op_id
+
     async def _extract_metadata(self, section_text: str) -> SectionMetadata | None:
         for attempt in range(1, self._max_extraction_retries + 1):
             try:
@@ -164,7 +177,7 @@ class IngestionPipeline:
                 raise RuntimeError(f"no sections produced for file '{file_name}'")
 
             progress(stage="ingesting", nodes_done=len(sections), total=total)
-            storage_op = await knowledge.ingest(file_name, sections)
+            storage_op = await knowledge.ingest_foreground(file_name, sections, op_id=op_id)
 
             count: int | None = None
             for ev in self._bus.history(op_id=storage_op):
@@ -316,8 +329,8 @@ class RetrievalPipeline:
             for c in selected
         ]
 
-    def _knowledge_names(self) -> list[str]:
-        return [k["safe_name"] for k in self._kb.list()]
+    async def _knowledge_names(self) -> list[str]:
+        return [k["safe_name"] for k in await self._kb.alist()]
 
     def _sections_of(self, knowledge_name: str) -> list[dict]:
         """All section dicts of one knowledge (cached file.json reads; adds knowledge_name)."""
@@ -364,7 +377,7 @@ class EmbeddedRetrievalPipeline(RetrievalPipeline):
         try:
             vec = await self._embed.aget_text_embedding(user_query)
             knowledge = self._kb.get(knowledge_name)
-            hits = knowledge.search(vec, top_k=top_k)
+            hits = await asyncio.to_thread(knowledge.search, vec, top_k)
 
             result: list[dict] = []
             seen: set[str] = set()
@@ -425,9 +438,9 @@ class EmbeddedRetrievalPipeline(RetrievalPipeline):
         try:
             vec = await self._embed.aget_text_embedding(user_query)
             merged: list[dict] = []
-            for name in self._knowledge_names():
+            for name in await self._knowledge_names():
                 try:
-                    hits = self._kb.get(name).search(vec, top_k=top_k)
+                    hits = await asyncio.to_thread(self._kb.get(name).search, vec, top_k)
                 except Exception:
                     continue
                 for h in hits:
@@ -678,7 +691,7 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
             op_id,
         )
         try:
-            names = self._knowledge_names()
+            names = await self._knowledge_names()
             if not full_retrieval:
                 # Same anchored scored-read helper, over knowledge summaries.
                 kcands = [
@@ -871,10 +884,10 @@ class AgreementBasedRetrievalPipeline(RetrievalPipeline):
         )
         try:
             embedded_results = await self._embedded.retrieve_local_context(
-                knowledge_name=knowledge_name, user_query=user_query, top_k=embedded_top_k
+                knowledge_name=knowledge_name, user_query=user_query, top_k=embedded_top_k, op_id=op_id
             )
             hierarchical_results = await self._hierarchical.retrieve_local_context(
-                knowledge_name=knowledge_name, user_query=user_query, top_k=hierarchical_top_k
+                knowledge_name=knowledge_name, user_query=user_query, top_k=hierarchical_top_k, op_id=op_id
             )
             agreement = self.check_agreement(embedded_results, hierarchical_results)
             result = self._result(agreement, embedded_results, hierarchical_results, top_k)
@@ -910,13 +923,14 @@ class AgreementBasedRetrievalPipeline(RetrievalPipeline):
         )
         try:
             embedded_results = await self._embedded.retrieve_global_context(
-                user_query=user_query, top_k=embedded_top_k
+                user_query=user_query, top_k=embedded_top_k, op_id=op_id
             )
             hierarchical_results = await self._hierarchical.retrieve_global_context(
                 user_query=user_query,
                 top_k_section=hierarchical_top_k,
                 top_k_knowledge=top_k_knowledge,
                 full_retrieval=full_retrieval,
+                op_id=op_id,
             )
             agreement = self.check_agreement(embedded_results, hierarchical_results)
             result = self._result(agreement, embedded_results, hierarchical_results, top_k)
@@ -974,7 +988,7 @@ class VectorConditionedRetrievalPipeline(RetrievalPipeline):
         )
         try:
             embedded_results = await self._embedded.retrieve_local_context(
-                knowledge_name=knowledge_name, user_query=user_query, top_k=embedded_top_k
+                knowledge_name=knowledge_name, user_query=user_query, top_k=embedded_top_k, op_id=op_id
             )
             file_name_list = list(dict.fromkeys(r["file_name"] for r in embedded_results))  # unique, order-preserving
             result = await self._hierarchical.retrieve_by_file(
@@ -982,6 +996,7 @@ class VectorConditionedRetrievalPipeline(RetrievalPipeline):
                 user_query=user_query,
                 file_name_list=file_name_list,
                 top_k=top_k,
+                op_id=op_id,
             )
             self._emit(
                 RETRIEVAL_COMPLETED_FOR_MODE[LOCAL_VECTOR_CONDITIONED_RETRIEVAL],
@@ -1017,13 +1032,14 @@ class VectorConditionedRetrievalPipeline(RetrievalPipeline):
         )
         try:
             embedded_results = await self._embedded.retrieve_global_context(
-                user_query=user_query, top_k=embedded_top_k
+                user_query=user_query, top_k=embedded_top_k, op_id=op_id
             )
             knowledge_name_list = list(dict.fromkeys(r["knowledge_name"] for r in embedded_results))
             result = await self._hierarchical.retrieve_by_knowledge(
                 user_query=user_query,
                 knowledge_name_list=knowledge_name_list,
                 top_k_section=top_k_section,
+                op_id=op_id,
             )
             self._emit(
                 RETRIEVAL_COMPLETED_FOR_MODE[GLOBAL_VECTOR_CONDITIONED_RETRIEVAL],

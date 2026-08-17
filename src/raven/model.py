@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -60,8 +59,9 @@ class ModelManager:
     async def start(
         self,
         on_progress: Callable[[int, int], None] | None = None,
+        op_id: str | None = None,
     ) -> None:
-        op_id = uuid4().hex
+        op_id = op_id or uuid4().hex
         bar = on_progress or _terminal_progress
 
         def publish_progress(done: int, total: int) -> None:
@@ -104,6 +104,17 @@ class ModelManager:
         asyncio.create_task(self._pull_task(model, op_id))
         return op_id
 
+    async def pull_foreground(self, model: str, op_id: str | None = None) -> str:
+        """Run a pull in the caller's task.
+
+        The legacy :meth:`pull` method remains fire-and-forget for compatibility
+        with the original examples.  Service code should use this method so
+        its operation manager owns task creation and cancellation.
+        """
+        op_id = op_id or uuid4().hex
+        await self._pull_task(model, op_id)
+        return op_id
+
     async def _pull_task(self, model: str, op_id: str) -> None:
         try:
             stream = await self._client.pull(model, stream=True)
@@ -136,29 +147,28 @@ class ModelManager:
         await self._client.delete(model)
         self._bus.publish(Event(type=EventType.MODEL_DELETED, data={"model": model}))
 
-    async def _ensure_available(self, model: str) -> None:
+    async def _ensure_available(self, model: str, op_id: str | None = None) -> None:
         """Pull the model if it is not already installed locally."""
         installed = {m["model"] for m in await self.list_models()}
         if model in installed:
             return
-        op_id = await self.pull(model)
+        op_id = op_id or uuid4().hex
+        await self._pull_task(model, op_id)
         for ev in self._bus.history(op_id=op_id):
-            if ev.type is EventType.MODEL_PULL_COMPLETE:
+            if ev.type is EventType.MODEL_PULL_COMPLETE and ev.data.get("model") == model:
                 return
-            if ev.type is EventType.ERROR:
+            if ev.type is EventType.ERROR and ev.data.get("model") == model:
                 raise RuntimeError(f"failed to pull model '{model}': {ev.data.get('error')}")
-        async for ev in self._bus.subscribe(op_id=op_id):
-            if ev.type is EventType.MODEL_PULL_COMPLETE:
-                return
-            if ev.type is EventType.ERROR:
-                raise RuntimeError(f"failed to pull model '{model}': {ev.data.get('error')}")
+        raise RuntimeError(f"model pull '{model}' finished without a completion event")
 
-    async def load_embed_model(self, model: str | None = None) -> OllamaEmbedding:
+    async def load_embed_model(
+        self, model: str | None = None, op_id: str | None = None
+    ) -> OllamaEmbedding:
         """Return a loaded OllamaEmbedding for ``model`` (default embed model). Cached."""
         name = model or DEFAULT_EMBED_MODEL
         if self._loaded_embed is not None and self._loaded_embed.model_name == name:
             return self._loaded_embed
-        await self._ensure_available(name)
+        await self._ensure_available(name, op_id=op_id)
         self._loaded_embed = OllamaEmbedding(
             model_name=name,
             base_url=self.server.base_url,
@@ -166,12 +176,14 @@ class ModelManager:
         )
         return self._loaded_embed
 
-    async def load_base_model(self, model: str | None = None) -> Ollama:
+    async def load_base_model(
+        self, model: str | None = None, op_id: str | None = None
+    ) -> Ollama:
         """Return a loaded Ollama LLM for ``model`` (default base model). Cached."""
         name = model or DEFAULT_BASE_MODEL
         if self._loaded_base is not None and self._loaded_base.model == name:
             return self._loaded_base
-        await self._ensure_available(name)
+        await self._ensure_available(name, op_id=op_id)
         self._loaded_base = Ollama(model=name, base_url=self.server.base_url, request_timeout=LLM_TIMEOUT)
         return self._loaded_base
 
