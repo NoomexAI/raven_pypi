@@ -6,12 +6,12 @@ import pytest
 
 from raven.events import Event, EventBus, EventType
 from raven.operations import OperationManager, OperationStatus
-from raven.chat_session import _tool_result_summary
+from raven.agent.catalog import summarize_reconstructed_evidence
 from raven.chat_session import ChatSession
 
 
-def test_tool_result_summary_contains_sources_without_raw_sections():
-    summary = _tool_result_summary(
+def test_summarize_reconstructed_evidence_contains_sources_without_raw_sections():
+    summary = summarize_reconstructed_evidence(
         [
             {
                 "knowledge_name": "engineering",

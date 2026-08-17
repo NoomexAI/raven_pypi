@@ -91,7 +91,13 @@ class ConversationResponse(BaseModel):
 
 class ChatTurnRequest(BaseModel):
     user_text: str = Field(min_length=1, max_length=100_000)
-    retrieval_mode: str = "auto"
+    retrieval_mode: str = Field(
+        default="auto",
+        description=(
+            "auto exposes all retrieval tools allowed by conversation scope; a specific "
+            "mode restricts retrieval to that tool without forcing the agent to call it."
+        ),
+    )
     knowledge_name: str | None = None
 
 

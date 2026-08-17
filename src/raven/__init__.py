@@ -34,11 +34,16 @@ from .pipeline import (
 from .reconstructor import Reconstructor
 from .operations import OperationManager, OperationRecord, OperationStatus
 from .chat_session import ChatSession
+from .conversation_session import ConversationSession
+from .agent import AgentHarness, AgentPolicy
 from .local_ollama import LocalOllama
 from .high_level_api import Raven
 
 __all__ = [
     "ChatSession",
+    "ConversationSession",
+    "AgentHarness",
+    "AgentPolicy",
     "Raven",
     "Conversation",
     "ConversationManager",
