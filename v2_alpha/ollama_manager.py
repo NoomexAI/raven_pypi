@@ -15,7 +15,7 @@ from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.llms.ollama import Ollama
 
 from .events import Event
-from .operations import OperationContext
+from .operations import Operation
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 
@@ -39,7 +39,7 @@ class OllamaManager:
         self._embeddings: dict[str, OllamaEmbedding] = {}
 
 
-    async def check_connection(self, *, operation: OperationContext | None = None) -> None:
+    async def check_connection(self, *, operation: Operation | None = None) -> None:
         """Raise the Ollama client error if the configured server is unavailable."""
         await self._emit(operation, "model.connection.started")
         try:
@@ -50,7 +50,7 @@ class OllamaManager:
         await self._emit(operation, "model.connection.completed")
 
 
-    async def list_models(self, *, operation: OperationContext | None = None) -> list[dict[str, Any]]:
+    async def list_models(self, *, operation: Operation | None = None) -> list[dict[str, Any]]:
         await self._emit(operation, "model.list.started")
         try:
             models = await self._list_models()
@@ -67,7 +67,7 @@ class OllamaManager:
         return [self._dump(model) for model in models]
 
 
-    async def inspect(self, model: str, *, operation: OperationContext | None = None) -> dict[str, Any]:
+    async def inspect(self, model: str, *, operation: Operation | None = None) -> dict[str, Any]:
         await self._emit(operation, "model.inspect.started", {"model": model})
         try:
             response = await self._client.show(model)
@@ -88,7 +88,7 @@ class OllamaManager:
         model: str,
         on_progress: ProgressCallback | None = None,
         *,
-        operation: OperationContext | None = None,
+        operation: Operation | None = None,
     ) -> None:
         """Pull a model, forwarding each progress item to the caller."""
         await self._emit(operation, "model.pull.started", {"model": model})
@@ -115,7 +115,7 @@ class OllamaManager:
         await self._emit(operation, "model.pull.completed", {"model": model})
 
 
-    async def delete(self, model: str, *, operation: OperationContext | None = None) -> None:
+    async def delete(self, model: str, *, operation: Operation | None = None) -> None:
         await self._emit(operation, "model.delete.started", {"model": model})
         try:
             await self._client.delete(model)
@@ -131,7 +131,7 @@ class OllamaManager:
         await self._emit(operation, "model.delete.completed", {"model": model})
 
 
-    async def load_llm(self, model: str, *, operation: OperationContext | None = None) -> Ollama:
+    async def load_llm(self, model: str, *, operation: Operation | None = None) -> Ollama:
         """Return a LlamaIndex LLM adapter, pulling the model if necessary."""
         await self._emit(operation, "model.load_llm.started", {"model": model})
         try:
@@ -158,7 +158,7 @@ class OllamaManager:
         self,
         model: str,
         *,
-        operation: OperationContext | None = None,
+        operation: Operation | None = None,
     ) -> OllamaEmbedding:
         """Return a LlamaIndex embedding adapter, pulling the model if necessary."""
         await self._emit(operation, "model.load_embedding.started", {"model": model})
@@ -190,13 +190,13 @@ class OllamaManager:
         self,
         model: str,
         *,
-        operation: OperationContext | None = None,
+        operation: Operation | None = None,
     ) -> None:
         installed = {item.get("model") or item.get("name") for item in await self._list_models()}
         if model not in installed:
             await self.pull(model, operation=operation)
 
-    async def unload_llm(self, model: str, *, operation: OperationContext | None = None) -> None:
+    async def unload_llm(self, model: str, *, operation: Operation | None = None) -> None:
         await self._emit(operation, "model.unload_llm.started", {"model": model})
         try:
             await self._client.generate(
@@ -220,7 +220,7 @@ class OllamaManager:
         self,
         model: str,
         *,
-        operation: OperationContext | None = None,
+        operation: Operation | None = None,
     ) -> None:
         await self._emit(operation, "model.unload_embedding.started", {"model": model})
         try:
@@ -238,7 +238,7 @@ class OllamaManager:
 
     @staticmethod
     async def _emit(
-        operation: OperationContext | None,
+        operation: Operation | None,
         event_type: str,
         data: dict[str, Any] | None = None,
     ) -> None:
