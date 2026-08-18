@@ -39,6 +39,7 @@ class EventStream:
         self._loaded = False
         self._closed = False
 
+
     async def publish(self, event: Event) -> Event:
         """Persist an event, then wake subscribers to this stream."""
         self._ensure_open()
@@ -63,6 +64,7 @@ class EventStream:
             self._condition.notify_all()
             return persisted
 
+
     async def read(self, after_event_id: int = 0) -> list[Event]:
         """Read this stream's retained events after a cursor."""
         self._validate_cursor(after_event_id)
@@ -70,6 +72,7 @@ class EventStream:
         async with self._condition:
             await self._load()
             return await asyncio.to_thread(self._read_after, after_event_id)
+
 
     async def events(self, after_event_id: int = 0) -> AsyncIterator[Event]:
         """Yield events after a cursor, then wait for future stream events."""
@@ -91,6 +94,7 @@ class EventStream:
                 cursor = event.event_id or cursor
                 yield event
 
+
     async def delete(self) -> None:
         """Delete this stream's persisted event log and wake subscribers."""
         async with self._condition:
@@ -100,11 +104,13 @@ class EventStream:
             self._closed = True
             self._condition.notify_all()
 
+
     async def is_expired_before(self, timestamp: datetime) -> bool:
         """Return whether a finished stream predates ``timestamp``."""
         async with self._condition:
             await self._load()
             return self._finished and self._finished_at is not None and self._finished_at < timestamp
+
 
     async def close(self) -> None:
         """Stop live activity without deleting the persisted event log."""
@@ -114,14 +120,17 @@ class EventStream:
         async with self._condition:
             self._condition.notify_all()
 
+
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeError("event stream is closed")
+
 
     @staticmethod
     def _validate_cursor(after_event_id: int) -> None:
         if after_event_id < 0:
             raise ValueError("after_event_id cannot be negative")
+
 
     async def _load(self) -> None:
         if self._loaded:
@@ -131,11 +140,13 @@ class EventStream:
         )
         self._loaded = True
 
+
     def _append(self, event: Event) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(event.model_dump(mode="json"), separators=(",", ":")) + "\n")
             stream.flush()
+
 
     def _read_metadata(self) -> tuple[int, bool, datetime | None]:
         if not self._path.exists():
@@ -158,6 +169,7 @@ class EventStream:
                     finished_at = event.timestamp
         return last_event_id, finished, finished_at
 
+
     def _read_after(self, after_event_id: int) -> list[Event]:
         if not self._path.exists():
             return []
@@ -172,6 +184,7 @@ class EventStream:
                     events.append(Event.model_validate(record))
         return events
 
+
     @staticmethod
     def _decode_line(line: str) -> dict[str, Any] | None:
         try:
@@ -185,6 +198,7 @@ class EventStream:
         return value
 
 
+
 class EventStreamRegistry:
     """Create and retrieve operation-scoped event streams."""
 
@@ -193,6 +207,7 @@ class EventStreamRegistry:
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self._streams: dict[str, EventStream] = {}
         self._closed = False
+
 
     def get(self, operation_id: str) -> EventStream:
         """Return the stream for an operation, reopening it from disk if needed."""
@@ -207,6 +222,7 @@ class EventStreamRegistry:
             self._streams[operation_id] = stream
         return stream
 
+
     def stored_operation_ids(self) -> list[str]:
         """Return UUIDs for persisted operation logs in this registry."""
         operation_ids: list[str] = []
@@ -219,10 +235,12 @@ class EventStreamRegistry:
             operation_ids.append(operation_id)
         return operation_ids
 
+
     async def delete(self, operation_id: str) -> None:
         stream = self.get(operation_id)
         await stream.delete()
         self._streams.pop(operation_id, None)
+
 
     async def close(self) -> None:
         """Close all active streams while preserving their event logs."""
@@ -231,9 +249,11 @@ class EventStreamRegistry:
         self._closed = True
         await asyncio.gather(*(stream.close() for stream in self._streams.values()))
 
+
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeError("event stream registry is closed")
+
 
     @staticmethod
     def _validate_operation_id(operation_id: str) -> None:
@@ -246,6 +266,7 @@ class EventStreamRegistry:
             raise ValueError("operation_id must use the canonical UUID format")
 
 
+
 class EventCleanupService:
     """Delete finished event streams after a configured retention period."""
 
@@ -254,6 +275,7 @@ class EventCleanupService:
             raise ValueError("retention cannot be negative")
         self._registry = registry
         self.retention = retention
+
 
     async def run_once(self, now: datetime | None = None) -> list[str]:
         """Delete expired finished streams and return their operation IDs."""
