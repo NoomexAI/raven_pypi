@@ -15,6 +15,7 @@ from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.llms.ollama import Ollama
 
 from .events import Event, EventType
+from .errors import ErrorCode, RavenError, error_payload
 from .operations import Operation
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
@@ -45,8 +46,13 @@ class OllamaManager:
         try:
             await self._client.list()
         except Exception as exc:
-            await self._emit(operation, EventType.MODEL_CONNECTION_FAILED, {"error": str(exc)})
-            raise
+            error = self._provider_error("connect")
+            await self._emit(
+                operation,
+                EventType.MODEL_CONNECTION_FAILED,
+                {"error": error_payload(error)},
+            )
+            raise error from exc
         await self._emit(operation, EventType.MODEL_CONNECTION_COMPLETED)
 
 
@@ -55,8 +61,13 @@ class OllamaManager:
         try:
             models = await self._list_models()
         except Exception as exc:
-            await self._emit(operation, EventType.MODEL_LIST_FAILED, {"error": str(exc)})
-            raise
+            error = self._provider_error("list models")
+            await self._emit(
+                operation,
+                EventType.MODEL_LIST_FAILED,
+                {"error": error_payload(error)},
+            )
+            raise error from exc
         await self._emit(operation, EventType.MODEL_LIST_COMPLETED, {"count": len(models)})
         return models
 
@@ -73,12 +84,13 @@ class OllamaManager:
             response = await self._client.show(model)
             inspected = self._dump(response)
         except Exception as exc:
+            error = self._provider_error("inspect model", model)
             await self._emit(
                 operation,
                 EventType.MODEL_INSPECT_FAILED,
-                {"model": model, "error": str(exc)},
+                {"model": model, "error": error_payload(error)},
             )
-            raise
+            raise error from exc
         await self._emit(operation, EventType.MODEL_INSPECT_COMPLETED, {"model": model})
         return inspected
 
@@ -106,12 +118,13 @@ class OllamaManager:
                     if result is not None:
                         await result
         except Exception as exc:
+            error = self._provider_error("pull model", model)
             await self._emit(
                 operation,
                 EventType.MODEL_PULL_FAILED,
-                {"model": model, "error": str(exc)},
+                {"model": model, "error": error_payload(error)},
             )
-            raise
+            raise error from exc
         await self._emit(operation, EventType.MODEL_PULL_COMPLETED, {"model": model})
 
 
@@ -120,12 +133,13 @@ class OllamaManager:
         try:
             await self._client.delete(model)
         except Exception as exc:
+            error = self._provider_error("delete model", model)
             await self._emit(
                 operation,
                 EventType.MODEL_DELETE_FAILED,
-                {"model": model, "error": str(exc)},
+                {"model": model, "error": error_payload(error)},
             )
-            raise
+            raise error from exc
         self._llms.pop(model, None)
         self._embeddings.pop(model, None)
         await self._emit(operation, EventType.MODEL_DELETE_COMPLETED, {"model": model})
@@ -144,12 +158,13 @@ class OllamaManager:
                     request_timeout=self.request_timeout,
                 )
         except Exception as exc:
+            error = self._provider_error("load LLM", model)
             await self._emit(
                 operation,
                 EventType.MODEL_LOAD_LLM_FAILED,
-                {"model": model, "error": str(exc)},
+                {"model": model, "error": error_payload(error)},
             )
-            raise
+            raise error from exc
         await self._emit(operation, EventType.MODEL_LOAD_LLM_COMPLETED, {"model": model, "cached": cached})
         return self._llms[model]
 
@@ -172,12 +187,13 @@ class OllamaManager:
                     embed_batch_size=self.embedding_batch_size,
                 )
         except Exception as exc:
+            error = self._provider_error("load embedding model", model)
             await self._emit(
                 operation,
                 EventType.MODEL_LOAD_EMBEDDING_FAILED,
-                {"model": model, "error": str(exc)},
+                {"model": model, "error": error_payload(error)},
             )
-            raise
+            raise error from exc
         await self._emit(
             operation,
             EventType.MODEL_LOAD_EMBEDDING_COMPLETED,
@@ -206,12 +222,13 @@ class OllamaManager:
                 options={"num_predict": 1},
             )
         except Exception as exc:
+            error = self._provider_error("unload LLM", model)
             await self._emit(
                 operation,
                 EventType.MODEL_UNLOAD_LLM_FAILED,
-                {"model": model, "error": str(exc)},
+                {"model": model, "error": error_payload(error)},
             )
-            raise
+            raise error from exc
         self._llms.pop(model, None)
         await self._emit(operation, EventType.MODEL_UNLOAD_LLM_COMPLETED, {"model": model})
 
@@ -226,12 +243,13 @@ class OllamaManager:
         try:
             await self._client.embed(model=model, input="", keep_alive=0)
         except Exception as exc:
+            error = self._provider_error("unload embedding model", model)
             await self._emit(
                 operation,
                 EventType.MODEL_UNLOAD_EMBEDDING_FAILED,
-                {"model": model, "error": str(exc)},
+                {"model": model, "error": error_payload(error)},
             )
-            raise
+            raise error from exc
         self._embeddings.pop(model, None)
         await self._emit(operation, EventType.MODEL_UNLOAD_EMBEDDING_COMPLETED, {"model": model})
 
@@ -244,6 +262,25 @@ class OllamaManager:
     ) -> None:
         if operation is not None:
             await operation.publish(Event(type=event_type, data=data or {}))
+
+
+    @staticmethod
+    def _provider_error(action: str, model: str | None = None) -> RavenError:
+        details: dict[str, Any] = {"action": action}
+        if model is not None:
+            details["model"] = model
+
+        if action == "connect":
+            return RavenError(
+                ErrorCode.OLLAMA_UNAVAILABLE,
+                "Ollama is unavailable.",
+                details=details,
+            )
+        return RavenError(
+            ErrorCode.OLLAMA_OPERATION_FAILED,
+            f"Unable to {action} through Ollama.",
+            details=details,
+        )
 
 
     @staticmethod

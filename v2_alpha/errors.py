@@ -1,0 +1,82 @@
+"""Transport-neutral Raven errors and stable error codes."""
+
+from __future__ import annotations
+
+from enum import StrEnum
+from typing import Any
+
+
+class ErrorCode(StrEnum):
+    """Stable machine-readable Raven error codes."""
+
+    INVALID_KNOWLEDGE_NAME = "invalid_knowledge_name"
+    KNOWLEDGE_ALREADY_EXISTS = "knowledge_already_exists"
+    KNOWLEDGE_NOT_FOUND = "knowledge_not_found"
+    KNOWLEDGE_CLOSED = "knowledge_closed"
+    KNOWLEDGE_NOT_STARTED = "knowledge_not_started"
+    FILE_ALREADY_EXISTS = "file_already_exists"
+    FILE_NOT_FOUND = "file_not_found"
+    EMBEDDING_MODEL_REQUIRED = "embedding_model_required"
+    INVALID_CHUNKING = "invalid_chunking"
+    NO_CHUNKS_PRODUCED = "no_chunks_produced"
+    INVALID_EMBEDDING_RESULT = "invalid_embedding_result"
+    EMBEDDING_DIMENSION_MISMATCH = "embedding_dimension_mismatch"
+    SOURCE_FILE_NOT_FOUND = "source_file_not_found"
+    SOURCE_FILE_UNREADABLE = "source_file_unreadable"
+    NO_SECTIONS_PRODUCED = "no_sections_produced"
+    SECTION_METADATA_EXTRACTION_FAILED = "section_metadata_extraction_failed"
+
+    INVALID_OPERATION_NAME = "invalid_operation_name"
+    OPERATION_NOT_FOUND = "operation_not_found"
+    INVALID_OPERATION_ID = "invalid_operation_id"
+    OPERATION_MANAGER_CLOSED = "operation_manager_closed"
+
+    INVALID_METADATA = "invalid_metadata"
+    UNSUPPORTED_METADATA_VERSION = "unsupported_metadata_version"
+    PERSISTENCE_FAILED = "persistence_failed"
+
+    EVENT_STREAM_CLOSED = "event_stream_closed"
+    EVENT_STREAM_FINISHED = "event_stream_finished"
+    INVALID_EVENT_CURSOR = "invalid_event_cursor"
+    INVALID_RETENTION = "invalid_retention"
+    CORRUPTED_EVENT_LOG = "corrupted_event_log"
+
+    OLLAMA_UNAVAILABLE = "ollama_unavailable"
+    OLLAMA_OPERATION_FAILED = "ollama_operation_failed"
+    INTERNAL_ERROR = "internal_error"
+
+
+class RavenError(Exception):
+    """An expected Raven error safe to expose at an application boundary."""
+
+    def __init__(
+        self,
+        code: ErrorCode,
+        message: str,
+        *,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        self.code = code
+        self.message = message
+        self.details = details or {}
+        super().__init__(message)
+
+
+    def as_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "code": self.code.value,
+            "message": self.message,
+        }
+        if self.details:
+            payload["details"] = self.details
+        return payload
+
+
+def error_payload(error: BaseException) -> dict[str, Any]:
+    """Return a safe event/API payload for an exception."""
+    if isinstance(error, RavenError):
+        return error.as_payload()
+    return {
+        "code": ErrorCode.INTERNAL_ERROR.value,
+        "message": "An unexpected internal error occurred.",
+    }

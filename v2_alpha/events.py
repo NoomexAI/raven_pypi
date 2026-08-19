@@ -13,12 +13,20 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .config import PathConfig
+from .errors import ErrorCode, RavenError
+
 
 class EventType(StrEnum):
     """Event names emitted by Raven components."""
 
     CHAT_DELTA = "chat.delta"
     WORK_PROGRESS = "work.progress"
+
+    INGESTION_STARTED = "ingestion.started"
+    INGESTION_PROGRESS = "ingestion.progress"
+    INGESTION_COMPLETED = "ingestion.completed"
+    INGESTION_FAILED = "ingestion.failed"
 
     KNOWLEDGE_CREATE_STARTED = "knowledge.create.started"
     KNOWLEDGE_CREATE_COMPLETED = "knowledge.create.completed"
@@ -107,7 +115,10 @@ class EventStream:
         async with self._condition:
             await self._load()
             if self._finished:
-                raise RuntimeError(f"operation '{self.operation_id}' is already finished")
+                raise RavenError(
+                    ErrorCode.EVENT_STREAM_FINISHED,
+                    f"Operation '{self.operation_id}' is already finished.",
+                )
 
             persisted = event.model_copy(
                 update={
@@ -183,13 +194,19 @@ class EventStream:
 
     def _ensure_open(self) -> None:
         if self._closed:
-            raise RuntimeError("event stream is closed")
+            raise RavenError(
+                ErrorCode.EVENT_STREAM_CLOSED,
+                "Event stream is closed.",
+            )
 
 
     @staticmethod
     def _validate_cursor(after_event_id: int) -> None:
         if after_event_id < 0:
-            raise ValueError("after_event_id cannot be negative")
+            raise RavenError(
+                ErrorCode.INVALID_EVENT_CURSOR,
+                "after_event_id cannot be negative.",
+            )
 
 
     async def _load(self) -> None:
@@ -222,7 +239,10 @@ class EventStream:
                     break
                 event = Event.model_validate(record)
                 if event.event_id is None:
-                    raise RuntimeError("event log entry is missing event_id")
+                    raise RavenError(
+                        ErrorCode.CORRUPTED_EVENT_LOG,
+                        "Event log entry is missing event_id.",
+                    )
                 last_event_id = event.event_id
                 finished = event.is_final
                 if finished:
@@ -252,9 +272,15 @@ class EventStream:
         except json.JSONDecodeError:
             if not line.endswith("\n"):
                 return None
-            raise RuntimeError("event log contains invalid JSON")
+            raise RavenError(
+                ErrorCode.CORRUPTED_EVENT_LOG,
+                "Event log contains invalid JSON.",
+            )
         if not isinstance(value, dict):
-            raise RuntimeError("event log entry must be a JSON object")
+            raise RavenError(
+                ErrorCode.CORRUPTED_EVENT_LOG,
+                "Event log entry must be a JSON object.",
+            )
         return value
 
 
@@ -262,8 +288,8 @@ class EventStream:
 class EventStreamRegistry:
     """Create and retrieve operation-scoped event streams."""
 
-    def __init__(self, storage_dir: str | Path) -> None:
-        self.storage_dir = Path(storage_dir)
+    def __init__(self, paths: PathConfig) -> None:
+        self.storage_dir = paths.event_storage_dir
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self._streams: dict[str, EventStream] = {}
         self._closed = False
@@ -312,7 +338,10 @@ class EventStreamRegistry:
 
     def _ensure_open(self) -> None:
         if self._closed:
-            raise RuntimeError("event stream registry is closed")
+            raise RavenError(
+                ErrorCode.EVENT_STREAM_CLOSED,
+                "Event stream registry is closed.",
+            )
 
 
     @staticmethod
@@ -320,10 +349,16 @@ class EventStreamRegistry:
         try:
             parsed = UUID(operation_id)
         except (TypeError, ValueError) as exc:
-            raise ValueError("operation_id must be a valid UUID") from exc
+            raise RavenError(
+                ErrorCode.INVALID_OPERATION_ID,
+                "operation_id must be a valid UUID.",
+            ) from exc
 
         if operation_id not in {parsed.hex, str(parsed)}:
-            raise ValueError("operation_id must use the canonical UUID format")
+            raise RavenError(
+                ErrorCode.INVALID_OPERATION_ID,
+                "operation_id must use the canonical UUID format.",
+            )
 
 
 
@@ -332,7 +367,10 @@ class EventCleanupService:
 
     def __init__(self, registry: EventStreamRegistry, retention: timedelta) -> None:
         if retention < timedelta(0):
-            raise ValueError("retention cannot be negative")
+            raise RavenError(
+                ErrorCode.INVALID_RETENTION,
+                "retention cannot be negative.",
+            )
         self._registry = registry
         self.retention = retention
 

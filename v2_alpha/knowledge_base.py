@@ -19,7 +19,9 @@ import qdrant_client
 from llama_index.core.node_parser import SentenceSplitter
 from qdrant_client.http import models as qmodels
 
+from .config import PathConfig
 from .events import Event, EventType
+from .errors import ErrorCode, RavenError, error_payload
 from .operations import Operation
 
 COLLECTION_NAME = "chunks"
@@ -36,7 +38,10 @@ def _safe_name(name: str) -> str:
     value = re.sub(r"[^a-zA-Z0-9_-]", "_", name.strip())
     value = value.strip("_")
     if not value:
-        raise ValueError("knowledge name must contain at least one valid character")
+        raise RavenError(
+            ErrorCode.INVALID_KNOWLEDGE_NAME,
+            "Knowledge name must contain at least one valid character.",
+        )
     return value
 
 
@@ -88,7 +93,10 @@ class Knowledge:
             if self._started and not self._closed:
                 return
             if self._closed:
-                raise RuntimeError(f"knowledge '{self.name}' is closed")
+                raise RavenError(
+                    ErrorCode.KNOWLEDGE_CLOSED,
+                    f"Knowledge '{self.name}' is closed.",
+                )
 
             await asyncio.to_thread(self._open_storage)
             self._started = True
@@ -192,11 +200,17 @@ class Knowledge:
         self._ensure_started()
 
         if embed_model is None:
-            raise ValueError("embed_model is required for ingestion")
+            raise RavenError(
+                ErrorCode.EMBEDDING_MODEL_REQUIRED,
+                "An embedding model is required for ingestion.",
+            )
         if chunk_size <= 0:
-            raise ValueError("chunk_size must be positive")
+            raise RavenError(ErrorCode.INVALID_CHUNKING, "chunk_size must be positive.")
         if chunk_overlap < 0 or chunk_overlap >= chunk_size:
-            raise ValueError("chunk_overlap must be non-negative and smaller than chunk_size")
+            raise RavenError(
+                ErrorCode.INVALID_CHUNKING,
+                "chunk_overlap must be non-negative and smaller than chunk_size.",
+            )
 
         sections = [dict(section) for section in sections]
         await self._emit(
@@ -213,7 +227,10 @@ class Knowledge:
 
             try:
                 if self.file_exists(file_name):
-                    raise ValueError(f"file '{file_name}' already exists in knowledge '{self.name}'")
+                    raise RavenError(
+                        ErrorCode.FILE_ALREADY_EXISTS,
+                        f"File '{file_name}' already exists in knowledge '{self.name}'.",
+                    )
 
                 file_id = uuid4().hex[:12]
                 chunk_records: list[tuple[str, str, int, int, dict[str, Any]]] = []
@@ -237,7 +254,10 @@ class Knowledge:
                         )
 
                 if not chunk_records:
-                    raise ValueError(f"no chunks produced for file '{file_name}'")
+                    raise RavenError(
+                        ErrorCode.NO_CHUNKS_PRODUCED,
+                        f"No chunks were produced for file '{file_name}'.",
+                    )
 
                 if operation is not None:
                     operation.raise_if_cancelled()
@@ -246,7 +266,10 @@ class Knowledge:
                     [record[1] for record in chunk_records]
                 )
                 if len(vectors) != len(chunk_records):
-                    raise ValueError("embedding model returned an invalid number of vectors")
+                    raise RavenError(
+                        ErrorCode.INVALID_EMBEDDING_RESULT,
+                        "Embedding model returned an invalid number of vectors.",
+                    )
 
                 await asyncio.to_thread(self._ensure_collection, len(vectors[0]))
                 points = [
@@ -313,7 +336,11 @@ class Knowledge:
                 await self._emit(
                     operation,
                     EventType.KNOWLEDGE_INGEST_FAILED,
-                    {"knowledge": self.name, "file": file_name, "error": str(exc)},
+                    {
+                        "knowledge": self.name,
+                        "file": file_name,
+                        "error": error_payload(exc),
+                    },
                 )
                 raise
 
@@ -389,7 +416,10 @@ class Knowledge:
                 None,
             )
             if file_name is None:
-                raise KeyError(f"file '{file_id}' does not exist in knowledge '{self.name}'")
+                raise RavenError(
+                    ErrorCode.FILE_NOT_FOUND,
+                    f"File '{file_id}' does not exist in knowledge '{self.name}'.",
+                )
 
             self._file_meta["files"] = {
                 name: info
@@ -411,7 +441,11 @@ class Knowledge:
                 await self._emit(
                     operation,
                     EventType.KNOWLEDGE_FILE_DELETE_FAILED,
-                    {"knowledge": self.name, "file_id": file_id, "error": str(exc)},
+                    {
+                        "knowledge": self.name,
+                        "file_id": file_id,
+                        "error": error_payload(exc),
+                    },
                 )
                 raise
 
@@ -452,9 +486,15 @@ class Knowledge:
 
         meta = self._read_json(self.meta_path)
         if not isinstance(meta, dict):
-            raise ValueError(f"invalid metadata for knowledge '{self.name}'")
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                f"Invalid metadata for knowledge '{self.name}'.",
+            )
         if meta.get("schema_version", PERSISTENCE_VERSION) != PERSISTENCE_VERSION:
-            raise ValueError(f"unsupported metadata version for knowledge '{self.name}'")
+            raise RavenError(
+                ErrorCode.UNSUPPORTED_METADATA_VERSION,
+                f"Unsupported metadata version for knowledge '{self.name}'.",
+            )
 
         normalized = {
             "schema_version": PERSISTENCE_VERSION,
@@ -475,9 +515,15 @@ class Knowledge:
 
         data = self._read_json(self.files_path)
         if not isinstance(data, dict):
-            raise ValueError(f"invalid file metadata for knowledge '{self.name}'")
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                f"Invalid file metadata for knowledge '{self.name}'.",
+            )
         if data.get("schema_version", PERSISTENCE_VERSION) != PERSISTENCE_VERSION:
-            raise ValueError(f"unsupported file metadata version for knowledge '{self.name}'")
+            raise RavenError(
+                ErrorCode.UNSUPPORTED_METADATA_VERSION,
+                f"Unsupported file metadata version for knowledge '{self.name}'.",
+            )
         data.setdefault("files", {})
         data.setdefault("sections", {})
         return data
@@ -532,9 +578,13 @@ class Knowledge:
             current_dimension = None
 
         if current_dimension != dimension:
-            raise ValueError(
-                f"embedding dimension mismatch for knowledge '{self.name}': "
-                f"collection has {current_dimension}, model produces {dimension}"
+            raise RavenError(
+                ErrorCode.EMBEDDING_DIMENSION_MISMATCH,
+                f"Embedding dimension mismatch for knowledge '{self.name}'.",
+                details={
+                    "collection_dimension": current_dimension,
+                    "model_dimension": dimension,
+                },
             )
 
 
@@ -597,13 +647,19 @@ class Knowledge:
 
     def _require_qdrant(self) -> qdrant_client.QdrantClient:
         if self._qdrant is None:
-            raise RuntimeError(f"knowledge '{self.name}' is not started")
+            raise RavenError(
+                ErrorCode.KNOWLEDGE_NOT_STARTED,
+                f"Knowledge '{self.name}' is not started.",
+            )
         return self._qdrant
 
 
     def _ensure_started(self) -> None:
         if not self.is_started:
-            raise RuntimeError(f"knowledge '{self.name}' is not started")
+            raise RavenError(
+                ErrorCode.KNOWLEDGE_NOT_STARTED,
+                f"Knowledge '{self.name}' is not started.",
+            )
 
 
     @staticmethod
@@ -626,9 +682,9 @@ class KnowledgeBase:
 
     def __init__(
         self,
-        knowledge_base_path: Path,
+        paths: PathConfig,
     ) -> None:
-        self.knowledge_base_path = Path(knowledge_base_path).resolve()
+        self.knowledge_base_path = paths.knowledge_base_dir
         self._knowledges: dict[str, Knowledge] = {}
         self._lifecycle_lock = asyncio.Lock()
         self._started = False
@@ -646,7 +702,10 @@ class KnowledgeBase:
             if self._started and not self._closed:
                 return
             if self._closed:
-                raise RuntimeError("knowledge base is closed")
+                raise RavenError(
+                    ErrorCode.KNOWLEDGE_CLOSED,
+                    "Knowledge base is closed.",
+                )
 
             await asyncio.to_thread(self.knowledge_base_path.mkdir, parents=True, exist_ok=True)
             names = await asyncio.to_thread(self._scan_existing)
@@ -690,9 +749,16 @@ class KnowledgeBase:
 
         async with self._lifecycle_lock:
             if safe_name in self._knowledges or (self.knowledge_base_path / safe_name).exists():
-                error = f"knowledge '{name}' already exists"
-                await self._emit(operation, EventType.KNOWLEDGE_CREATE_FAILED, {"name": safe_name, "error": error})
-                raise ValueError(error)
+                error = RavenError(
+                    ErrorCode.KNOWLEDGE_ALREADY_EXISTS,
+                    f"Knowledge '{name}' already exists.",
+                )
+                await self._emit(
+                    operation,
+                    EventType.KNOWLEDGE_CREATE_FAILED,
+                    {"name": safe_name, "error": error_payload(error)},
+                )
+                raise error
 
             knowledge = await self._open(safe_name)
             try:
@@ -704,7 +770,7 @@ class KnowledgeBase:
                 await self._emit(
                     operation,
                     EventType.KNOWLEDGE_CREATE_FAILED,
-                    {"name": safe_name, "error": str(exc)},
+                    {"name": safe_name, "error": error_payload(exc)},
                 )
                 raise
             self._knowledges[safe_name] = knowledge
@@ -724,7 +790,10 @@ class KnowledgeBase:
         try:
             return self._knowledges[safe_name]
         except KeyError as exc:
-            raise KeyError(f"knowledge '{name}' does not exist") from exc
+            raise RavenError(
+                ErrorCode.KNOWLEDGE_NOT_FOUND,
+                f"Knowledge '{name}' does not exist.",
+            ) from exc
 
 
     async def list(self) -> list[dict[str, Any]]:
@@ -762,7 +831,7 @@ class KnowledgeBase:
                 await self._emit(
                     operation,
                     EventType.KNOWLEDGE_DELETE_FAILED,
-                    {"name": safe_name, "error": str(exc)},
+                    {"name": safe_name, "error": error_payload(exc)},
                 )
                 raise
             self._knowledges.pop(safe_name, None)
@@ -810,4 +879,7 @@ class KnowledgeBase:
 
     def _ensure_started(self) -> None:
         if not self.is_started:
-            raise RuntimeError("knowledge base is not started")
+            raise RavenError(
+                ErrorCode.KNOWLEDGE_NOT_STARTED,
+                "Knowledge base is not started.",
+            )

@@ -10,6 +10,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from .events import Event, EventStream, EventStreamRegistry, EventType
+from .errors import ErrorCode, RavenError, error_payload
 
 
 
@@ -52,7 +53,7 @@ class Operation:
         self._finished_at: datetime | None = None
         self._status = OperationStatus.QUEUED
         self._result: Any = None
-        self._error: str | None = None
+        self._error: dict[str, Any] | None = None
         self._cancellation_requested = False
         self._task: asyncio.Task[Any] | None = None
         self._lock = asyncio.Lock()
@@ -84,7 +85,7 @@ class Operation:
 
 
     @property
-    def error(self) -> str | None:
+    def error(self) -> dict[str, Any] | None:
         return self._error
 
 
@@ -173,7 +174,10 @@ class Operation:
     ) -> "Operation":
         """Reconstruct an operation from its persisted event history."""
         if not events:
-            raise KeyError(f"operation '{operation_id}' has no persisted events")
+            raise RavenError(
+                ErrorCode.OPERATION_NOT_FOUND,
+                f"Operation '{operation_id}' has no persisted events.",
+            )
 
         queued = next((event for event in events if event.type == EventType.OPERATION_QUEUED), None)
         name = queued.data.get("name") if queued else None
@@ -232,7 +236,7 @@ class Operation:
         await self._finish(
             status=OperationStatus.FAILED,
             event_type=EventType.OPERATION_FAILED,
-            error=str(error) or error.__class__.__name__,
+            error=error_payload(error),
         )
 
 
@@ -249,7 +253,7 @@ class Operation:
         status: OperationStatus,
         event_type: EventType,
         result: Any = None,
-        error: str | None = None,
+        error: dict[str, Any] | None = None,
     ) -> None:
         async with self._lock:
             if self.is_finished:
@@ -288,7 +292,8 @@ class Operation:
             self._status = OperationStatus.COMPLETED
         elif final.type == EventType.OPERATION_FAILED:
             self._status = OperationStatus.FAILED
-            self._error = final.data.get("error")
+            error = final.data.get("error")
+            self._error = error if isinstance(error, dict) else None
         elif final.type == EventType.OPERATION_CANCELLED:
             self._status = OperationStatus.CANCELLED
 
@@ -311,7 +316,10 @@ class OperationManager:
     ) -> Operation:
         """Create a new operation with a generated ID and start its worker."""
         if not name.strip():
-            raise ValueError("operation name cannot be empty")
+            raise RavenError(
+                ErrorCode.INVALID_OPERATION_NAME,
+                "Operation name cannot be empty.",
+            )
 
         operation_id = uuid4()
         key = str(operation_id)
@@ -319,7 +327,10 @@ class OperationManager:
         async with self._lock:
             self._ensure_open()
             if key in self._operations or key in self._registry.stored_operation_ids():
-                raise ValueError(f"operation '{key}' already exists")
+                raise RavenError(
+                    ErrorCode.INTERNAL_ERROR,
+                    f"Operation '{key}' already exists unexpectedly.",
+                )
 
             operation = Operation(
                 operation_id=operation_id,
@@ -342,7 +353,10 @@ class OperationManager:
                 return operation
 
         if key not in self._registry.stored_operation_ids():
-            raise KeyError(f"operation '{key}' was not found")
+            raise RavenError(
+                ErrorCode.OPERATION_NOT_FOUND,
+                f"Operation '{key}' was not found.",
+            )
 
         stream = self._registry.get(key)
         operation = Operation.from_events(
@@ -404,9 +418,15 @@ class OperationManager:
         try:
             return operation_id if isinstance(operation_id, UUID) else UUID(operation_id)
         except (TypeError, ValueError) as exc:
-            raise ValueError("operation_id must be a valid UUID") from exc
+            raise RavenError(
+                ErrorCode.INVALID_OPERATION_ID,
+                "operation_id must be a valid UUID.",
+            ) from exc
 
 
     def _ensure_open(self) -> None:
         if self._closed:
-            raise RuntimeError("operation manager is closed")
+            raise RavenError(
+                ErrorCode.OPERATION_MANAGER_CLOSED,
+                "Operation manager is closed.",
+            )
