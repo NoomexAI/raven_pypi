@@ -9,7 +9,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-from .events import Event, EventStream, EventStreamRegistry
+from .events import Event, EventStream, EventStreamRegistry, EventType
 
 
 
@@ -106,7 +106,7 @@ class Operation:
 
             await self._stream.publish(
                 Event(
-                    type="operation.queued",
+                    type=EventType.OPERATION_QUEUED,
                     data={"name": self.name},
                 )
             )
@@ -175,7 +175,7 @@ class Operation:
         if not events:
             raise KeyError(f"operation '{operation_id}' has no persisted events")
 
-        queued = next((event for event in events if event.type == "operation.queued"), None)
+        queued = next((event for event in events if event.type == EventType.OPERATION_QUEUED), None)
         name = queued.data.get("name") if queued else None
         if not isinstance(name, str) or not name:
             name = "unknown"
@@ -214,7 +214,7 @@ class Operation:
 
         await self._stream.publish(
             Event(
-                type="operation.started",
+                type=EventType.OPERATION_STARTED,
                 data={"name": self.name},
             )
         )
@@ -223,7 +223,7 @@ class Operation:
     async def _finish_completed(self, result: Any) -> None:
         await self._finish(
             status=OperationStatus.COMPLETED,
-            event_type="operation.completed",
+            event_type=EventType.OPERATION_COMPLETED,
             result=result,
         )
 
@@ -231,7 +231,7 @@ class Operation:
     async def _finish_failed(self, error: BaseException) -> None:
         await self._finish(
             status=OperationStatus.FAILED,
-            event_type="operation.failed",
+            event_type=EventType.OPERATION_FAILED,
             error=str(error) or error.__class__.__name__,
         )
 
@@ -239,7 +239,7 @@ class Operation:
     async def _finish_cancelled(self) -> None:
         await self._finish(
             status=OperationStatus.CANCELLED,
-            event_type="operation.cancelled",
+            event_type=EventType.OPERATION_CANCELLED,
         )
 
 
@@ -247,7 +247,7 @@ class Operation:
         self,
         *,
         status: OperationStatus,
-        event_type: str,
+        event_type: EventType,
         result: Any = None,
         error: str | None = None,
     ) -> None:
@@ -273,7 +273,7 @@ class Operation:
 
 
     def _restore(self, events: list[Event]) -> None:
-        started = next((event for event in events if event.type == "operation.started"), None)
+        started = next((event for event in events if event.type == EventType.OPERATION_STARTED), None)
         final = next((event for event in events if event.is_final), None)
 
         if started is not None:
@@ -284,12 +284,12 @@ class Operation:
             return
 
         self._finished_at = final.timestamp
-        if final.type == "operation.completed":
+        if final.type == EventType.OPERATION_COMPLETED:
             self._status = OperationStatus.COMPLETED
-        elif final.type == "operation.failed":
+        elif final.type == EventType.OPERATION_FAILED:
             self._status = OperationStatus.FAILED
             self._error = final.data.get("error")
-        elif final.type == "operation.cancelled":
+        elif final.type == EventType.OPERATION_CANCELLED:
             self._status = OperationStatus.CANCELLED
 
 
@@ -308,15 +308,13 @@ class OperationManager:
         self,
         name: str,
         worker: OperationWorker,
-        *,
-        operation_id: UUID | str | None = None,
     ) -> Operation:
-        """Create an operation, register it, and start its worker."""
+        """Create a new operation with a generated ID and start its worker."""
         if not name.strip():
             raise ValueError("operation name cannot be empty")
 
-        parsed_id = self._parse_operation_id(operation_id) if operation_id is not None else uuid4()
-        key = str(parsed_id)
+        operation_id = uuid4()
+        key = str(operation_id)
 
         async with self._lock:
             self._ensure_open()
@@ -324,7 +322,7 @@ class OperationManager:
                 raise ValueError(f"operation '{key}' already exists")
 
             operation = Operation(
-                operation_id=parsed_id,
+                operation_id=operation_id,
                 name=name,
                 stream=self._registry.get(key),
             )

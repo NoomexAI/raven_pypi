@@ -6,6 +6,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta, timezone
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -13,17 +14,76 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class EventType(StrEnum):
+    """Event names emitted by Raven components."""
+
+    CHAT_DELTA = "chat.delta"
+    WORK_PROGRESS = "work.progress"
+
+    KNOWLEDGE_CREATE_STARTED = "knowledge.create.started"
+    KNOWLEDGE_CREATE_COMPLETED = "knowledge.create.completed"
+    KNOWLEDGE_CREATE_FAILED = "knowledge.create.failed"
+    KNOWLEDGE_DELETE_STARTED = "knowledge.delete.started"
+    KNOWLEDGE_DELETE_COMPLETED = "knowledge.delete.completed"
+    KNOWLEDGE_DELETE_FAILED = "knowledge.delete.failed"
+    KNOWLEDGE_UPDATED = "knowledge.updated"
+    KNOWLEDGE_INGEST_STARTED = "knowledge.ingest.started"
+    KNOWLEDGE_INGEST_PROGRESS = "knowledge.ingest.progress"
+    KNOWLEDGE_INGEST_COMPLETED = "knowledge.ingest.completed"
+    KNOWLEDGE_INGEST_FAILED = "knowledge.ingest.failed"
+    KNOWLEDGE_FILE_DELETE_STARTED = "knowledge.file_delete.started"
+    KNOWLEDGE_FILE_DELETE_COMPLETED = "knowledge.file_delete.completed"
+    KNOWLEDGE_FILE_DELETE_FAILED = "knowledge.file_delete.failed"
+
+    OPERATION_QUEUED = "operation.queued"
+    OPERATION_STARTED = "operation.started"
+    OPERATION_COMPLETED = "operation.completed"
+    OPERATION_FAILED = "operation.failed"
+    OPERATION_CANCELLED = "operation.cancelled"
+
+    MODEL_CONNECTION_STARTED = "model.connection.started"
+    MODEL_CONNECTION_COMPLETED = "model.connection.completed"
+    MODEL_CONNECTION_FAILED = "model.connection.failed"
+    MODEL_LIST_STARTED = "model.list.started"
+    MODEL_LIST_COMPLETED = "model.list.completed"
+    MODEL_LIST_FAILED = "model.list.failed"
+    MODEL_INSPECT_STARTED = "model.inspect.started"
+    MODEL_INSPECT_COMPLETED = "model.inspect.completed"
+    MODEL_INSPECT_FAILED = "model.inspect.failed"
+    MODEL_PULL_STARTED = "model.pull.started"
+    MODEL_PULL_PROGRESS = "model.pull.progress"
+    MODEL_PULL_COMPLETED = "model.pull.completed"
+    MODEL_PULL_FAILED = "model.pull.failed"
+    MODEL_DELETE_STARTED = "model.delete.started"
+    MODEL_DELETE_COMPLETED = "model.delete.completed"
+    MODEL_DELETE_FAILED = "model.delete.failed"
+    MODEL_LOAD_LLM_STARTED = "model.load_llm.started"
+    MODEL_LOAD_LLM_COMPLETED = "model.load_llm.completed"
+    MODEL_LOAD_LLM_FAILED = "model.load_llm.failed"
+    MODEL_LOAD_EMBEDDING_STARTED = "model.load_embedding.started"
+    MODEL_LOAD_EMBEDDING_COMPLETED = "model.load_embedding.completed"
+    MODEL_LOAD_EMBEDDING_FAILED = "model.load_embedding.failed"
+    MODEL_UNLOAD_LLM_STARTED = "model.unload_llm.started"
+    MODEL_UNLOAD_LLM_COMPLETED = "model.unload_llm.completed"
+    MODEL_UNLOAD_LLM_FAILED = "model.unload_llm.failed"
+    MODEL_UNLOAD_EMBEDDING_STARTED = "model.unload_embedding.started"
+    MODEL_UNLOAD_EMBEDDING_COMPLETED = "model.unload_embedding.completed"
+    MODEL_UNLOAD_EMBEDDING_FAILED = "model.unload_embedding.failed"
+
+
+
 class Event(BaseModel):
     """An event stored in an operation's event stream."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    type: str
+    type: EventType
     data: dict[str, Any] = Field(default_factory=dict)
     operation_id: UUID | None = None
     event_id: int | None = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     is_final: bool = False
+
 
 
 class EventStream:
