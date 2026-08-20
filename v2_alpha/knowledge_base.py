@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from uuid import UUID, uuid4, uuid5
+from uuid import UUID, uuid5
 
 import qdrant_client
 from llama_index.core.node_parser import SentenceSplitter
@@ -191,6 +191,7 @@ class Knowledge:
         file_name: str,
         sections: Sequence[dict[str, Any]],
         *,
+        file_id: str,
         embed_model: Any,
         chunk_size: int = 512,
         chunk_overlap: int = 50,
@@ -199,6 +200,11 @@ class Knowledge:
         """Embed, index, and persist one file and its sections."""
         self._ensure_started()
 
+        if not isinstance(file_id, str) or not file_id.strip():
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                "file_id must be a non-empty string.",
+            )
         if embed_model is None:
             raise RavenError(
                 ErrorCode.EMBEDDING_MODEL_REQUIRED,
@@ -221,7 +227,6 @@ class Knowledge:
 
         async with self._mutation_lock:
             original_file_meta = copy.deepcopy(self._file_meta)
-            file_id: str | None = None
             vectors_written = False
             metadata_written = False
 
@@ -232,7 +237,6 @@ class Knowledge:
                         f"File '{file_name}' already exists in knowledge '{self.name}'.",
                     )
 
-                file_id = uuid4().hex[:12]
                 chunk_records: list[tuple[str, str, int, int, dict[str, Any]]] = []
 
                 for section_index, section in enumerate(sections, start=1):
@@ -313,6 +317,9 @@ class Knowledge:
                         "conditions": section.get("conditions", []),
                         "definitions": section.get("definitions", []),
                         "raw_content": section.get("raw_content", ""),
+                        "source_element_ids": section.get("source_element_ids", []),
+                        "navigation_type": section.get("navigation_type", "none"),
+                        "source_range": section.get("source_range"),
                     }
 
                 await asyncio.to_thread(self._write_json, self.files_path, self._file_meta)
@@ -326,12 +333,12 @@ class Knowledge:
                 }
             except asyncio.CancelledError:
                 self._file_meta = original_file_meta
-                if vectors_written and not metadata_written and file_id is not None:
+                if vectors_written and not metadata_written:
                     await asyncio.to_thread(self._delete_points_by_file_id, file_id)
                 raise
             except Exception as exc:
                 self._file_meta = original_file_meta
-                if vectors_written and not metadata_written and file_id is not None:
+                if vectors_written and not metadata_written:
                     await asyncio.to_thread(self._delete_points_by_file_id, file_id)
                 await self._emit(
                     operation,

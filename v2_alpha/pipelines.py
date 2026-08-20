@@ -6,16 +6,17 @@ import asyncio
 import logging
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
-from llama_index.core import Document
-from llama_index.core.node_parser import SemanticSplitterNodeParser
 from llama_index.core.prompts.base import ChatPromptTemplate
 from pydantic import BaseModel, ConfigDict, Field
 
+from .document_parser import DocumentParser
 from .errors import ErrorCode, RavenError, error_payload
 from .events import Event, EventType
 from .knowledge_base import KnowledgeBase
 from .operations import Operation
+from .semantic_splitter import ProvenanceAwareSemanticSplitter
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ class IngestionPipeline:
         breakpoint_percentile_threshold: int = 95,
         buffer_size: int = 1,
         max_extraction_retries: int = DEFAULT_MAX_EXTRACTION_RETRIES,
+        document_parser: DocumentParser | None = None,
     ) -> None:
         if not 0 < breakpoint_percentile_threshold <= 100:
             raise ValueError("breakpoint_percentile_threshold must be between 1 and 100")
@@ -77,6 +79,7 @@ class IngestionPipeline:
         self._breakpoint_percentile_threshold = breakpoint_percentile_threshold
         self._buffer_size = buffer_size
         self._max_extraction_retries = max_extraction_retries
+        self._document_parser = document_parser or DocumentParser()
         self._prompt = ChatPromptTemplate.from_messages(
             [
                 ("system", METADATA_SYSTEM_PROMPT),
@@ -113,16 +116,17 @@ class IngestionPipeline:
                 )
 
             knowledge = self._knowledge_base.get(knowledge_name)
-            text = await self._read_source(path)
+            file_id = uuid4().hex[:12]
+            parsed_document = await self._document_parser.parse(path, file_id=file_id)
             self._raise_if_cancelled(operation)
 
-            splitter = SemanticSplitterNodeParser(
+            splitter = ProvenanceAwareSemanticSplitter(
                 embed_model=embed_model,
                 breakpoint_percentile_threshold=self._breakpoint_percentile_threshold,
                 buffer_size=self._buffer_size,
             )
-            nodes = await splitter.aget_nodes_from_documents([Document(text=text)])
-            total = len(nodes)
+            semantic_sections = await splitter.split(parsed_document)
+            total = len(semantic_sections)
             await self._emit(
                 operation,
                 EventType.INGESTION_PROGRESS,
@@ -142,7 +146,7 @@ class IngestionPipeline:
                 )
 
             sections: list[dict[str, Any]] = []
-            for section_index, node in enumerate(nodes, start=1):
+            for section_index, semantic_section in enumerate(semantic_sections, start=1):
                 self._raise_if_cancelled(operation)
                 await self._emit(
                     operation,
@@ -156,7 +160,7 @@ class IngestionPipeline:
                         "section_index": section_index,
                     },
                 )
-                section_text = node.get_content()
+                section_text = semantic_section.raw_content
                 metadata = await self._extract_metadata(
                     llm,
                     section_text,
@@ -170,6 +174,9 @@ class IngestionPipeline:
                         "conditions": metadata.conditions,
                         "definitions": metadata.definitions,
                         "raw_content": section_text,
+                        "source_element_ids": semantic_section.source_element_ids,
+                        "navigation_type": semantic_section.navigation_type.value,
+                        "source_range": semantic_section.source_range,
                     }
                 )
 
@@ -188,6 +195,7 @@ class IngestionPipeline:
             result = await knowledge.ingest(
                 file_name,
                 sections,
+                file_id=file_id,
                 embed_model=embed_model,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
@@ -253,17 +261,6 @@ class IngestionPipeline:
                 "attempts": self._max_extraction_retries,
             },
         ) from last_error
-
-
-    @staticmethod
-    async def _read_source(path: Path) -> str:
-        try:
-            return await asyncio.to_thread(path.read_text, encoding="utf-8")
-        except (OSError, UnicodeError) as exc:
-            raise RavenError(
-                ErrorCode.SOURCE_FILE_UNREADABLE,
-                f"Source file '{path}' could not be read.",
-            ) from exc
 
 
     @staticmethod
