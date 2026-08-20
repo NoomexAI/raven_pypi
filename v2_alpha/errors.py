@@ -23,6 +23,8 @@ class ErrorCode(StrEnum):
     EMBEDDING_DIMENSION_MISMATCH = "embedding_dimension_mismatch"
     SOURCE_FILE_NOT_FOUND = "source_file_not_found"
     SOURCE_FILE_UNREADABLE = "source_file_unreadable"
+    UNSUPPORTED_SOURCE_FILE = "unsupported_source_file"
+    DOCUMENT_PARSE_FAILED = "document_parse_failed"
     NO_SECTIONS_PRODUCED = "no_sections_produced"
     SECTION_METADATA_EXTRACTION_FAILED = "section_metadata_extraction_failed"
 

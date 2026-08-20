@@ -19,6 +19,7 @@ dependencies = [
     "ollama>=0.5",
     "curl-cffi>=0.9.0",
     "pydantic>=2.0",
+    "docling>=2.0,<3.0",
     "zstandard>=0.23.0; platform_system == 'Linux'",
 ]
 
@@ -66,3 +67,6 @@ disallow_untyped_defs = false
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "integration: tests that require external services or real model assets",
+]
