@@ -20,7 +20,6 @@ from .semantic_splitter import ProvenanceAwareSemanticSplitter
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MAX_EXTRACTION_RETRIES = 3
 
 METADATA_SYSTEM_PROMPT = """\
 You are a precise data extraction agent. You are given ONE section of a document
@@ -65,7 +64,7 @@ class IngestionPipeline:
         *,
         breakpoint_percentile_threshold: int = 95,
         buffer_size: int = 1,
-        max_extraction_retries: int = DEFAULT_MAX_EXTRACTION_RETRIES,
+        max_extraction_retries: int = 3,
         document_parser: DocumentParser | None = None,
     ) -> None:
         if not 0 < breakpoint_percentile_threshold <= 100:

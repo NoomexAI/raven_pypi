@@ -197,7 +197,7 @@ class DocumentParser:
 
     @staticmethod
     def _element_id(file_id: str, index: int) -> str:
-        return f"{file_id}-element-{index:04d}"
+        return f"{file_id}-element-{index}"
 
 
     @staticmethod
