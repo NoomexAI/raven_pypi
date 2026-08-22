@@ -8,7 +8,6 @@ import json
 import os
 import re
 import shutil
-import time
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -158,6 +157,7 @@ class Knowledge:
                     "section_count": info.get("sections", 0),
                     "chunk_count": info.get("chunks", 0),
                     "ingested_at": info.get("ingested_at"),
+                    "navigation_type": info.get("navigation_type", "none"),
                 }
             )
         return result
@@ -193,6 +193,7 @@ class Knowledge:
         *,
         file_id: str,
         embed_model: Any,
+        navigation_type: str = "none",
         chunk_size: int = 512,
         chunk_overlap: int = 50,
         operation: Operation | None = None,
@@ -304,7 +305,8 @@ class Knowledge:
                     "file_id": file_id,
                     "sections": len(sections),
                     "chunks": len(points),
-                    "ingested_at": time.time(),
+                    "ingested_at": datetime.now(timezone.utc).isoformat(),
+                    "navigation_type": navigation_type,
                 }
                 for section_index, section in enumerate(sections, start=1):
                     section_id = f"{file_id}-{section_index}"
@@ -318,7 +320,6 @@ class Knowledge:
                         "definitions": section.get("definitions", []),
                         "raw_content": section.get("raw_content", ""),
                         "source_element_ids": section.get("source_element_ids", []),
-                        "navigation_type": section.get("navigation_type", "none"),
                         "source_range": section.get("source_range"),
                     }
 

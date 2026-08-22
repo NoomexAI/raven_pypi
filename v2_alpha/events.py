@@ -43,6 +43,16 @@ class EventType(StrEnum):
     KNOWLEDGE_FILE_DELETE_COMPLETED = "knowledge.file_delete.completed"
     KNOWLEDGE_FILE_DELETE_FAILED = "knowledge.file_delete.failed"
 
+    CONVERSATION_CREATE_STARTED = "conversation.create.started"
+    CONVERSATION_CREATE_COMPLETED = "conversation.create.completed"
+    CONVERSATION_CREATE_FAILED = "conversation.create.failed"
+    CONVERSATION_UPDATE_STARTED = "conversation.update.started"
+    CONVERSATION_UPDATE_COMPLETED = "conversation.update.completed"
+    CONVERSATION_UPDATE_FAILED = "conversation.update.failed"
+    CONVERSATION_DELETE_STARTED = "conversation.delete.started"
+    CONVERSATION_DELETE_COMPLETED = "conversation.delete.completed"
+    CONVERSATION_DELETE_FAILED = "conversation.delete.failed"
+
     RETRIEVAL_EMBEDDED_STARTED = "retrieval.embedded.started"
     RETRIEVAL_EMBEDDED_COMPLETED = "retrieval.embedded.completed"
     RETRIEVAL_EMBEDDED_FAILED = "retrieval.embedded.failed"
@@ -56,6 +66,10 @@ class EventType(StrEnum):
     RETRIEVAL_VECTOR_CONDITIONED_STARTED = "retrieval.vector_conditioned.started"
     RETRIEVAL_VECTOR_CONDITIONED_COMPLETED = "retrieval.vector_conditioned.completed"
     RETRIEVAL_VECTOR_CONDITIONED_FAILED = "retrieval.vector_conditioned.failed"
+
+    RECONSTRUCTION_STARTED = "reconstruction.started"
+    RECONSTRUCTION_COMPLETED = "reconstruction.completed"
+    RECONSTRUCTION_FAILED = "reconstruction.failed"
 
     OPERATION_QUEUED = "operation.queued"
     OPERATION_STARTED = "operation.started"

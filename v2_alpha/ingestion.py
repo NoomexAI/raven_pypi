@@ -174,7 +174,6 @@ class IngestionPipeline:
                         "definitions": metadata.definitions,
                         "raw_content": section_text,
                         "source_element_ids": semantic_section.source_element_ids,
-                        "navigation_type": semantic_section.navigation_type.value,
                         "source_range": semantic_section.source_range,
                     }
                 )
@@ -196,6 +195,7 @@ class IngestionPipeline:
                 sections,
                 file_id=file_id,
                 embed_model=embed_model,
+                navigation_type=parsed_document.navigation_type.value,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
                 operation=operation,
