@@ -18,10 +18,10 @@ import qdrant_client
 from llama_index.core.node_parser import SentenceSplitter
 from qdrant_client.http import models as qmodels
 
-from .config import PathConfig
-from .events import Event, EventType
-from .errors import ErrorCode, RavenError, error_payload
-from .operations import Operation
+from ..core.config import PathConfig
+from ..core.errors import ErrorCode, RavenError, error_payload
+from ..core.events import Event, EventType
+from ..core.operations import Operation
 
 COLLECTION_NAME = "chunks"
 PERSISTENCE_VERSION = 1

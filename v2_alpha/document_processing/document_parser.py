@@ -11,7 +11,7 @@ from typing import Any
 from docling.document_converter import DocumentConverter
 from pydantic import BaseModel, ConfigDict, Field
 
-from .errors import ErrorCode, RavenError
+from ..core.errors import ErrorCode, RavenError
 
 
 class NavigationType(StrEnum):

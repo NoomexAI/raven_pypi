@@ -9,10 +9,10 @@ from typing import Any
 from llama_index.core.prompts.base import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
-from .errors import error_payload
-from .events import Event, EventType
-from .knowledge_base import KnowledgeBase
-from .operations import Operation
+from ..core.errors import error_payload
+from ..core.events import Event, EventType
+from ..core.operations import Operation
+from ..data_management.knowledge_base import KnowledgeBase
 
 
 class RetrievalPipeline:

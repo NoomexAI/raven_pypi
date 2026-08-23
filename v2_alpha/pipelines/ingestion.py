@@ -11,12 +11,12 @@ from uuid import uuid4
 from llama_index.core.prompts.base import ChatPromptTemplate
 from pydantic import BaseModel, ConfigDict, Field
 
-from .document_parser import DocumentParser
-from .errors import ErrorCode, RavenError, error_payload
-from .events import Event, EventType
-from .knowledge_base import KnowledgeBase
-from .operations import Operation
-from .semantic_splitter import ProvenanceAwareSemanticSplitter
+from ..core.errors import ErrorCode, RavenError, error_payload
+from ..core.events import Event, EventType
+from ..core.operations import Operation
+from ..data_management.knowledge_base import KnowledgeBase
+from ..document_processing.document_parser import DocumentParser
+from ..document_processing.semantic_splitter import ProvenanceAwareSemanticSplitter
 
 logger = logging.getLogger(__name__)
 

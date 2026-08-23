@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 import re
@@ -10,7 +11,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from llama_index.core.llms import ChatMessage
 from llama_index.core.memory import ChatSummaryMemoryBuffer, VectorMemory
@@ -19,15 +20,16 @@ from llama_index.vector_stores.qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qdrant_models
 
-from .config import PathConfig
-from .errors import ErrorCode, RavenError, error_payload
-from .events import Event, EventType
+from ..core.config import PathConfig
+from ..core.errors import ErrorCode, RavenError, error_payload
+from ..core.events import Event, EventType
+from ..core.operations import Operation
 from .knowledge_base import KnowledgeBase
-from .operations import Operation
 
 
 DEFAULT_TITLE = "New Conversation"
 PERSISTENCE_VERSION = 1
+PREFERENCE_SCHEMA_VERSION = 1
 MEMORY_COLLECTION = "messages"
 MEMORY_VECTOR_NAME = "text-dense"
 _CONVERSATION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -56,7 +58,7 @@ class Conversation:
         self._chat_store: SimpleChatStore | None = None
         self._chat_memory: ChatSummaryMemoryBuffer | None = None
         self._vector_memory: VectorMemory | None = None
-        self._preferences: list[str] = []
+        self._preferences: list[dict[str, str]] = []
         self._lifecycle_lock = asyncio.Lock()
         self._memory_lock = asyncio.Lock()
         self._mutation_lock = asyncio.Lock()
@@ -169,6 +171,7 @@ class Conversation:
                 chat_store=chat_store,
                 chat_store_key="messages",
                 token_limit=token_limit,
+                count_initial_tokens=True,
             )
             self._vector_memory = VectorMemory.from_defaults(
                 vector_store=vector_store,
@@ -237,15 +240,15 @@ class Conversation:
         await asyncio.to_thread(self._persist_chat_store, chat_store)
 
 
-    def get_preferences(self) -> list[str]:
-        """Return a copy of explicit conversation preferences."""
+    def get_preferences(self) -> list[dict[str, str]]:
+        """Return copies of explicit conversation preferences."""
         self._ensure_started()
-        return list(self._preferences)
+        return copy.deepcopy(self._preferences)
 
 
-    async def save_preference(self, preference: str) -> None:
-        """Persist one explicit conversation preference."""
-        value = preference.strip() if isinstance(preference, str) else ""
+    async def save_preference(self, text: str) -> dict[str, str]:
+        """Persist one explicit preference and return its stable record."""
+        value = text.strip() if isinstance(text, str) else ""
         if not value:
             raise RavenError(
                 ErrorCode.INVALID_METADATA,
@@ -254,19 +257,53 @@ class Conversation:
 
         self._ensure_started()
         async with self._mutation_lock:
-            if value not in self._preferences:
-                self._preferences.append(value)
-            await asyncio.to_thread(self._persist_preferences)
+            existing = next(
+                (
+                    preference
+                    for preference in self._preferences
+                    if preference["text"] == value
+                ),
+                None,
+            )
+            if existing is not None:
+                return copy.deepcopy(existing)
+
+            preference = {"preference_id": str(uuid4()), "text": value}
+            self._preferences.append(preference)
+            try:
+                await asyncio.to_thread(self._persist_preferences)
+            except Exception:
+                self._preferences.pop()
+                raise
+            return copy.deepcopy(preference)
 
 
-    async def remove_preference(self, preference: str) -> None:
-        """Remove one explicit conversation preference if it exists."""
+    async def remove_preference(self, preference_id: str) -> dict[str, str]:
+        """Remove one explicit preference by its stable ID."""
+        preference_id = self._validate_preference_id(preference_id)
         self._ensure_started()
         async with self._mutation_lock:
-            self._preferences = [
-                value for value in self._preferences if value != preference
-            ]
-            await asyncio.to_thread(self._persist_preferences)
+            index = next(
+                (
+                    index
+                    for index, preference in enumerate(self._preferences)
+                    if preference["preference_id"] == preference_id
+                ),
+                None,
+            )
+            if index is None:
+                raise RavenError(
+                    ErrorCode.PREFERENCE_NOT_FOUND,
+                    f"Preference '{preference_id}' does not exist.",
+                )
+
+            removed = self._preferences.pop(index)
+            try:
+                await asyncio.to_thread(self._persist_preferences)
+            except Exception:
+                self._preferences.insert(index, removed)
+                raise
+            return copy.deepcopy(removed)
 
 
     def to_dict(self) -> dict[str, Any]:
@@ -317,7 +354,7 @@ class Conversation:
         os.replace(temporary_path, self.messages_path)
 
 
-    def _load_preferences(self) -> list[str]:
+    def _load_preferences(self) -> list[dict[str, str]]:
         if not self.preferences_path.exists():
             return []
 
@@ -329,28 +366,109 @@ class Conversation:
                 f"Preferences for conversation '{self.conversation_id}' could not be read.",
             ) from exc
 
-        preferences = data.get("preferences") if isinstance(data, dict) else None
-        if not isinstance(preferences, list) or not all(
-            isinstance(value, str) for value in preferences
-        ):
+        if not isinstance(data, dict):
             raise RavenError(
                 ErrorCode.INVALID_METADATA,
                 f"Invalid preferences for conversation '{self.conversation_id}'.",
             )
-        return list(dict.fromkeys(preferences))
+
+        if data.get("schema_version", PREFERENCE_SCHEMA_VERSION) != PREFERENCE_SCHEMA_VERSION:
+            raise RavenError(
+                ErrorCode.UNSUPPORTED_METADATA_VERSION,
+                f"Unsupported preferences version for conversation '{self.conversation_id}'.",
+            )
+
+        preferences = data.get("preferences")
+        if not isinstance(preferences, list):
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                f"Invalid preferences for conversation '{self.conversation_id}'.",
+            )
+
+        if all(isinstance(value, str) for value in preferences):
+            migrated = self._migrate_preferences(preferences)
+            self._write_preferences(migrated)
+            return migrated
+
+        loaded: list[dict[str, str]] = []
+        seen_ids: set[str] = set()
+        seen_texts: set[str] = set()
+        for preference in preferences:
+            if not isinstance(preference, dict):
+                raise RavenError(
+                    ErrorCode.INVALID_METADATA,
+                    f"Invalid preference in conversation '{self.conversation_id}'.",
+                )
+            preference_id = self._validate_preference_id(
+                preference.get("preference_id")
+            )
+            text = preference.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise RavenError(
+                    ErrorCode.INVALID_METADATA,
+                    f"Invalid preference text in conversation '{self.conversation_id}'.",
+                )
+            text = text.strip()
+            if preference_id in seen_ids or text in seen_texts:
+                continue
+            seen_ids.add(preference_id)
+            seen_texts.add(text)
+            loaded.append({"preference_id": preference_id, "text": text})
+        return loaded
 
 
     def _persist_preferences(self) -> None:
+        self._write_preferences(self._preferences)
+
+
+    def _write_preferences(self, preferences: list[dict[str, str]]) -> None:
         temporary_path = self.preferences_path.with_suffix(".json.tmp")
         temporary_path.write_text(
             json.dumps(
-                {"schema_version": PERSISTENCE_VERSION, "preferences": self._preferences},
+                {
+                    "schema_version": PREFERENCE_SCHEMA_VERSION,
+                    "preferences": preferences,
+                },
                 indent=2,
                 ensure_ascii=False,
             ),
             encoding="utf-8",
         )
         os.replace(temporary_path, self.preferences_path)
+
+
+    @staticmethod
+    def _migrate_preferences(values: list[str]) -> list[dict[str, str]]:
+        migrated: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for value in values:
+            text = value.strip()
+            if text and text not in seen:
+                migrated.append({"preference_id": str(uuid4()), "text": text})
+                seen.add(text)
+        return migrated
+
+
+    @staticmethod
+    def _validate_preference_id(preference_id: Any) -> str:
+        if not isinstance(preference_id, str):
+            raise RavenError(
+                ErrorCode.INVALID_PREFERENCE_ID,
+                "preference_id must be a UUID string.",
+            )
+        try:
+            parsed = UUID(preference_id)
+        except ValueError as exc:
+            raise RavenError(
+                ErrorCode.INVALID_PREFERENCE_ID,
+                "preference_id must be a UUID string.",
+            ) from exc
+        if str(parsed) != preference_id:
+            raise RavenError(
+                ErrorCode.INVALID_PREFERENCE_ID,
+                "preference_id must use the canonical UUID format.",
+            )
+        return preference_id
 
 
     def _ensure_memory_collection(self, embed_model: Any) -> None:

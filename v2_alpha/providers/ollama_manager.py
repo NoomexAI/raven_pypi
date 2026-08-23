@@ -14,9 +14,9 @@ import ollama
 from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.llms.ollama import Ollama
 
-from .events import Event, EventType
-from .errors import ErrorCode, RavenError, error_payload
-from .operations import Operation
+from ..core.errors import ErrorCode, RavenError, error_payload
+from ..core.events import Event, EventType
+from ..core.operations import Operation
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 OLLAMA_VULKAN_ENV = "OLLAMA_VULKAN"

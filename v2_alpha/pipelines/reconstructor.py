@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from .errors import ErrorCode, RavenError, error_payload
-from .events import Event, EventType
-from .knowledge_base import KnowledgeBase
-from .operations import Operation
+from ..core.errors import ErrorCode, RavenError, error_payload
+from ..core.events import Event, EventType
+from ..core.operations import Operation
+from ..data_management.knowledge_base import KnowledgeBase
 
 
 class Reconstructor:

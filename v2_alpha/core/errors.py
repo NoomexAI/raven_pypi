@@ -19,6 +19,8 @@ class ErrorCode(StrEnum):
     CONVERSATION_CLOSED = "conversation_closed"
     CONVERSATION_NOT_STARTED = "conversation_not_started"
     CONVERSATION_MEMORY_NOT_INITIALIZED = "conversation_memory_not_initialized"
+    INVALID_PREFERENCE_ID = "invalid_preference_id"
+    PREFERENCE_NOT_FOUND = "preference_not_found"
     INVALID_CONVERSATION_ID = "invalid_conversation_id"
     INVALID_CONVERSATION_TITLE = "invalid_conversation_title"
     FILE_ALREADY_EXISTS = "file_already_exists"
