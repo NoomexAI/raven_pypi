@@ -23,10 +23,14 @@ class ErrorCode(StrEnum):
     PREFERENCE_NOT_FOUND = "preference_not_found"
     INVALID_CONVERSATION_ID = "invalid_conversation_id"
     INVALID_CONVERSATION_TITLE = "invalid_conversation_title"
+    INVALID_RETRIEVAL_MODE = "invalid_retrieval_mode"
+    RETRIEVAL_MODE_NOT_ALLOWED = "retrieval_mode_not_allowed"
     FILE_ALREADY_EXISTS = "file_already_exists"
     FILE_NOT_FOUND = "file_not_found"
+    SECTION_NOT_FOUND = "section_not_found"
     LLM_MODEL_REQUIRED = "llm_model_required"
     EMBEDDING_MODEL_REQUIRED = "embedding_model_required"
+    AGENT_MAX_ITERATIONS = "agent_max_iterations"
     INVALID_CHUNKING = "invalid_chunking"
     NO_CHUNKS_PRODUCED = "no_chunks_produced"
     INVALID_EMBEDDING_RESULT = "invalid_embedding_result"
@@ -40,6 +44,7 @@ class ErrorCode(StrEnum):
 
     INVALID_OPERATION_NAME = "invalid_operation_name"
     OPERATION_NOT_FOUND = "operation_not_found"
+    OPERATION_CANCELLED = "operation_cancelled"
     INVALID_OPERATION_ID = "invalid_operation_id"
     OPERATION_MANAGER_CLOSED = "operation_manager_closed"
 

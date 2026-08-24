@@ -91,10 +91,5 @@ Desktop.ini
 
 # Tests, fixtures, and temp runtime data
 /tests/
-/tests/*
-!/tests/
-!/tests/test_operations_unit.py
-!/tests/test_server_contract.py
-!/tests/test_agent_harness.py
 /test_docs/
 /_tmp_root/

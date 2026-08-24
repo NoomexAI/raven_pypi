@@ -21,6 +21,13 @@ class EventType(StrEnum):
     """Event names emitted by Raven components."""
 
     CHAT_DELTA = "chat.delta"
+    CHAT_THINKING_DELTA = "chat.thinking_delta"
+    CHAT_RESPONSE_DELTA = "chat.response_delta"
+    CHAT_TOOL_CALL = "chat.tool_call"
+    CHAT_TOOL_RESULT = "chat.tool_result"
+    CHAT_MAX_ITERATIONS = "chat.max_iterations"
+    CHAT_COMPLETED = "chat.completed"
+    CHAT_FAILED = "chat.failed"
     WORK_PROGRESS = "work.progress"
 
     INGESTION_STARTED = "ingestion.started"
@@ -68,6 +75,7 @@ class EventType(StrEnum):
     RETRIEVAL_VECTOR_CONDITIONED_FAILED = "retrieval.vector_conditioned.failed"
 
     RECONSTRUCTION_STARTED = "reconstruction.started"
+    RECONSTRUCTION_FILE = "reconstruction.file"
     RECONSTRUCTION_COMPLETED = "reconstruction.completed"
     RECONSTRUCTION_FAILED = "reconstruction.failed"
 

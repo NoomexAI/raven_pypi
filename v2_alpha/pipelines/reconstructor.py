@@ -39,12 +39,16 @@ class Reconstructor:
 
             for (knowledge_name, file_name), section_ids in grouped_sections.items():
                 self._raise_if_cancelled(operation)
-                reconstructed_files.append(
-                    self._reconstruct_file(
-                        knowledge_name,
-                        file_name,
-                        section_ids,
-                    )
+                reconstructed_file = self._reconstruct_file(
+                    knowledge_name,
+                    file_name,
+                    section_ids,
+                )
+                reconstructed_files.append(reconstructed_file)
+                await self._emit(
+                    operation,
+                    EventType.RECONSTRUCTION_FILE,
+                    reconstructed_file,
                 )
 
             await self._emit(
