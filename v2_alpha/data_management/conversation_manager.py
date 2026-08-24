@@ -8,11 +8,13 @@ import json
 import os
 import re
 import shutil
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
+from llama_index.core.base.llms.types import MessageRole
 from llama_index.core.llms import ChatMessage
 from llama_index.core.memory import ChatSummaryMemoryBuffer, VectorMemory
 from llama_index.core.storage.chat_store import SimpleChatStore
@@ -229,6 +231,38 @@ class Conversation:
                 await vector_memory.aput(message)
 
 
+    async def append_turn(self, messages: Sequence[ChatMessage]) -> None:
+        """Append one complete model turn and persist it with one disk write."""
+        if not messages:
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                "A conversation turn must contain at least one message.",
+            )
+
+        memory = self._require_chat_memory()
+        chat_store = self._chat_store
+        if chat_store is None:
+            raise RavenError(
+                ErrorCode.CONVERSATION_MEMORY_NOT_INITIALIZED,
+                "Conversation chat storage has not been initialized.",
+            )
+        vector_memory = self._require_vector_memory()
+        async with self._mutation_lock:
+            for message in messages:
+                await asyncio.to_thread(memory.put, message)
+                if self._should_index_message(message):
+                    await vector_memory.aput(message)
+            await asyncio.to_thread(self._persist_chat_store, chat_store)
+
+
+    @staticmethod
+    def _should_index_message(message: ChatMessage) -> bool:
+        """Index user and final assistant text, not internal tool traces."""
+        if message.role == MessageRole.USER:
+            return bool(message.content)
+        return message.role == MessageRole.ASSISTANT and bool(message.content)
+
+
     async def persist_messages(self) -> None:
         """Atomically persist the current chat store to messages.json."""
         chat_store = self._chat_store
@@ -350,7 +384,12 @@ class Conversation:
 
     def _persist_chat_store(self, chat_store: SimpleChatStore) -> None:
         temporary_path = self.messages_path.with_suffix(".json.tmp")
-        chat_store.persist(str(temporary_path))
+        serialized = json.dumps(
+            chat_store.model_dump(mode="json"),
+            indent=2,
+            ensure_ascii=False,
+        )
+        temporary_path.write_text(serialized + "\n", encoding="utf-8")
         os.replace(temporary_path, self.messages_path)
 
 

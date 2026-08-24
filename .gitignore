@@ -85,6 +85,7 @@ Desktop.ini
 # Knowledge data (vector stores + file.json + meta.json)
 /data/knowledge_base/
 /data/conversations/
+/events/
 
 # Ollama bundle (models + local runtime)
 /ollama/

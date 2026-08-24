@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from llama_index.core.base.llms.types import MessageRole, ToolCallBlock
+from llama_index.core.llms import ChatMessage
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.errors import ErrorCode, RavenError
@@ -40,6 +42,71 @@ class AgentRunResult(BaseModel):
 
 
 
+@dataclass(slots=True)
+class AgentTranscript:
+    """Model-compatible conversation messages produced by one agent run."""
+
+    _messages: list[ChatMessage]
+
+    @classmethod
+    def from_query(cls, query: str) -> "AgentTranscript":
+        return cls(
+            _messages=[ChatMessage.from_str(query, role=MessageRole.USER)]
+        )
+
+
+    def add_tool_call(
+        self,
+        *,
+        call_id: str,
+        name: str,
+        arguments: dict[str, Any],
+    ) -> None:
+        self._messages.append(
+            ChatMessage(
+                role=MessageRole.ASSISTANT,
+                blocks=[
+                    ToolCallBlock(
+                        tool_call_id=call_id,
+                        tool_name=name,
+                        tool_kwargs=arguments,
+                    )
+                ],
+            )
+        )
+
+
+    def add_tool_result(
+        self,
+        *,
+        call_id: str,
+        name: str,
+        content: str,
+    ) -> None:
+        self._messages.append(
+            ChatMessage(
+                role=MessageRole.TOOL,
+                content=content,
+                additional_kwargs={
+                    "tool_call_id": call_id,
+                    "tool_name": name,
+                },
+            )
+        )
+
+
+    def add_assistant_response(self, response: str) -> None:
+        self._messages.append(
+            ChatMessage.from_str(response, role=MessageRole.ASSISTANT)
+        )
+
+
+    def messages(self) -> list[ChatMessage]:
+        """Return independent message copies for persistence or inspection."""
+        return [message.model_copy(deep=True) for message in self._messages]
+
+
+
 @dataclass(frozen=True, slots=True)
 class RetrievalPipelines:
     """The four retrieval implementations available to agent tools."""
@@ -54,8 +121,9 @@ class RetrievalPipelines:
 class AgentRun:
     """A replayable view over one running agent operation."""
 
-    def __init__(self, operation: Operation) -> None:
+    def __init__(self, operation: Operation, transcript: AgentTranscript) -> None:
         self._operation = operation
+        self._transcript = transcript
 
 
     @property
@@ -66,6 +134,11 @@ class AgentRun:
     @property
     def status(self) -> OperationStatus:
         return self._operation.status
+
+
+    def conversation_messages(self) -> list[ChatMessage]:
+        """Return the model-compatible transcript for this completed run."""
+        return self._transcript.messages()
 
 
     @property

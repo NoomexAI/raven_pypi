@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, cast
 
-from llama_index.core.agent.workflow import FunctionAgent
+from llama_index.core.agent.workflow import FunctionAgent, ToolCall, ToolCallResult
 from llama_index.core.llms import ChatMessage
 
 from ..core.errors import ErrorCode, RavenError, error_payload
@@ -15,7 +16,7 @@ from ..core.operations import Operation, OperationManager
 from ..data_management.conversation_manager import Conversation
 from ..data_management.knowledge_base import KnowledgeBase
 from ..pipelines.reconstructor import Reconstructor
-from .contracts import AgentRun, RetrievalPipelines
+from .contracts import AgentRun, AgentTranscript, RetrievalPipelines
 from .policy import AgentPolicy, RetrievalMode
 from .prompts import PromptBuilder, PromptBundle
 from .tools import ToolBuilder
@@ -88,6 +89,7 @@ class AgentHarness:
             max_iterations=self._max_iterations,
             top_k=self._top_k,
         )
+        transcript = AgentTranscript.from_query(query)
 
         async def worker(operation: Operation) -> None:
             await self._execute(
@@ -95,13 +97,14 @@ class AgentHarness:
                 query,
                 policy,
                 operation,
+                transcript,
             )
 
         operation = await self._operation_manager.submit(
             "chat.generate_response",
             worker,
         )
-        return AgentRun(operation)
+        return AgentRun(operation, transcript)
 
 
     def invalidate_system_prompt(self, conversation_id: str) -> None:
@@ -115,6 +118,7 @@ class AgentHarness:
         query: str,
         policy: AgentPolicy,
         operation: Operation,
+        transcript: AgentTranscript,
     ) -> None:
         handler: Any = None
         translator: WorkflowEventTranslator | None = None
@@ -155,6 +159,7 @@ class AgentHarness:
 
             async for workflow_event in handler.stream_events(expose_internal=False):
                 operation.raise_if_cancelled()
+                self._record_transcript_event(workflow_event, transcript)
                 for event in translator.translate(workflow_event):
                     if (
                         event.type == EventType.CHAT_RESPONSE_DELTA
@@ -190,6 +195,8 @@ class AgentHarness:
                 for pending_event in pending_response_events:
                     await operation.publish(pending_event)
 
+            transcript.add_assistant_response(response)
+
             reconstructed_sources = await self._reconstructor.reconstruct(
                 list(evidence.values()),
                 operation=operation,
@@ -219,6 +226,40 @@ class AgentHarness:
                 )
             )
             raise failure
+
+
+    @staticmethod
+    def _record_transcript_event(
+        workflow_event: Any,
+        transcript: AgentTranscript,
+    ) -> None:
+        if isinstance(workflow_event, ToolCall):
+            call_id = str(getattr(workflow_event, "tool_id", None) or "")
+            if not call_id:
+                return
+            name = str(getattr(workflow_event, "tool_name", "unknown"))
+            arguments = getattr(workflow_event, "tool_kwargs", {})
+            if not isinstance(arguments, dict):
+                arguments = {}
+            transcript.add_tool_call(
+                call_id=call_id,
+                name=name,
+                arguments=arguments,
+            )
+            return
+
+        if isinstance(workflow_event, ToolCallResult):
+            call_id = str(getattr(workflow_event, "tool_id", None) or "")
+            if not call_id:
+                return
+            name = str(getattr(workflow_event, "tool_name", "unknown"))
+            tool_output = getattr(workflow_event, "tool_output", None)
+            content = getattr(tool_output, "content", "")
+            transcript.add_tool_result(
+                call_id=call_id,
+                name=name,
+                content=content if isinstance(content, str) else str(content),
+            )
 
 
     def _update_system_prompt(
@@ -298,11 +339,17 @@ class AgentHarness:
     async def _cancel_handler(handler: Any) -> None:
         if handler is None:
             return
-        cancel_run = getattr(handler, "cancel_run", None)
-        is_done = getattr(handler, "is_done", None)
-        if callable(is_done) and is_done():
+        cancel_run = cast(
+            Callable[[], Awaitable[Any]] | None,
+            getattr(handler, "cancel_run", None),
+        )
+        is_done = cast(
+            Callable[[], bool] | None,
+            getattr(handler, "is_done", None),
+        )
+        if is_done is not None and is_done():
             return
-        if callable(cancel_run):
+        if cancel_run is not None:
             await cancel_run()
 
 
