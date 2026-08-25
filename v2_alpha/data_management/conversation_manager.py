@@ -25,11 +25,15 @@ from qdrant_client.http import models as qdrant_models
 from ..core.config import PathConfig
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
-from ..core.operations import Operation
+from ..core.operations import Operation, OperationManager, OperationTask
 from .knowledge_base import KnowledgeBase
 
 
 DEFAULT_TITLE = "New Conversation"
+TITLE_SYSTEM_PROMPT = (
+    "Create a concise title for this conversation from the user's first message. "
+    "Return only the title, without quotation marks, labels, or explanation."
+)
 PERSISTENCE_VERSION = 1
 PREFERENCE_SCHEMA_VERSION = 1
 MEMORY_COLLECTION = "messages"
@@ -43,11 +47,14 @@ class Conversation:
     def __init__(
         self,
         dir_path: Path,
+        *,
+        operation_manager: OperationManager,
     ) -> None:
         self.dir_path = Path(dir_path)
         self.conversation_id = ""
         self.knowledge_name: str | None = None
         self.title = DEFAULT_TITLE
+        self.is_titled = False
         self.pinned = False
         self.created_at: datetime | None = None
 
@@ -66,6 +73,7 @@ class Conversation:
         self._mutation_lock = asyncio.Lock()
         self._started = False
         self._closed = False
+        self._operation_manager = operation_manager
 
 
     @property
@@ -80,6 +88,7 @@ class Conversation:
         conversation_id: str,
         knowledge_name: str | None,
         title: str,
+        is_titled: bool,
         pinned: bool,
         created_at: datetime,
     ) -> None:
@@ -87,6 +96,7 @@ class Conversation:
         self.conversation_id = conversation_id
         self.knowledge_name = knowledge_name
         self.title = title
+        self.is_titled = is_titled
         self.pinned = pinned
         self.created_at = created_at
 
@@ -280,7 +290,28 @@ class Conversation:
         return copy.deepcopy(self._preferences)
 
 
-    async def save_preference(self, text: str) -> dict[str, str]:
+    async def save_preference(
+        self,
+        text: str,
+        *,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        return await self._operation_manager.run(
+            "conversation.save_preference",
+            lambda active_operation: self._save_preference(
+                text,
+                operation=active_operation,
+            ),
+            operation=operation,
+        )
+
+
+    async def _save_preference(
+        self,
+        text: str,
+        *,
+        operation: Operation,
+    ) -> dict[str, str]:
         """Persist one explicit preference and return its stable record."""
         value = text.strip() if isinstance(text, str) else ""
         if not value:
@@ -312,7 +343,28 @@ class Conversation:
             return copy.deepcopy(preference)
 
 
-    async def remove_preference(self, preference_id: str) -> dict[str, str]:
+    async def remove_preference(
+        self,
+        preference_id: str,
+        *,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        return await self._operation_manager.run(
+            "conversation.remove_preference",
+            lambda active_operation: self._remove_preference(
+                preference_id,
+                operation=active_operation,
+            ),
+            operation=operation,
+        )
+
+
+    async def _remove_preference(
+        self,
+        preference_id: str,
+        *,
+        operation: Operation,
+    ) -> dict[str, str]:
         """Remove one explicit preference by its stable ID."""
         preference_id = self._validate_preference_id(preference_id)
         self._ensure_started()
@@ -340,6 +392,149 @@ class Conversation:
             return copy.deepcopy(removed)
 
 
+    async def update(
+        self,
+        *,
+        title: str | None = None,
+        pinned: bool | None = None,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        return await self._operation_manager.run(
+            "conversation.update",
+            lambda active_operation: self._update(
+                title=title,
+                pinned=pinned,
+                operation=active_operation,
+            ),
+            operation=operation,
+        )
+
+
+    async def _update(
+        self,
+        *,
+        title: str | None = None,
+        pinned: bool | None = None,
+        operation: Operation,
+    ) -> "Conversation":
+        """Update and persist mutable conversation metadata."""
+        if title is None and pinned is None:
+            return self
+        if title is not None:
+            title = self._validate_title(title)
+
+        await self._emit(
+            operation,
+            EventType.CONVERSATION_UPDATE_STARTED,
+            {"conversation_id": self.conversation_id},
+        )
+
+        async with self._mutation_lock:
+            previous_title = self.title
+            previous_is_titled = self.is_titled
+            previous_pinned = self.pinned
+            if title is not None:
+                self.title = title
+                self.is_titled = True
+            if pinned is not None:
+                self.pinned = pinned
+
+            try:
+                await asyncio.to_thread(self.write_metadata)
+            except asyncio.CancelledError:
+                self.title = previous_title
+                self.is_titled = previous_is_titled
+                self.pinned = previous_pinned
+                raise
+            except Exception as exc:
+                self.title = previous_title
+                self.is_titled = previous_is_titled
+                self.pinned = previous_pinned
+                await self._emit(
+                    operation,
+                    EventType.CONVERSATION_UPDATE_FAILED,
+                    {
+                        "conversation_id": self.conversation_id,
+                        "error": error_payload(exc),
+                    },
+                )
+                raise
+
+        await self._emit(
+            operation,
+            EventType.CONVERSATION_UPDATE_COMPLETED,
+            self.to_dict(),
+        )
+        return self
+
+
+    async def generate_title(
+        self,
+        llm: Any,
+        first_user_message: str,
+        *,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        return await self._operation_manager.run(
+            "conversation.generate_title",
+            lambda active_operation: self._generate_title(
+                llm,
+                first_user_message,
+                operation=active_operation,
+            ),
+            operation=operation,
+        )
+
+
+    async def _generate_title(
+        self,
+        llm: Any,
+        first_user_message: str,
+        *,
+        operation: Operation,
+    ) -> str:
+        """Generate and persist a title when this conversation is untitled."""
+        if self.is_titled:
+            return self.title
+        if llm is None:
+            raise RavenError(
+                ErrorCode.LLM_MODEL_REQUIRED,
+                "An LLM is required to generate a conversation title.",
+            )
+
+        message = (
+            first_user_message.strip()
+            if isinstance(first_user_message, str)
+            else ""
+        )
+        if not message:
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                "first_user_message must be a non-empty string.",
+            )
+
+        response = await llm.achat(
+            [
+                ChatMessage(
+                    role=MessageRole.SYSTEM,
+                    content=TITLE_SYSTEM_PROMPT,
+                ),
+                ChatMessage(
+                    role=MessageRole.USER,
+                    content=message,
+                ),
+            ]
+        )
+        title = self._title_from_response(response)
+
+        if self.is_titled:
+            return self.title
+
+        update_task = await self.update(title=title, operation=operation)
+        await update_task.result()
+        return self.title
+
+
     def to_dict(self) -> dict[str, Any]:
         """Return the stable public metadata representation."""
         if self.created_at is None:
@@ -353,6 +548,7 @@ class Conversation:
             "type": self.type,
             "knowledge_name": self.knowledge_name,
             "title": self.title,
+            "is_titled": self.is_titled,
             "pinned": self.pinned,
             "created_at": self.created_at.isoformat(),
         }
@@ -587,8 +783,50 @@ class Conversation:
             )
 
 
+    @staticmethod
+    def _validate_title(title: str) -> str:
+        if not isinstance(title, str) or not title.strip():
+            raise RavenError(
+                ErrorCode.INVALID_CONVERSATION_TITLE,
+                "Conversation title must be a non-empty string.",
+            )
+        return title.strip()
+
+
     @classmethod
-    def from_dir(cls, dir_path: Path) -> "Conversation":
+    def _title_from_response(cls, response: Any) -> str:
+        message = getattr(response, "message", response)
+        content = getattr(message, "content", None)
+        if not isinstance(content, str):
+            raise RavenError(
+                ErrorCode.INVALID_CONVERSATION_TITLE,
+                "The title model returned no usable title.",
+            )
+
+        title = content.strip().splitlines()[0].strip()
+        if title.lower().startswith("title:"):
+            title = title[6:].strip()
+        title = title.strip("\"'` ")
+        return cls._validate_title(title)
+
+
+    @staticmethod
+    async def _emit(
+        operation: Operation | None,
+        event_type: EventType,
+        data: dict[str, Any],
+    ) -> None:
+        if operation is not None:
+            await operation.publish(Event(type=event_type, data=data))
+
+
+    @classmethod
+    def from_dir(
+        cls,
+        dir_path: Path,
+        *,
+        operation_manager: OperationManager,
+    ) -> "Conversation":
         """Load and validate a conversation from its metadata file."""
         metadata_path = Path(dir_path) / "metadata.json"
         data = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -632,6 +870,13 @@ class Conversation:
         if not isinstance(title, str) or not title.strip():
             title = DEFAULT_TITLE
 
+        is_titled = data.get("is_titled")
+        if not isinstance(is_titled, bool):
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                "Conversation metadata contains an invalid is_titled value.",
+            )
+
         knowledge_name = data.get("knowledge_name")
         if knowledge_name is not None and not isinstance(knowledge_name, str):
             raise RavenError(
@@ -639,11 +884,15 @@ class Conversation:
                 "Conversation metadata contains an invalid knowledge_name.",
             )
 
-        conversation = cls(Path(dir_path))
+        conversation = cls(
+            Path(dir_path),
+            operation_manager=operation_manager,
+        )
         conversation._set_metadata(
             conversation_id=conversation_id,
             knowledge_name=knowledge_name,
             title=title,
+            is_titled=is_titled,
             pinned=bool(data.get("pinned", False)),
             created_at=parsed_created_at,
         )
@@ -659,9 +908,11 @@ class ConversationManager:
         self,
         paths: PathConfig,
         knowledge_base: KnowledgeBase,
+        operation_manager: OperationManager,
     ) -> None:
         self.conversation_dir = paths.conversations_dir
         self._knowledge_base = knowledge_base
+        self._operation_manager = operation_manager
         self._conversations: dict[str, Conversation] = {}
         self._lifecycle_lock = asyncio.Lock()
         self._mutation_lock = asyncio.Lock()
@@ -693,7 +944,11 @@ class ConversationManager:
             conversation_paths = await asyncio.to_thread(self._scan_existing)
             loaded: dict[str, Conversation] = {}
             for path in conversation_paths:
-                conversation = await asyncio.to_thread(Conversation.from_dir, path)
+                conversation = await asyncio.to_thread(
+                    Conversation.from_dir,
+                    path,
+                    operation_manager=self._operation_manager,
+                )
                 loaded[conversation.conversation_id] = conversation
 
             self._conversations = loaded
@@ -718,6 +973,22 @@ class ConversationManager:
         knowledge_name: str | None = None,
         *,
         operation: Operation | None = None,
+    ) -> OperationTask:
+        return await self._operation_manager.run(
+            "conversation.create",
+            lambda active_operation: self._create(
+                knowledge_name,
+                operation=active_operation,
+            ),
+            operation=operation,
+        )
+
+
+    async def _create(
+        self,
+        knowledge_name: str | None = None,
+        *,
+        operation: Operation,
     ) -> Conversation:
         """Create, persist, and register a new conversation."""
         self._ensure_started()
@@ -733,11 +1004,15 @@ class ConversationManager:
         try:
             async with self._mutation_lock:
                 conversation_id = uuid4().hex[:12]
-                conversation = Conversation(self.conversation_dir / conversation_id)
+                conversation = Conversation(
+                    self.conversation_dir / conversation_id,
+                    operation_manager=self._operation_manager,
+                )
                 conversation._set_metadata(
                     conversation_id=conversation_id,
                     knowledge_name=knowledge_name,
                     title=DEFAULT_TITLE,
+                    is_titled=False,
                     pinned=False,
                     created_at=datetime.now(timezone.utc),
                 )
@@ -790,55 +1065,35 @@ class ConversationManager:
         title: str | None = None,
         pinned: bool | None = None,
         operation: Operation | None = None,
+    ) -> OperationTask:
+        return await self._operation_manager.run(
+            "conversation.update_metadata",
+            lambda active_operation: self._update_metadata(
+                conversation_id,
+                title=title,
+                pinned=pinned,
+                operation=active_operation,
+            ),
+            operation=operation,
+        )
+
+
+    async def _update_metadata(
+        self,
+        conversation_id: str,
+        *,
+        title: str | None = None,
+        pinned: bool | None = None,
+        operation: Operation,
     ) -> Conversation:
         """Update mutable conversation metadata."""
         conversation = self.get(conversation_id)
-        if title is None and pinned is None:
-            return conversation
-        if title is not None:
-            title = self._validate_title(title)
-
-        await self._emit(
-            operation,
-            EventType.CONVERSATION_UPDATE_STARTED,
-            {"conversation_id": conversation.conversation_id},
+        update_task = await conversation.update(
+            title=title,
+            pinned=pinned,
+            operation=operation,
         )
-
-        try:
-            async with self._mutation_lock:
-                created_at = conversation.created_at
-                if created_at is None:
-                    raise RavenError(
-                        ErrorCode.INVALID_METADATA,
-                        "Conversation metadata has not been initialized.",
-                    )
-                conversation._set_metadata(
-                    conversation_id=conversation.conversation_id,
-                    knowledge_name=conversation.knowledge_name,
-                    title=title if title is not None else conversation.title,
-                    pinned=pinned if pinned is not None else conversation.pinned,
-                    created_at=created_at,
-                )
-                await asyncio.to_thread(conversation.write_metadata)
-
-            await self._emit(
-                operation,
-                EventType.CONVERSATION_UPDATE_COMPLETED,
-                conversation.to_dict(),
-            )
-            return conversation
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            await self._emit(
-                operation,
-                EventType.CONVERSATION_UPDATE_FAILED,
-                {
-                    "conversation_id": conversation.conversation_id,
-                    "error": error_payload(exc),
-                },
-            )
-            raise
+        return await update_task.result()
 
 
     async def delete(
@@ -846,6 +1101,22 @@ class ConversationManager:
         conversation_id: str,
         *,
         operation: Operation | None = None,
+    ) -> OperationTask:
+        return await self._operation_manager.run(
+            "conversation.delete",
+            lambda active_operation: self._delete(
+                conversation_id,
+                operation=active_operation,
+            ),
+            operation=operation,
+        )
+
+
+    async def _delete(
+        self,
+        conversation_id: str,
+        *,
+        operation: Operation,
     ) -> None:
         """Remove a conversation from the registry and disk."""
         conversation = self.get(conversation_id)
@@ -912,16 +1183,6 @@ class ConversationManager:
                 "Conversation ID has an invalid format.",
             )
         return conversation_id
-
-
-    @staticmethod
-    def _validate_title(title: str) -> str:
-        if not isinstance(title, str) or not title.strip():
-            raise RavenError(
-                ErrorCode.INVALID_CONVERSATION_TITLE,
-                "Conversation title must be a non-empty string.",
-            )
-        return title.strip()
 
 
     def _ensure_started(self) -> None:

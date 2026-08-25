@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.errors import ErrorCode, RavenError
 from ..core.events import Event, EventType
-from ..core.operations import Operation, OperationStatus
+from ..core.operations import OperationStatus, OperationTask
 
 
 class EvidenceReference(BaseModel):
@@ -121,19 +121,24 @@ class RetrievalPipelines:
 class AgentRun:
     """A replayable view over one running agent operation."""
 
-    def __init__(self, operation: Operation, transcript: AgentTranscript) -> None:
-        self._operation = operation
+    def __init__(self, task: OperationTask, transcript: AgentTranscript) -> None:
+        self._task = task
         self._transcript = transcript
 
 
     @property
     def operation_id(self) -> UUID:
-        return self._operation.operation_id
+        return self._task.operation_id
 
 
     @property
     def status(self) -> OperationStatus:
-        return self._operation.status
+        return self._task.status
+
+
+    @property
+    def task(self) -> OperationTask:
+        return self._task
 
 
     def conversation_messages(self) -> list[ChatMessage]:
@@ -149,8 +154,24 @@ class AgentRun:
 
     async def events(self, after_event_id: int = 0) -> AsyncIterator[Event]:
         """Yield replayed and live events after the supplied cursor."""
-        async for event in self._operation.events(after_event_id=after_event_id):
+        if self._task.is_root:
+            async for event in self._task.operation.events(
+                after_event_id=after_event_id
+            ):
+                yield event
+                if event.is_final:
+                    return
+            return
+
+        terminal_task_events = {
+            EventType.OPERATION_TASK_COMPLETED,
+            EventType.OPERATION_TASK_FAILED,
+            EventType.OPERATION_TASK_CANCELLED,
+        }
+        async for event in self._task.events(after_event_id=after_event_id):
             yield event
+            if event.type in terminal_task_events:
+                return
 
 
     async def collect(self) -> AgentRunResult:
@@ -163,8 +184,14 @@ class AgentRun:
         reconstructed_sources: list[dict[str, Any]] = []
         tool_calls: dict[str, dict[str, Any]] = {}
         tool_order: list[str] = []
+        terminal_task_events = {
+            EventType.OPERATION_TASK_COMPLETED,
+            EventType.OPERATION_TASK_FAILED,
+            EventType.OPERATION_TASK_CANCELLED,
+        }
 
-        async for event in self.events():
+        await self._task.result()
+        async for event in self._task.operation.events():
             if event.type == EventType.CHAT_RESPONSE_DELTA:
                 delta = event.data.get("delta")
                 if isinstance(delta, str):
@@ -203,7 +230,12 @@ class AgentRun:
                     iteration_limit_reached = True
                 self._collect_evidence(event.data.get("evidence"), evidence)
 
-        await self._operation.wait()
+            if (
+                event.task_id == self._task.task_id
+                and event.type in terminal_task_events
+            ):
+                break
+
         self._raise_for_terminal_status()
         return AgentRunResult(
             operation_id=self.operation_id,
@@ -218,26 +250,33 @@ class AgentRun:
 
     async def cancel(self) -> None:
         """Cancel the run and wait until cancellation is terminal."""
-        await self._operation.cancel()
-        await self._operation.wait()
+        await self._task.cancel()
+        try:
+            await self._task.result()
+        except RavenError as exc:
+            if exc.code != ErrorCode.OPERATION_CANCELLED:
+                raise
 
 
     async def wait(self) -> OperationStatus:
         """Wait for the operation and return its terminal status."""
-        await self._operation.wait()
-        return self._operation.status
+        try:
+            await self._task.result()
+        except Exception:
+            pass
+        return self._task.status
 
 
     def _raise_for_terminal_status(self) -> None:
-        if self._operation.status == OperationStatus.CANCELLED:
+        if self._task.status == OperationStatus.CANCELLED:
             raise RavenError(
                 ErrorCode.OPERATION_CANCELLED,
                 f"Operation '{self.operation_id}' was cancelled.",
             )
-        if self._operation.status != OperationStatus.FAILED:
+        if self._task.status != OperationStatus.FAILED:
             return
 
-        payload = self._operation.error or {}
+        payload = self._task.operation.error or {}
         code_value = payload.get("code")
         try:
             code = ErrorCode(code_value)

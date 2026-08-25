@@ -62,7 +62,10 @@ class AgentHarness:
         self._knowledge_base = knowledge_base
         self._retrieval_pipelines = retrieval_pipelines
         self._operation_manager = operation_manager
-        self._reconstructor = reconstructor or Reconstructor(knowledge_base)
+        self._reconstructor = reconstructor or Reconstructor(
+            knowledge_base,
+            operation_manager,
+        )
         self._max_iterations = max_iterations
         self._top_k = top_k
         self._agent_factory = agent_factory
@@ -75,8 +78,9 @@ class AgentHarness:
         user_query: str,
         *,
         retrieval_mode: RetrievalMode | str | None = None,
+        operation: Operation | None = None,
     ) -> AgentRun:
-        """Start one agent operation and return its replayable run handle."""
+        """Start one agent task in a new or caller-owned operation."""
         query = user_query.strip() if isinstance(user_query, str) else ""
         if not query:
             raise RavenError(
@@ -100,11 +104,12 @@ class AgentHarness:
                 transcript,
             )
 
-        operation = await self._operation_manager.submit(
+        task = await self._operation_manager.run(
             "chat.generate_response",
             worker,
+            operation=operation,
         )
-        return AgentRun(operation, transcript)
+        return AgentRun(task, transcript)
 
 
     def invalidate_system_prompt(self, conversation_id: str) -> None:
@@ -197,10 +202,16 @@ class AgentHarness:
 
             transcript.add_assistant_response(response)
 
-            reconstructed_sources = await self._reconstructor.reconstruct(
-                list(evidence.values()),
-                operation=operation,
-            ) if evidence else []
+            reconstructed_sources: list[dict[str, Any]] = []
+            if evidence:
+                reconstruction_task = await self._reconstructor.reconstruct(
+                    list(evidence.values()),
+                    operation=operation,
+                )
+                reconstructed_sources = cast(
+                    list[dict[str, Any]],
+                    await reconstruction_task.result(),
+                )
             await operation.publish(
                 Event(
                     type=EventType.CHAT_COMPLETED,

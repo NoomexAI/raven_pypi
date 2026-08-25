@@ -45,6 +45,7 @@ class ErrorCode(StrEnum):
     INVALID_OPERATION_NAME = "invalid_operation_name"
     OPERATION_NOT_FOUND = "operation_not_found"
     OPERATION_CANCELLED = "operation_cancelled"
+    OPERATION_FINISHED = "operation_finished"
     INVALID_OPERATION_ID = "invalid_operation_id"
     OPERATION_MANAGER_CLOSED = "operation_manager_closed"
 

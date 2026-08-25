@@ -16,7 +16,7 @@ from llama_index.llms.ollama import Ollama
 
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
-from ..core.operations import Operation
+from ..core.operations import Operation, OperationManager, OperationTask
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 OLLAMA_VULKAN_ENV = "OLLAMA_VULKAN"
@@ -31,6 +31,8 @@ class OllamaManager:
         host: str | None = None,
         request_timeout: float = 300.0,
         embedding_batch_size: int = 10,
+        *,
+        operation_manager: OperationManager,
     ) -> None:
         os.environ.setdefault(OLLAMA_VULKAN_ENV, DEFAULT_OLLAMA_VULKAN)
 
@@ -41,9 +43,18 @@ class OllamaManager:
         self._client = ollama.AsyncClient(host=self.host)
         self._llms: dict[str, Ollama] = {}
         self._embeddings: dict[str, OllamaEmbedding] = {}
+        self._operation_manager = operation_manager
 
 
-    async def check_connection(self, *, operation: Operation | None = None) -> None:
+    async def check_connection(self, *, operation: Operation | None = None) -> OperationTask:
+        return await self._operation_manager.run(
+            "model.check_connection",
+            lambda active_operation: self._check_connection(operation=active_operation),
+            operation=operation,
+        )
+
+
+    async def _check_connection(self, *, operation: Operation) -> None:
         """Raise the Ollama client error if the configured server is unavailable."""
         await self._emit(operation, EventType.MODEL_CONNECTION_STARTED)
         try:
@@ -59,7 +70,21 @@ class OllamaManager:
         await self._emit(operation, EventType.MODEL_CONNECTION_COMPLETED)
 
 
-    async def list_models(self, *, operation: Operation | None = None) -> list[dict[str, Any]]:
+    async def list_models(self, *, operation: Operation | None = None) -> OperationTask:
+        return await self._operation_manager.run(
+            "model.list",
+            lambda active_operation: self._list_models_with_events(
+                operation=active_operation,
+            ),
+            operation=operation,
+        )
+
+
+    async def _list_models_with_events(
+        self,
+        *,
+        operation: Operation,
+    ) -> list[dict[str, Any]]:
         await self._emit(operation, EventType.MODEL_LIST_STARTED)
         try:
             models = await self._list_models()
@@ -81,7 +106,23 @@ class OllamaManager:
         return [self._dump(model) for model in models]
 
 
-    async def inspect(self, model: str, *, operation: Operation | None = None) -> dict[str, Any]:
+    async def inspect(self, model: str, *, operation: Operation | None = None) -> OperationTask:
+        return await self._operation_manager.run(
+            "model.inspect",
+            lambda active_operation: self._inspect(
+                model,
+                operation=active_operation,
+            ),
+            operation=operation,
+        )
+
+
+    async def _inspect(
+        self,
+        model: str,
+        *,
+        operation: Operation,
+    ) -> dict[str, Any]:
         await self._emit(operation, EventType.MODEL_INSPECT_STARTED, {"model": model})
         try:
             response = await self._client.show(model)
@@ -104,6 +145,24 @@ class OllamaManager:
         on_progress: ProgressCallback | None = None,
         *,
         operation: Operation | None = None,
+    ) -> OperationTask:
+        return await self._operation_manager.run(
+            "model.pull",
+            lambda active_operation: self._pull(
+                model,
+                on_progress,
+                operation=active_operation,
+            ),
+            operation=operation,
+        )
+
+
+    async def _pull(
+        self,
+        model: str,
+        on_progress: ProgressCallback | None = None,
+        *,
+        operation: Operation,
     ) -> None:
         """Pull a model, forwarding each progress item to the caller."""
         await self._emit(operation, EventType.MODEL_PULL_STARTED, {"model": model})
@@ -131,7 +190,18 @@ class OllamaManager:
         await self._emit(operation, EventType.MODEL_PULL_COMPLETED, {"model": model})
 
 
-    async def delete(self, model: str, *, operation: Operation | None = None) -> None:
+    async def delete(self, model: str, *, operation: Operation | None = None) -> OperationTask:
+        return await self._operation_manager.run(
+            "model.delete",
+            lambda active_operation: self._delete(
+                model,
+                operation=active_operation,
+            ),
+            operation=operation,
+        )
+
+
+    async def _delete(self, model: str, *, operation: Operation) -> None:
         await self._emit(operation, EventType.MODEL_DELETE_STARTED, {"model": model})
         try:
             await self._client.delete(model)
@@ -148,7 +218,23 @@ class OllamaManager:
         await self._emit(operation, EventType.MODEL_DELETE_COMPLETED, {"model": model})
 
 
-    async def load_llm(self, model: str, *, operation: Operation | None = None) -> Ollama:
+    async def load_llm(self, model: str, *, operation: Operation | None = None) -> OperationTask:
+        return await self._operation_manager.run(
+            "model.load_llm",
+            lambda active_operation: self._load_llm(
+                model,
+                operation=active_operation,
+            ),
+            operation=operation,
+        )
+
+
+    async def _load_llm(
+        self,
+        model: str,
+        *,
+        operation: Operation,
+    ) -> Ollama:
         """Return a LlamaIndex LLM adapter, pulling the model if necessary."""
         await self._emit(operation, EventType.MODEL_LOAD_LLM_STARTED, {"model": model})
         try:
@@ -177,6 +263,22 @@ class OllamaManager:
         model: str,
         *,
         operation: Operation | None = None,
+    ) -> OperationTask:
+        return await self._operation_manager.run(
+            "model.load_embedding",
+            lambda active_operation: self._load_embedding(
+                model,
+                operation=active_operation,
+            ),
+            operation=operation,
+        )
+
+
+    async def _load_embedding(
+        self,
+        model: str,
+        *,
+        operation: Operation,
     ) -> OllamaEmbedding:
         """Return a LlamaIndex embedding adapter, pulling the model if necessary."""
         await self._emit(operation, EventType.MODEL_LOAD_EMBEDDING_STARTED, {"model": model})
@@ -213,9 +315,21 @@ class OllamaManager:
     ) -> None:
         installed = {item.get("model") or item.get("name") for item in await self._list_models()}
         if model not in installed:
-            await self.pull(model, operation=operation)
+            pull_task = await self.pull(model, operation=operation)
+            await pull_task.result()
 
-    async def unload_llm(self, model: str, *, operation: Operation | None = None) -> None:
+    async def unload_llm(self, model: str, *, operation: Operation | None = None) -> OperationTask:
+        return await self._operation_manager.run(
+            "model.unload_llm",
+            lambda active_operation: self._unload_llm(
+                model,
+                operation=active_operation,
+            ),
+            operation=operation,
+        )
+
+
+    async def _unload_llm(self, model: str, *, operation: Operation) -> None:
         await self._emit(operation, EventType.MODEL_UNLOAD_LLM_STARTED, {"model": model})
         try:
             await self._client.generate(
@@ -241,6 +355,22 @@ class OllamaManager:
         model: str,
         *,
         operation: Operation | None = None,
+    ) -> OperationTask:
+        return await self._operation_manager.run(
+            "model.unload_embedding",
+            lambda active_operation: self._unload_embedding(
+                model,
+                operation=active_operation,
+            ),
+            operation=operation,
+        )
+
+
+    async def _unload_embedding(
+        self,
+        model: str,
+        *,
+        operation: Operation,
     ) -> None:
         await self._emit(operation, EventType.MODEL_UNLOAD_EMBEDDING_STARTED, {"model": model})
         try:

@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
-from ..core.operations import Operation
+from ..core.operations import Operation, OperationManager, OperationTask
 from ..data_management.knowledge_base import KnowledgeBase
 from ..document_processing.document_parser import DocumentParser
 from ..document_processing.semantic_splitter import ProvenanceAwareSemanticSplitter
@@ -61,6 +61,7 @@ class IngestionPipeline:
     def __init__(
         self,
         knowledge_base: KnowledgeBase,
+        operation_manager: OperationManager,
         *,
         breakpoint_percentile_threshold: int = 95,
         buffer_size: int = 1,
@@ -75,6 +76,7 @@ class IngestionPipeline:
             raise ValueError("max_extraction_retries must be positive")
 
         self._knowledge_base = knowledge_base
+        self._operation_manager = operation_manager
         self._breakpoint_percentile_threshold = breakpoint_percentile_threshold
         self._buffer_size = buffer_size
         self._max_extraction_retries = max_extraction_retries
@@ -95,6 +97,32 @@ class IngestionPipeline:
         llm: Any,
         embed_model: Any,
         operation: Operation | None = None,
+        chunk_size: int = 512,
+        chunk_overlap: int = 50,
+    ) -> OperationTask:
+        return await self._operation_manager.run(
+            "ingestion.run",
+            lambda active_operation: self._run(
+                knowledge_name,
+                source_path,
+                llm=llm,
+                embed_model=embed_model,
+                operation=active_operation,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+            ),
+            operation=operation,
+        )
+
+
+    async def _run(
+        self,
+        knowledge_name: str,
+        source_path: str | Path,
+        *,
+        llm: Any,
+        embed_model: Any,
+        operation: Operation,
         chunk_size: int = 512,
         chunk_overlap: int = 50,
     ) -> dict[str, Any]:
@@ -190,7 +218,7 @@ class IngestionPipeline:
                     "total": total,
                 },
             )
-            result = await knowledge.ingest(
+            ingest_task = await knowledge.ingest(
                 file_name,
                 sections,
                 file_id=file_id,
@@ -200,6 +228,7 @@ class IngestionPipeline:
                 chunk_overlap=chunk_overlap,
                 operation=operation,
             )
+            result = await ingest_task.result()
             result = {
                 **result,
                 "source_path": str(path),

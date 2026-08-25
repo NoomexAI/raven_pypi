@@ -236,12 +236,13 @@ class ToolBuilder:
                         ErrorCode.INVALID_KNOWLEDGE_NAME,
                         "knowledge_name is required for local retrieval.",
                     )
-                result = await pipeline.retrieve_local_context(
+                retrieval_task = await pipeline.retrieve_local_context(
                     knowledge_name,
                     query,
                     top_k=policy.top_k,
                     operation=operation,
                 )
+                result = await retrieval_task.result()
             else:
                 kwargs: dict[str, Any] = {"operation": operation}
                 if mode in {
@@ -251,7 +252,8 @@ class ToolBuilder:
                     kwargs["top_k_section"] = policy.top_k
                 else:
                     kwargs["top_k"] = policy.top_k
-                result = await pipeline.retrieve_global_context(query, **kwargs)
+                retrieval_task = await pipeline.retrieve_global_context(query, **kwargs)
+                result = await retrieval_task.result()
 
             evidence = section_references(result)
             return ToolResult(
@@ -608,7 +610,11 @@ class ToolBuilder:
         async def save_preference(text: str) -> str:
             try:
                 operation.raise_if_cancelled()
-                preference = await conversation.save_preference(text)
+                preference_task = await conversation.save_preference(
+                    text,
+                    operation=operation,
+                )
+                preference = await preference_task.result()
                 on_preferences_changed(conversation.conversation_id)
                 return ToolResult(
                     ok=True,
@@ -632,7 +638,11 @@ class ToolBuilder:
         async def remove_preference(preference_id: str) -> str:
             try:
                 operation.raise_if_cancelled()
-                preference = await conversation.remove_preference(preference_id)
+                preference_task = await conversation.remove_preference(
+                    preference_id,
+                    operation=operation,
+                )
+                preference = await preference_task.result()
                 on_preferences_changed(conversation.conversation_id)
                 return ToolResult(
                     ok=True,

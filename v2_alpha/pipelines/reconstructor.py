@@ -7,15 +7,20 @@ from typing import Any
 
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
-from ..core.operations import Operation
+from ..core.operations import Operation, OperationManager, OperationTask
 from ..data_management.knowledge_base import KnowledgeBase
 
 
 class Reconstructor:
     """Build highlighted, provenance-aware views of retrieved files."""
 
-    def __init__(self, knowledge_base: KnowledgeBase) -> None:
+    def __init__(
+        self,
+        knowledge_base: KnowledgeBase,
+        operation_manager: OperationManager,
+    ) -> None:
         self._knowledge_base = knowledge_base
+        self._operation_manager = operation_manager
 
 
     async def reconstruct(
@@ -23,6 +28,22 @@ class Reconstructor:
         retrieval_result: list[dict[str, Any]] | dict[str, Any] | None,
         *,
         operation: Operation | None = None,
+    ) -> OperationTask:
+        return await self._operation_manager.run(
+            "reconstruction.reconstruct",
+            lambda active_operation: self._reconstruct(
+                retrieval_result,
+                operation=active_operation,
+            ),
+            operation=operation,
+        )
+
+
+    async def _reconstruct(
+        self,
+        retrieval_result: list[dict[str, Any]] | dict[str, Any] | None,
+        *,
+        operation: Operation,
     ) -> list[dict[str, Any]]:
         """Return complete file views with retrieved sections highlighted."""
         await self._emit(

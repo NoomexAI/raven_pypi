@@ -84,6 +84,11 @@ class EventType(StrEnum):
     OPERATION_COMPLETED = "operation.completed"
     OPERATION_FAILED = "operation.failed"
     OPERATION_CANCELLED = "operation.cancelled"
+    OPERATION_TASK_QUEUED = "operation.task.queued"
+    OPERATION_TASK_STARTED = "operation.task.started"
+    OPERATION_TASK_COMPLETED = "operation.task.completed"
+    OPERATION_TASK_FAILED = "operation.task.failed"
+    OPERATION_TASK_CANCELLED = "operation.task.cancelled"
 
     MODEL_CONNECTION_STARTED = "model.connection.started"
     MODEL_CONNECTION_COMPLETED = "model.connection.completed"
@@ -124,6 +129,8 @@ class Event(BaseModel):
     type: EventType
     data: dict[str, Any] = Field(default_factory=dict)
     operation_id: UUID | None = None
+    task_id: UUID | None = None
+    task_name: str | None = None
     event_id: int | None = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     is_final: bool = False

@@ -1,4 +1,4 @@
-"""User-facing orchestration for one Raven conversation."""
+"""The user-facing connection between a conversation and the agent harness."""
 
 from __future__ import annotations
 
@@ -7,42 +7,38 @@ from collections.abc import AsyncIterator
 from typing import Any
 from uuid import UUID
 
-from ..agent.contracts import AgentRun, AgentRunResult
+from ..agent.contracts import AgentRunResult
 from ..agent.harness import AgentHarness
 from ..agent.policy import RetrievalMode
 from ..core.errors import ErrorCode, RavenError
 from ..core.events import Event
-from ..core.operations import OperationStatus
+from ..core.operations import Operation, OperationManager, OperationStatus, OperationTask
 from ..data_management.conversation_manager import Conversation
 
 
-class SessionRun:
-    """Session-owned view of one harness run."""
 
-    def __init__(
-        self,
-        agent_run: AgentRun,
-        conversation: Conversation,
-        user_query: str,
-        release: Any,
-    ) -> None:
-        self._agent_run = agent_run
-        self._conversation = conversation
-        self._user_query = user_query
+class SessionRun:
+    """Replayable handle for one complete session turn."""
+
+    def __init__(self, task: OperationTask, release: Any) -> None:
+        self._task = task
         self._release = release
-        self._finalization_error: RavenError | None = None
         self._released = False
-        self._finalization_task: asyncio.Task[None] | None = None
 
 
     @property
     def operation_id(self) -> UUID:
-        return self._agent_run.operation_id
+        return self._task.operation_id
 
 
     @property
     def status(self) -> OperationStatus:
-        return self._agent_run.status
+        return self._task.status
+
+
+    @property
+    def task(self) -> OperationTask:
+        return self._task
 
 
     @property
@@ -51,73 +47,43 @@ class SessionRun:
 
 
     async def events(self, after_event_id: int = 0) -> AsyncIterator[Event]:
-        async for event in self._agent_run.events(after_event_id):
+        """Yield the complete parent operation stream after a cursor."""
+        async for event in self._task.operation.events(after_event_id=after_event_id):
             yield event
 
 
     async def collect(self) -> AgentRunResult:
         try:
-            result = await self._agent_run.collect()
-        finally:
-            await self._wait_for_finalization()
-
-        self._raise_finalization_error()
-        return result
-
-
-    async def cancel(self) -> None:
-        await self._agent_run.cancel()
-        await self._wait_for_finalization()
-        self._raise_finalization_error()
-
-
-    async def wait(self) -> OperationStatus:
-        status = await self._agent_run.wait()
-        await self._wait_for_finalization()
-        self._raise_finalization_error()
-        return status
-
-
-    async def _finalize(self) -> None:
-        try:
-            await self._agent_run.collect()
-        except Exception:
-            return
-
-        try:
-            await self._conversation.append_turn(
-                self._agent_run.conversation_messages()
-            )
-        except Exception as exc:
-            self._finalization_error = RavenError(
-                ErrorCode.PERSISTENCE_FAILED,
-                "The completed conversation turn could not be persisted.",
-                details={"operation_id": str(self.operation_id)},
-            )
-            self._finalization_error.__cause__ = exc
+            result = await self._task.result()
+            if not isinstance(result, AgentRunResult):
+                raise RavenError(
+                    ErrorCode.INTERNAL_ERROR,
+                    "Session operation returned an invalid result.",
+                )
+            return result
         finally:
             self._release_once()
 
 
-    async def _wait_for_finalization(self) -> None:
-        if self._finalization_task is not None:
-            await self._finalization_task
-        self._release_once()
+    async def cancel(self) -> None:
+        try:
+            await self._task.cancel()
+            try:
+                await self._task.result()
+            except Exception:
+                pass
+        finally:
+            self._release_once()
 
 
-    def start_finalization(self) -> None:
-        """Start tracked turn finalization after session registration."""
-        if self._finalization_task is not None:
-            raise RuntimeError("Session run finalization has already started.")
-        self._finalization_task = asyncio.create_task(
-            self._finalize(),
-            name=f"raven-session-run-{self.operation_id}",
-        )
-
-
-    def _raise_finalization_error(self) -> None:
-        if self._finalization_error is not None:
-            raise self._finalization_error
+    async def wait(self) -> OperationStatus:
+        try:
+            await self._task.result()
+        except Exception:
+            pass
+        finally:
+            self._release_once()
+        return self._task.status
 
 
     def _release_once(self) -> None:
@@ -135,6 +101,7 @@ class Session:
         self,
         conversation: Conversation,
         harness: AgentHarness,
+        operation_manager: OperationManager,
         *,
         llm: Any,
         embed_model: Any,
@@ -152,6 +119,7 @@ class Session:
 
         self.conversation = conversation
         self.harness = harness
+        self._operation_manager = operation_manager
         self._llm = llm
         self._embed_model = embed_model
         self._memory_token_limit = memory_token_limit
@@ -214,8 +182,9 @@ class Session:
         user_query: str,
         *,
         retrieval_mode: RetrievalMode | str | None = None,
+        operation: Operation | None = None,
     ) -> SessionRun:
-        """Start one serialized autonomous turn for this conversation."""
+        """Start one serialized autonomous turn in a new or supplied operation."""
         self._ensure_started()
         query = user_query.strip() if isinstance(user_query, str) else ""
         if not query:
@@ -232,20 +201,41 @@ class Session:
                 f"Session for conversation '{self.conversation_id}' is closed.",
             )
 
+        run_holder: dict[str, SessionRun] = {}
+
+        async def worker(active_operation: Operation) -> AgentRunResult:
+            try:
+                agent_run = await self.harness.start(
+                    self.conversation,
+                    query,
+                    retrieval_mode=retrieval_mode,
+                    operation=active_operation,
+                )
+                result = await agent_run.collect()
+                await self.conversation.append_turn(agent_run.conversation_messages())
+                generate_title = getattr(self.conversation, "generate_title", None)
+                if generate_title is not None:
+                    title_task = await generate_title(
+                        self._llm,
+                        query,
+                        operation=active_operation,
+                    )
+                    await title_task.result()
+                return result
+            finally:
+                run = run_holder.get("run")
+                if run is not None:
+                    run._release_once()
+
         try:
-            agent_run = await self.harness.start(
-                self.conversation,
-                query,
-                retrieval_mode=retrieval_mode,
+            task = await self._operation_manager.run(
+                "session.generate_response",
+                worker,
+                operation=operation,
             )
-            session_run = SessionRun(
-                agent_run,
-                self.conversation,
-                query,
-                self._release_run,
-            )
+            session_run = SessionRun(task, self._release_run)
+            run_holder["run"] = session_run
             self._active_runs.add(session_run)
-            session_run.start_finalization()
             return session_run
         except Exception:
             self._turn_lock.release()
@@ -254,7 +244,8 @@ class Session:
 
     def _release_run(self, run: SessionRun) -> None:
         self._active_runs.discard(run)
-        self._turn_lock.release()
+        if self._turn_lock.locked():
+            self._turn_lock.release()
 
 
     def _ensure_started(self) -> None:

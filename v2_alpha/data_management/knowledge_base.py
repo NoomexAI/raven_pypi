@@ -21,7 +21,7 @@ from qdrant_client.http import models as qmodels
 from ..core.config import PathConfig
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
-from ..core.operations import Operation
+from ..core.operations import Operation, OperationManager, OperationTask
 
 COLLECTION_NAME = "chunks"
 PERSISTENCE_VERSION = 1
@@ -54,6 +54,8 @@ class Knowledge:
     def __init__(
         self,
         dir_path: Path,
+        *,
+        operation_manager: OperationManager,
     ) -> None:
         self.dir_path = Path(dir_path)
         self.name = self.dir_path.name
@@ -68,6 +70,7 @@ class Knowledge:
         self._mutation_lock = asyncio.Lock()
         self._started = False
         self._closed = False
+        self._operation_manager = operation_manager
 
 
     @property
@@ -120,6 +123,22 @@ class Knowledge:
         summary: str,
         *,
         operation: Operation | None = None,
+    ) -> OperationTask:
+        return await self._operation_manager.run(
+            "knowledge.set_summary",
+            lambda active_operation: self._set_summary(
+                summary,
+                operation=active_operation,
+            ),
+            operation=operation,
+        )
+
+
+    async def _set_summary(
+        self,
+        summary: str,
+        *,
+        operation: Operation,
     ) -> None:
         """Persist the user-facing summary for this knowledge database."""
         self._ensure_started()
@@ -197,6 +216,34 @@ class Knowledge:
         chunk_size: int = 512,
         chunk_overlap: int = 50,
         operation: Operation | None = None,
+    ) -> OperationTask:
+        return await self._operation_manager.run(
+            "knowledge.ingest",
+            lambda active_operation: self._ingest(
+                file_name,
+                sections,
+                file_id=file_id,
+                embed_model=embed_model,
+                navigation_type=navigation_type,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                operation=active_operation,
+            ),
+            operation=operation,
+        )
+
+
+    async def _ingest(
+        self,
+        file_name: str,
+        sections: Sequence[dict[str, Any]],
+        *,
+        file_id: str,
+        embed_model: Any,
+        navigation_type: str = "none",
+        chunk_size: int = 512,
+        chunk_overlap: int = 50,
+        operation: Operation,
     ) -> dict[str, Any]:
         """Embed, index, and persist one file and its sections."""
         self._ensure_started()
@@ -404,6 +451,22 @@ class Knowledge:
         file_id: str,
         *,
         operation: Operation | None = None,
+    ) -> OperationTask:
+        return await self._operation_manager.run(
+            "knowledge.delete_file",
+            lambda active_operation: self._delete_file(
+                file_id,
+                operation=active_operation,
+            ),
+            operation=operation,
+        )
+
+
+    async def _delete_file(
+        self,
+        file_id: str,
+        *,
+        operation: Operation,
     ) -> dict[str, Any]:
         """Remove a file's metadata and vectors."""
         self._ensure_started()
@@ -691,12 +754,14 @@ class KnowledgeBase:
     def __init__(
         self,
         paths: PathConfig,
+        operation_manager: OperationManager,
     ) -> None:
         self.knowledge_base_path = paths.knowledge_base_dir
         self._knowledges: dict[str, Knowledge] = {}
         self._lifecycle_lock = asyncio.Lock()
         self._started = False
         self._closed = False
+        self._operation_manager = operation_manager
 
 
     @property
@@ -749,6 +814,24 @@ class KnowledgeBase:
         user_summary: str = "",
         *,
         operation: Operation | None = None,
+    ) -> OperationTask:
+        return await self._operation_manager.run(
+            "knowledge.create",
+            lambda active_operation: self._create(
+                name,
+                user_summary,
+                operation=active_operation,
+            ),
+            operation=operation,
+        )
+
+
+    async def _create(
+        self,
+        name: str,
+        user_summary: str = "",
+        *,
+        operation: Operation,
     ) -> Knowledge:
         """Create, persist, and register a new knowledge database."""
         self._ensure_started()
@@ -771,7 +854,11 @@ class KnowledgeBase:
             knowledge = await self._open(safe_name)
             try:
                 if user_summary:
-                    await knowledge.set_summary(user_summary)
+                    summary_task = await knowledge.set_summary(
+                        user_summary,
+                        operation=operation,
+                    )
+                    await summary_task.result()
             except Exception as exc:
                 await knowledge.close()
                 await asyncio.to_thread(shutil.rmtree, knowledge.dir_path, ignore_errors=True)
@@ -824,6 +911,22 @@ class KnowledgeBase:
         name: str,
         *,
         operation: Operation | None = None,
+    ) -> OperationTask:
+        return await self._operation_manager.run(
+            "knowledge.delete",
+            lambda active_operation: self._delete(
+                name,
+                operation=active_operation,
+            ),
+            operation=operation,
+        )
+
+
+    async def _delete(
+        self,
+        name: str,
+        *,
+        operation: Operation,
     ) -> None:
         """Close, remove, and unregister a knowledge database."""
         self._ensure_started()
@@ -850,6 +953,7 @@ class KnowledgeBase:
     async def _open(self, name: str) -> Knowledge:
         knowledge = Knowledge(
             self.knowledge_base_path / name,
+            operation_manager=self._operation_manager,
         )
         await knowledge.start()
         return knowledge
