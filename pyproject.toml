@@ -29,6 +29,11 @@ server = [
     "uvicorn[standard]>=0.30",
     "python-multipart>=0.0.9",
 ]
+litellm = [
+    "llama-index-llms-litellm>=0.7,<0.8",
+    "llama-index-embeddings-litellm>=0.5,<0.6",
+    "litellm>=1.41,<2",
+]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
