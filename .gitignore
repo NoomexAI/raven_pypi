@@ -86,6 +86,7 @@ Desktop.ini
 /data/knowledge_base/
 /data/conversations/
 /events/
+/00000000-0000-0000-0000-000000000001/
 
 # Ollama bundle (models + local runtime)
 /ollama/
