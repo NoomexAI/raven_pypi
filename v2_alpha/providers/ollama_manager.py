@@ -19,8 +19,6 @@ from ..core.events import Event, EventType
 from ..core.operations import Operation, OperationManager, OperationTask
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
-OLLAMA_VULKAN_ENV = "OLLAMA_VULKAN"
-DEFAULT_OLLAMA_VULKAN = "1"
 
 
 class OllamaManager:
@@ -34,7 +32,6 @@ class OllamaManager:
         *,
         operation_manager: OperationManager,
     ) -> None:
-        os.environ.setdefault(OLLAMA_VULKAN_ENV, DEFAULT_OLLAMA_VULKAN)
 
         self.host = host or os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
         self.request_timeout = request_timeout
