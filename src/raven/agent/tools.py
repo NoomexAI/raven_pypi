@@ -1,246 +1,799 @@
-"""Tool providers exposed to the autonomous RAVEN agent."""
+"""Scope-aware tools exposed to Raven's autonomous agent."""
 
 from __future__ import annotations
 
+import asyncio
 import json
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
 
 from llama_index.core.tools import FunctionTool
 
-from ..conversation_session import ConversationSession
-from ..events import Event, EventBus, EventType
-from ..pipeline import GLOBAL_AGREEMENT_RETRIEVAL, GLOBAL_HIERARCHICAL_RETRIEVAL
-from .catalog import (
-    GLOBAL_TOOL_NAMES,
-    LOCAL_TOOL_NAMES,
-    MEMORY_TOOL_NAMES,
-    NAVIGATION_TOOL_NAMES,
-    RETRIEVAL_TOOLS,
-    TOOL_DESCRIPTIONS,
-    summarize_reconstructed_evidence,
+from ..core.errors import ErrorCode, RavenError, error_payload
+from ..core.operations import Operation
+from ..data_management.conversation_manager import Conversation
+from ..data_management.knowledge_base import KnowledgeBase
+from .contracts import RetrievalPipelines
+from .policy import (
+    LOCAL_RETRIEVAL_MODES,
+    RETRIEVAL_TOOL_NAMES,
+    AgentPolicy,
+    RetrievalMode,
 )
-from .context import AgentRunContext
-from .policy import AgentPolicy
 
 
-def _tool(name: str, fn: Callable[..., Any], description: str) -> FunctionTool:
-    return FunctionTool.from_defaults(async_fn=fn, name=name, description=description)
+RETRIEVAL_DESCRIPTIONS = {
+    RetrievalMode.LOCAL_EMBEDDED: (
+        "Retrieve relevant sections from one knowledge using vector similarity. "
+        "Use this for focused scientific, factual, or numeric questions where "
+        "narrow semantic matching and precision are most important."
+    ),
+    RetrievalMode.LOCAL_HIERARCHICAL: (
+        "Retrieve relevant sections from one knowledge using hierarchical "
+        "metadata and reasoning-based scoring. Use this when understanding "
+        "broader document context, narrative structure, or relationships is more "
+        "important than finding one narrowly matching fact. This is costly; "
+        "prefer vector-conditioned retrieval when it can provide similar context "
+        "more efficiently."
+    ),
+    RetrievalMode.LOCAL_AGREEMENT: (
+        "Retrieve sections from one knowledge using agreement between embedded "
+        "and hierarchical retrieval. Use this only as a last resort when a "
+        "high-confidence cross-check is necessary. It is the most expensive "
+        "retrieval strategy."
+    ),
+    RetrievalMode.LOCAL_VECTOR_CONDITIONED: (
+        "Use vector retrieval to select candidate files in one knowledge, then "
+        "score their sections hierarchically. Use this when broader context or "
+        "document reasoning is needed but full hierarchical retrieval would be "
+        "too costly."
+    ),
+    RetrievalMode.GLOBAL_EMBEDDED: (
+        "Retrieve relevant sections across all knowledges using vector similarity. "
+        "Use this for focused scientific, factual, or numeric questions where "
+        "narrow semantic matching and precision are most important."
+    ),
+    RetrievalMode.GLOBAL_HIERARCHICAL: (
+        "Retrieve relevant sections across knowledges using hierarchical metadata "
+        "and reasoning-based scoring. Use this when understanding broader document "
+        "context, narrative structure, or relationships is more important than "
+        "finding one narrowly matching fact. This is costly; prefer global "
+        "vector-conditioned retrieval when it can provide similar context more "
+        "efficiently."
+    ),
+    RetrievalMode.GLOBAL_AGREEMENT: (
+        "Retrieve sections across knowledges using agreement between embedded and "
+        "hierarchical retrieval. Use this only as a last resort when a high-"
+        "confidence cross-check is necessary. It is the most expensive retrieval "
+        "strategy."
+    ),
+    RetrievalMode.GLOBAL_VECTOR_CONDITIONED: (
+        "Use vector retrieval to select candidate knowledges, then score their "
+        "sections hierarchically. Use this when broader context or document "
+        "reasoning is needed but full global hierarchical retrieval would be too "
+        "costly."
+    ),
+}
 
-
-def _record(run: AgentRunContext | None, name: str, payload: dict[str, Any], evidence: str | None = None) -> None:
-    if run is not None:
-        run.record_tool_result(name, payload, evidence=evidence)
-
-
-def _recoverable_error(
-    run: AgentRunContext | None,
-    tool_name: str,
-    exc: Exception,
-    next_action: str,
-) -> str:
-    """Return a model-readable tool error for invalid/recoverable requests."""
-    payload = {
-        "ok": False,
-        "error": {
-            "code": "invalid_tool_request",
-            "message": str(exc),
-        },
-        "next_action": next_action,
+RECOVERABLE_ERRORS = frozenset(
+    {
+        ErrorCode.INVALID_METADATA,
+        ErrorCode.INVALID_KNOWLEDGE_NAME,
+        ErrorCode.KNOWLEDGE_NOT_FOUND,
+        ErrorCode.FILE_NOT_FOUND,
+        ErrorCode.SECTION_NOT_FOUND,
+        ErrorCode.INVALID_RETRIEVAL_MODE,
+        ErrorCode.RETRIEVAL_MODE_NOT_ALLOWED,
+        ErrorCode.INVALID_PREFERENCE_ID,
+        ErrorCode.PREFERENCE_NOT_FOUND,
     }
-    _record(run, tool_name, payload)
-    return json.dumps(payload, ensure_ascii=False)
+)
 
 
-class MemoryToolProvider:
-    def build(self, session: ConversationSession, run: AgentRunContext | None) -> dict[str, FunctionTool]:
-        async def get_memory(query: str) -> str:
-            try:
-                payload = await session.search_memory(query)
-            except (KeyError, ValueError) as exc:
-                return _recoverable_error(
-                    run,
-                    "get_memory",
-                    exc,
-                    "Provide a non-empty memory query and retry, or answer without memory if it is not needed.",
-                )
-            _record(run, "get_memory", payload, "memory")
-            return json.dumps(payload, ensure_ascii=False)
+@dataclass(frozen=True, slots=True)
+class ToolResult:
+    """One tool response containing model content and bounded UI metadata."""
 
-        async def save_preference(preference: str) -> str:
-            try:
-                payload = await session.save_preference(preference)
-            except (KeyError, ValueError) as exc:
-                return _recoverable_error(
-                    run,
-                    "save_preference",
-                    exc,
-                    "Provide the preference as a concise non-empty statement and retry.",
-                )
-            _record(run, "save_preference", payload)
-            return json.dumps(payload, ensure_ascii=False)
+    ok: bool
+    result: Any = None
+    ui_summary: dict[str, Any] = field(default_factory=dict)
+    evidence: list[dict[str, str]] = field(default_factory=list)
+    error: dict[str, Any] | None = None
+    next_action: str | None = None
 
-        return {
-            "get_memory": _tool("get_memory", get_memory, "Search relevant messages from this conversation's past memory."),
-            "save_preference": _tool("save_preference", save_preference, "Save an explicit user preference for future turns."),
+
+    def to_model_text(self) -> str:
+        payload: dict[str, Any] = {
+            "ok": self.ok,
+            "result": self.result,
+            "ui_summary": self.ui_summary,
+            "evidence": self.evidence,
         }
+        if self.error is not None:
+            payload["error"] = self.error
+        if self.next_action is not None:
+            payload["next_action"] = self.next_action
+        return json.dumps(payload, ensure_ascii=False)
 
 
-class NavigationToolProvider:
-    def build(self, session: ConversationSession, run: AgentRunContext | None) -> dict[str, FunctionTool]:
-        async def list_knowledges() -> str:
-            try:
-                payload = await session.list_knowledges()
-            except (KeyError, ValueError) as exc:
-                return _recoverable_error(
-                    run,
-                    "list_knowledges",
-                    exc,
-                    "Retry without arguments. If the failure persists, choose another available tool.",
-                )
-            _record(run, "list_knowledges", payload, "navigation")
-            return json.dumps(payload, ensure_ascii=False)
 
-        async def list_files(knowledge_name: str = "") -> str:
-            try:
-                payload = await session.list_files(knowledge_name)
-            except (KeyError, ValueError) as exc:
-                return _recoverable_error(
-                    run,
-                    "list_files",
-                    exc,
-                    "For a global conversation, provide an explicit knowledge_name, then retry. For a local conversation, use its bound knowledge.",
-                )
-            _record(run, "list_files", payload, "navigation")
-            return json.dumps(payload, ensure_ascii=False)
+class ToolBuilder:
+    """Build retrieval, navigation, memory, and preference tools for one run."""
 
-        async def list_sections(file_name: str, knowledge_name: str = "") -> str:
-            try:
-                payload = await session.list_sections(file_name, knowledge_name)
-            except (KeyError, ValueError) as exc:
-                return _recoverable_error(
-                    run,
-                    "list_sections",
-                    exc,
-                    "Verify the file name with list_files, provide knowledge_name for global navigation, and retry.",
-                )
-            _record(run, "list_sections", payload, "navigation")
-            return json.dumps(payload, ensure_ascii=False)
+    def __init__(
+        self,
+        knowledge_base: KnowledgeBase,
+        retrieval_pipelines: RetrievalPipelines,
+    ) -> None:
+        self._knowledge_base = knowledge_base
+        self._retrieval_pipelines = retrieval_pipelines
 
-        async def get_section_metadata(section_id: str, knowledge_name: str = "") -> str:
-            try:
-                payload = await session.get_section_metadata(section_id, knowledge_name)
-            except (KeyError, ValueError) as exc:
-                return _recoverable_error(
-                    run,
-                    "get_section_metadata",
-                    exc,
-                    "Verify the section_id using list_sections, provide knowledge_name for global navigation, and retry.",
-                )
-            _record(run, "get_section_metadata", payload, "knowledge")
-            return json.dumps(payload, ensure_ascii=False)
-
-        return {
-            "list_knowledges": _tool("list_knowledges", list_knowledges, "List knowledges available to this conversation."),
-            "list_files": _tool("list_files", list_files, "List files within a knowledge."),
-            "list_sections": _tool("list_sections", list_sections, "List section metadata within a file without raw content."),
-            "get_section_metadata": _tool("get_section_metadata", get_section_metadata, "Read one section's metadata and raw content."),
-        }
-
-
-class RetrievalToolProvider:
-    def __init__(self, bus: EventBus) -> None:
-        self._bus = bus
 
     def build(
         self,
-        session: ConversationSession,
-        run: AgentRunContext | None,
-        allowed: frozenset[str],
-    ) -> dict[str, FunctionTool]:
-        tools: dict[str, FunctionTool] = {}
-        for mode in sorted(RETRIEVAL_TOOLS):
-            if mode not in allowed:
-                continue
-            local = mode in LOCAL_TOOL_NAMES
-            full_retrieval = mode in {GLOBAL_HIERARCHICAL_RETRIEVAL, GLOBAL_AGREEMENT_RETRIEVAL}
-
-            def make_retrieval_function(mode: str, local: bool, full_retrieval: bool):
-                async def execute(user_query: str, knowledge_name: str = "", full: bool = False) -> str:
-                    target = session.conversation.knowledge_name or knowledge_name.strip()
-                    if local and not target:
-                        return _recoverable_error(
-                            run,
-                            mode,
-                            ValueError("knowledge_name is required for local retrieval"),
-                            "Provide the bound knowledge_name and retry this local retrieval tool.",
-                        )
-                    operation_id = run.operation_id if run else ""
-                    try:
-                        result = await session.retrieve(
-                            mode,
-                            user_query=user_query,
-                            knowledge_name=target,
-                            full_retrieval=full if full_retrieval else False,
-                            op_id=operation_id,
-                        )
-                        cards = await session.reconstruct(result, mode, operation_id)
-                    except (KeyError, ValueError) as exc:
-                        return _recoverable_error(
-                            run,
-                            mode,
-                            exc,
-                            "Check the knowledge scope and query arguments, then retry or choose another permitted retrieval/navigation tool.",
-                        )
-                    _record(
-                        run,
-                        mode,
-                        summarize_reconstructed_evidence(cards),
-                        "knowledge" if result else None,
-                    )
-                    if cards and run is not None:
-                        for card in cards:
-                            for section in card.get("sections", []):
-                                if section.get("highlighted"):
-                                    self._bus.publish(Event(
-                                        type=EventType.CHAT_RETRIEVED,
-                                        data={
-                                            "knowledge": card.get("knowledge_name"),
-                                            "file": card.get("file_name"),
-                                            "section_id": section.get("section_id"),
-                                        },
-                                        op_id=operation_id,
-                                    ))
-                    return json.dumps(result, ensure_ascii=False)
-
-                if local:
-                    async def local_retrieve(user_query: str, knowledge_name: str = "") -> str:
-                        return await execute(user_query, knowledge_name)
-                    return local_retrieve
-                if full_retrieval:
-                    async def global_full_retrieve(user_query: str, full_retrieval: bool = False) -> str:
-                        return await execute(user_query, full=full_retrieval)
-                    return global_full_retrieve
-                async def global_retrieve(user_query: str) -> str:
-                    return await execute(user_query)
-                return global_retrieve
-
-            tools[mode] = _tool(
-                mode,
-                make_retrieval_function(mode, local, full_retrieval),
-                TOOL_DESCRIPTIONS[mode],
+        conversation: Conversation,
+        policy: AgentPolicy,
+        operation: Operation,
+        *,
+        on_preferences_changed: Callable[[str], None],
+    ) -> list[FunctionTool]:
+        tools = [
+            self._retrieval_tool(mode, conversation, policy, operation)
+            for mode in RetrievalMode
+            if mode in policy.scope_modes
+        ]
+        tools.extend(self._navigation_tools(conversation, operation))
+        tools.extend(
+            self._memory_tools(
+                conversation,
+                operation,
+                on_preferences_changed,
             )
+        )
         return tools
 
 
-def build_tools(
-    session: ConversationSession,
-    run: AgentRunContext | None,
-    policy: AgentPolicy,
-    bus: EventBus,
-) -> list[FunctionTool]:
-    allowed = policy.allowed_tools(session.conversation.type)
-    tools: dict[str, FunctionTool] = {}
-    tools.update(MemoryToolProvider().build(session, run))
-    tools.update(NavigationToolProvider().build(session, run))
-    tools.update(RetrievalToolProvider(bus).build(session, run, allowed))
-    return [tools[name] for name in sorted(tools) if name in allowed]
+    def _retrieval_tool(
+        self,
+        mode: RetrievalMode,
+        conversation: Conversation,
+        policy: AgentPolicy,
+        operation: Operation,
+    ) -> FunctionTool:
+        name = RETRIEVAL_TOOL_NAMES[mode]
+        description = RETRIEVAL_DESCRIPTIONS[mode]
+
+        if mode in LOCAL_RETRIEVAL_MODES and conversation.type == "global":
+            async def retrieve_local(knowledge_name: str, query: str) -> str:
+                return await self._run_retrieval(
+                    mode,
+                    query,
+                    policy,
+                    operation,
+                    knowledge_name=knowledge_name,
+                )
+
+            return FunctionTool.from_defaults(
+                async_fn=retrieve_local,
+                name=name,
+                description=f"{description} knowledge_name is required.",
+            )
+
+        async def retrieve(query: str) -> str:
+            return await self._run_retrieval(
+                mode,
+                query,
+                policy,
+                operation,
+                knowledge_name=conversation.knowledge_name,
+            )
+
+        scoped_description = (
+            f"{description} The bound knowledge is '{conversation.knowledge_name}'."
+            if conversation.type == "local"
+            else description
+        )
+        return FunctionTool.from_defaults(
+            async_fn=retrieve,
+            name=name,
+            description=scoped_description,
+        )
+
+
+    async def _run_retrieval(
+        self,
+        mode: RetrievalMode,
+        query: str,
+        policy: AgentPolicy,
+        operation: Operation,
+        *,
+        knowledge_name: str | None,
+    ) -> str:
+        tool_name = RETRIEVAL_TOOL_NAMES[mode]
+        try:
+            operation.raise_if_cancelled()
+            if not isinstance(query, str) or not query.strip():
+                raise RavenError(
+                    ErrorCode.INVALID_METADATA,
+                    "Retrieval query must be a non-empty string.",
+                )
+            if not policy.permits(mode):
+                return ToolResult(
+                    ok=False,
+                    error={
+                        "code": ErrorCode.RETRIEVAL_MODE_NOT_ALLOWED.value,
+                        "message": "This retrieval mode is not allowed for the current run.",
+                    },
+                    ui_summary={"kind": "tool_error", "tool": tool_name},
+                    next_action=self._retrieval_instruction(policy),
+                ).to_model_text()
+
+            pipeline = self._retrieval_pipeline(mode)
+            if mode in LOCAL_RETRIEVAL_MODES:
+                if not isinstance(knowledge_name, str) or not knowledge_name.strip():
+                    raise RavenError(
+                        ErrorCode.INVALID_KNOWLEDGE_NAME,
+                        "knowledge_name is required for local retrieval.",
+                    )
+                retrieval_task = await pipeline.retrieve_local_context(
+                    knowledge_name,
+                    query,
+                    top_k=policy.top_k,
+                    operation=operation,
+                )
+                result = await retrieval_task.result()
+            else:
+                kwargs: dict[str, Any] = {"operation": operation}
+                if mode in {
+                    RetrievalMode.GLOBAL_HIERARCHICAL,
+                    RetrievalMode.GLOBAL_VECTOR_CONDITIONED,
+                }:
+                    kwargs["top_k_section"] = policy.top_k
+                else:
+                    kwargs["top_k"] = policy.top_k
+                retrieval_task = await pipeline.retrieve_global_context(query, **kwargs)
+                result = await retrieval_task.result()
+
+            evidence = section_references(result)
+            return ToolResult(
+                ok=True,
+                result=result,
+                evidence=evidence,
+                ui_summary={
+                    "kind": "retrieval",
+                    "section_count": len(evidence),
+                    "sections": evidence,
+                },
+            ).to_model_text()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return self._recoverable_result(
+                tool_name,
+                exc,
+                self._retrieval_instruction(policy),
+            )
+
+
+    def _retrieval_pipeline(self, mode: RetrievalMode) -> Any:
+        attribute = {
+            RetrievalMode.LOCAL_EMBEDDED: "embedded",
+            RetrievalMode.GLOBAL_EMBEDDED: "embedded",
+            RetrievalMode.LOCAL_HIERARCHICAL: "hierarchical",
+            RetrievalMode.GLOBAL_HIERARCHICAL: "hierarchical",
+            RetrievalMode.LOCAL_AGREEMENT: "agreement",
+            RetrievalMode.GLOBAL_AGREEMENT: "agreement",
+            RetrievalMode.LOCAL_VECTOR_CONDITIONED: "vector_conditioned",
+            RetrievalMode.GLOBAL_VECTOR_CONDITIONED: "vector_conditioned",
+        }[mode]
+        return getattr(self._retrieval_pipelines, attribute)
+
+
+    def _navigation_tools(
+        self,
+        conversation: Conversation,
+        operation: Operation,
+    ) -> list[FunctionTool]:
+        return [
+            self._list_knowledges_tool(conversation, operation),
+            self._list_files_tool(conversation, operation),
+            self._list_sections_tool(conversation, operation),
+            self._get_section_tool(conversation, operation),
+        ]
+
+
+    def _list_knowledges_tool(
+        self,
+        conversation: Conversation,
+        operation: Operation,
+    ) -> FunctionTool:
+        async def list_knowledges() -> str:
+            try:
+                operation.raise_if_cancelled()
+                knowledges = await self._knowledge_base.list()
+                if conversation.type == "local":
+                    knowledges = [
+                        item
+                        for item in knowledges
+                        if item.get("safe_name") == conversation.knowledge_name
+                    ]
+                return ToolResult(
+                    ok=True,
+                    result=knowledges,
+                    ui_summary={
+                        "kind": "navigation",
+                        "operation": "list_knowledges",
+                        "knowledge_names": [item.get("safe_name") for item in knowledges],
+                    },
+                ).to_model_text()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                return self._recoverable_result(
+                    "list_knowledges",
+                    exc,
+                    "Retry listing knowledges.",
+                )
+
+        description = (
+            "List the knowledge bound to this local conversation. Use this when "
+            "you need to confirm the available knowledge before navigating it."
+            if conversation.type == "local"
+            else (
+                "List all available knowledges and their summaries. Use this to "
+                "discover a knowledge_name before using local navigation or local "
+                "retrieval in a global conversation."
+            )
+        )
+        return FunctionTool.from_defaults(
+            async_fn=list_knowledges,
+            name="list_knowledges",
+            description=description,
+        )
+
+
+    def _list_files_tool(
+        self,
+        conversation: Conversation,
+        operation: Operation,
+    ) -> FunctionTool:
+        if conversation.type == "global":
+            async def list_files_global(knowledge_name: str) -> str:
+                return await self._list_files(knowledge_name, operation)
+
+            return FunctionTool.from_defaults(
+                async_fn=list_files_global,
+                name="list_files",
+                description=(
+                    "List files in an explicitly named knowledge. Use this when "
+                    "you need to discover file names before navigating, inspecting, "
+                    "or retrieving from that knowledge."
+                ),
+            )
+
+        async def list_files_local() -> str:
+            return await self._list_files(conversation.knowledge_name or "", operation)
+
+        return FunctionTool.from_defaults(
+            async_fn=list_files_local,
+            name="list_files",
+            description=(
+                "List files in the conversation's bound knowledge. Use this when "
+                "you need to discover file names before navigating, inspecting, "
+                "or retrieving from the knowledge."
+            ),
+        )
+
+
+    async def _list_files(
+        self,
+        knowledge_name: str,
+        operation: Operation,
+    ) -> str:
+        try:
+            operation.raise_if_cancelled()
+            knowledge = self._knowledge(knowledge_name)
+            files = await asyncio.to_thread(knowledge.list_files)
+            return ToolResult(
+                ok=True,
+                result=files,
+                ui_summary={
+                    "kind": "navigation",
+                    "operation": "list_files",
+                    "knowledge_name": knowledge_name,
+                    "file_names": [item.get("file_name") for item in files],
+                },
+            ).to_model_text()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return self._recoverable_result(
+                "list_files",
+                exc,
+                "Check the knowledge_name and retry.",
+            )
+
+
+    def _list_sections_tool(
+        self,
+        conversation: Conversation,
+        operation: Operation,
+    ) -> FunctionTool:
+        if conversation.type == "global":
+            async def list_sections_global(knowledge_name: str, file_name: str) -> str:
+                return await self._list_sections(knowledge_name, file_name, operation)
+
+            return FunctionTool.from_defaults(
+                async_fn=list_sections_global,
+                name="list_sections",
+                description=(
+                    "List section metadata in a named file within a named knowledge. "
+                    "Use this when you need section IDs, boundaries, or metadata "
+                    "before inspecting a specific section."
+                ),
+            )
+
+        async def list_sections_local(file_name: str) -> str:
+            return await self._list_sections(
+                conversation.knowledge_name or "",
+                file_name,
+                operation,
+            )
+
+        return FunctionTool.from_defaults(
+            async_fn=list_sections_local,
+            name="list_sections",
+            description=(
+                "List section metadata in a file within the bound knowledge. Use "
+                "this when you need section IDs, boundaries, or metadata before "
+                "inspecting a specific section."
+            ),
+        )
+
+
+    async def _list_sections(
+        self,
+        knowledge_name: str,
+        file_name: str,
+        operation: Operation,
+    ) -> str:
+        try:
+            operation.raise_if_cancelled()
+            knowledge = self._knowledge(knowledge_name)
+            sections = await asyncio.to_thread(knowledge.list_sections, file_name)
+            if not sections and not knowledge.file_exists(file_name):
+                raise RavenError(
+                    ErrorCode.FILE_NOT_FOUND,
+                    f"File '{file_name}' does not exist in knowledge '{knowledge_name}'.",
+                )
+            metadata = [section_metadata(section) for section in sections]
+            return ToolResult(
+                ok=True,
+                result=metadata,
+                ui_summary={
+                    "kind": "navigation",
+                    "operation": "list_sections",
+                    "knowledge_name": knowledge_name,
+                    "file_name": file_name,
+                    "section_ids": [item.get("section_id") for item in metadata],
+                },
+            ).to_model_text()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return self._recoverable_result(
+                "list_sections",
+                exc,
+                "Check the knowledge_name and file_name, then retry.",
+            )
+
+
+    def _get_section_tool(
+        self,
+        conversation: Conversation,
+        operation: Operation,
+    ) -> FunctionTool:
+        if conversation.type == "global":
+            async def get_section_global(knowledge_name: str, section_id: str) -> str:
+                return await self._get_section(knowledge_name, section_id, operation)
+
+            return FunctionTool.from_defaults(
+                async_fn=get_section_global,
+                name="get_section",
+                description=(
+                    "Get metadata and raw content for a section in an explicitly "
+                    "named knowledge. Use this when the user identifies a specific "
+                    "section or when list_sections has provided a section_id that "
+                    "needs direct inspection."
+                ),
+            )
+
+        async def get_section_local(section_id: str) -> str:
+            return await self._get_section(
+                conversation.knowledge_name or "",
+                section_id,
+                operation,
+            )
+
+        return FunctionTool.from_defaults(
+            async_fn=get_section_local,
+            name="get_section",
+            description=(
+                "Get metadata and raw content for a section in the bound knowledge. "
+                "Use this when the user identifies a specific section or when "
+                "list_sections has provided a section_id that needs direct "
+                "inspection."
+            ),
+        )
+
+
+    async def _get_section(
+        self,
+        knowledge_name: str,
+        section_id: str,
+        operation: Operation,
+    ) -> str:
+        try:
+            operation.raise_if_cancelled()
+            knowledge = self._knowledge(knowledge_name)
+            section = await asyncio.to_thread(knowledge.get_section, section_id)
+            if section is None:
+                raise RavenError(
+                    ErrorCode.SECTION_NOT_FOUND,
+                    f"Section '{section_id}' does not exist in knowledge '{knowledge_name}'.",
+                )
+            result = {"knowledge_name": knowledge_name, **section}
+            evidence = section_references(result)
+            return ToolResult(
+                ok=True,
+                result=result,
+                evidence=evidence,
+                ui_summary={
+                    "kind": "section",
+                    "sections": evidence,
+                },
+            ).to_model_text()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return self._recoverable_result(
+                "get_section",
+                exc,
+                "Check the knowledge_name and section_id, then retry.",
+            )
+
+
+    def _memory_tools(
+        self,
+        conversation: Conversation,
+        operation: Operation,
+        on_preferences_changed: Callable[[str], None],
+    ) -> list[FunctionTool]:
+        async def search_memory(query: str) -> str:
+            try:
+                operation.raise_if_cancelled()
+                messages = await conversation.search_memory(query)
+                result = [message_record(message) for message in messages]
+                return ToolResult(
+                    ok=True,
+                    result=result,
+                    ui_summary={"kind": "memory", "message_count": len(result)},
+                ).to_model_text()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                return self._recoverable_result(
+                    "search_memory",
+                    exc,
+                    "Provide a non-empty memory query and retry.",
+                )
+
+        async def list_preferences() -> str:
+            try:
+                operation.raise_if_cancelled()
+                preferences = conversation.get_preferences()
+                return ToolResult(
+                    ok=True,
+                    result=preferences,
+                    ui_summary={"kind": "preferences", "count": len(preferences)},
+                ).to_model_text()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                return self._recoverable_result(
+                    "list_preferences",
+                    exc,
+                    "Retry listing preferences.",
+                )
+
+        async def save_preference(text: str) -> str:
+            try:
+                operation.raise_if_cancelled()
+                preference_task = await conversation.save_preference(
+                    text,
+                    operation=operation,
+                )
+                preference = await preference_task.result()
+                on_preferences_changed(conversation.conversation_id)
+                return ToolResult(
+                    ok=True,
+                    result=preference,
+                    ui_summary={
+                        "kind": "preference",
+                        "changed": True,
+                        "preference_id": preference["preference_id"],
+                    },
+                    next_action="The preference will apply to the next agent run.",
+                ).to_model_text()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                return self._recoverable_result(
+                    "save_preference",
+                    exc,
+                    "Provide a concise non-empty preference and retry.",
+                )
+
+        async def remove_preference(preference_id: str) -> str:
+            try:
+                operation.raise_if_cancelled()
+                preference_task = await conversation.remove_preference(
+                    preference_id,
+                    operation=operation,
+                )
+                preference = await preference_task.result()
+                on_preferences_changed(conversation.conversation_id)
+                return ToolResult(
+                    ok=True,
+                    result=preference,
+                    ui_summary={
+                        "kind": "preference",
+                        "changed": True,
+                        "preference_id": preference["preference_id"],
+                    },
+                    next_action="The preference removal will apply to the next agent run.",
+                ).to_model_text()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                return self._recoverable_result(
+                    "remove_preference",
+                    exc,
+                    "List preferences, choose a valid preference_id, and retry.",
+                )
+
+        return [
+            FunctionTool.from_defaults(
+                async_fn=search_memory,
+                name="search_memory",
+                description=(
+                    "Search semantically relevant messages from this conversation's "
+                    "memory. Use this when the user asks about prior discussion, "
+                    "past decisions, or information previously shared in this "
+                    "conversation."
+                ),
+            ),
+            FunctionTool.from_defaults(
+                async_fn=list_preferences,
+                name="list_preferences",
+                description=(
+                    "List explicit behavioral preferences saved for this conversation. "
+                    "Use this before modifying or removing a preference when you "
+                    "need to identify the correct preference_id."
+                ),
+            ),
+            FunctionTool.from_defaults(
+                async_fn=save_preference,
+                name="save_preference",
+                description=(
+                    "Save an explicit enduring user preference for future runs. Use "
+                    "this only when the user clearly asks Raven to remember a "
+                    "behavioral preference, not for ordinary instructions."
+                ),
+            ),
+            FunctionTool.from_defaults(
+                async_fn=remove_preference,
+                name="remove_preference",
+                description=(
+                    "Remove a preference by its exact preference_id. Use this only "
+                    "when the user explicitly asks to forget or remove a saved "
+                    "preference; list preferences first if the ID is unknown."
+                ),
+            ),
+        ]
+
+
+    def _knowledge(self, knowledge_name: str) -> Any:
+        if not isinstance(knowledge_name, str) or not knowledge_name.strip():
+            raise RavenError(
+                ErrorCode.INVALID_KNOWLEDGE_NAME,
+                "knowledge_name must be a non-empty string.",
+            )
+        return self._knowledge_base.get(knowledge_name)
+
+
+    @staticmethod
+    def _recoverable_result(
+        tool_name: str,
+        error: BaseException,
+        next_action: str,
+    ) -> str:
+        if isinstance(error, RavenError):
+            if error.code not in RECOVERABLE_ERRORS:
+                raise error
+        elif not isinstance(error, (TypeError, ValueError, KeyError)):
+            raise error
+        return ToolResult(
+            ok=False,
+            error=error_payload(error),
+            ui_summary={"kind": "tool_error", "tool": tool_name},
+            next_action=next_action,
+        ).to_model_text()
+
+
+    @staticmethod
+    def _retrieval_instruction(policy: AgentPolicy) -> str:
+        if policy.retrieval_mode is not None:
+            return f"Use {RETRIEVAL_TOOL_NAMES[policy.retrieval_mode]}."
+        return "Choose a retrieval tool permitted by the conversation scope."
+
+
+def section_references(value: Any) -> list[dict[str, str]]:
+    """Extract and deduplicate source references from a tool result."""
+    references: dict[tuple[str, str, str], dict[str, str]] = {}
+
+    def visit(item: Any) -> None:
+        if isinstance(item, list):
+            for child in item:
+                visit(child)
+            return
+        if not isinstance(item, dict):
+            return
+
+        retrieved_content = item.get("retrieved_content")
+        if retrieved_content is not None:
+            visit(retrieved_content)
+            return
+        if not all(key in item for key in ("knowledge_name", "file_name", "section_id")):
+            for child in item.values():
+                visit(child)
+            return
+
+        knowledge_name = item.get("knowledge_name")
+        file_name = item.get("file_name")
+        section_id = item.get("section_id")
+        if (
+            isinstance(knowledge_name, str)
+            and knowledge_name
+            and isinstance(file_name, str)
+            and file_name
+            and isinstance(section_id, str)
+            and section_id
+        ):
+            key = (knowledge_name, file_name, section_id)
+            references[key] = {
+                "knowledge_name": knowledge_name,
+                "file_name": file_name,
+                "section_id": section_id,
+            }
+
+    visit(value)
+    return list(references.values())
+
+
+def section_metadata(section: dict[str, Any]) -> dict[str, Any]:
+    """Return navigation metadata without the full section body."""
+    return {
+        key: value
+        for key, value in section.items()
+        if key not in {"raw_content", "chunks"}
+    }
+
+
+def message_record(message: Any) -> dict[str, str]:
+    role = getattr(getattr(message, "role", None), "value", None)
+    return {
+        "role": role if isinstance(role, str) else str(getattr(message, "role", "unknown")),
+        "content": str(getattr(message, "content", "") or ""),
+    }

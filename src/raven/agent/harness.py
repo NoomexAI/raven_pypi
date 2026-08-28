@@ -1,202 +1,379 @@
+"""Event-first autonomous execution for Raven conversations."""
+
 from __future__ import annotations
 
 import asyncio
-from typing import Any, AsyncIterator
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Any, cast
 
-from llama_index.core.agent import FunctionAgent
-from llama_index.core.agent.workflow.workflow_events import AgentOutput, AgentStream, ToolCall, ToolCallResult
-from llama_index.core.llms import ChatMessage, MessageRole
-from llama_index.core.tools import FunctionTool
+from llama_index.core.agent.workflow import FunctionAgent, ToolCall, ToolCallResult
+from llama_index.core.llms import ChatMessage
 
-from ..conversation_session import ConversationSession
-from ..events import Event, EventBus, EventType
-from .context import AgentRunContext
-from .policy import AgentPolicy
-from .tools import build_tools as build_agent_tools
+from ..core.errors import ErrorCode, RavenError, error_payload
+from ..core.events import Event, EventType
+from ..core.operations import Operation, OperationManager, OperationType
+from ..data_management.conversation_manager import Conversation
+from ..data_management.knowledge_base import KnowledgeBase
+from ..pipelines.reconstructor import Reconstructor
+from .contracts import AgentRun, AgentTranscript, RetrievalPipelines
+from .policy import AgentPolicy, RetrievalMode
+from .prompts import PromptBuilder, PromptBundle
+from .tools import ToolBuilder
+from .workflow import WorkflowEventTranslator
 
 
-SYSTEM_PROMPT = """You are Raven, a part of a RAG framework named RAVEN (Retrieval Augmented Adaptive Epistemic Navigation), a grounded assistant operating over the user's RAVEN knowledge base.
+INSUFFICIENT_EVIDENCE_RESPONSE = (
+    "I couldn't obtain enough verified evidence from the knowledge base to "
+    "answer that reliably."
+)
 
-Conversation scope:
-- type: {conversation_type}
-- bound knowledge: {knowledge_name}
 
-Use only tools actually provided to you. The tool set is the source of truth for what you can access.
-Interpret the user's request yourself and decide whether to answer directly or use one or more tools.
-You control the operation sequence; do not follow a fixed retrieval-then-answer workflow.
+@dataclass(frozen=True, slots=True)
+class _CachedPrompt:
+    key: tuple[Any, ...]
+    bundle: PromptBundle
 
-Local conversations are restricted to their bound knowledge. Global conversations may search across
-knowledges. Navigation in a global conversation requires an explicit knowledge_name; never silently reuse
-one from an earlier turn.
-
-Retrieval tools answer content questions. Navigation tools inspect the structure or read a specific
-section. Memory tools search this conversation and save explicit preferences. Do not treat conversation
-memory as knowledge-base evidence unless the user asks about the conversation itself.
-
-When evidence is available, answer faithfully and identify knowledge, file, and section IDs where useful.
-When evidence is missing or insufficient, say so instead of using general model knowledge. Do not invent
-tools, sources, files, sections, or facts.
-
-Tool recovery:
-- A tool result with `ok: false` is a recoverable tool-use problem, not final evidence.
-- Read its `error` and `next_action`, correct the arguments or choose a more appropriate tool, then retry
-  when that is useful. Do not repeat the same invalid call unchanged.
-- If a tool reports that no relevant content was found, use another permitted strategy or explain that
-  the available evidence is insufficient.
-
-Retrieval constraint for this run: {retrieval_mode}
-"""
 
 
 class AgentHarness:
-    """Runs one autonomous LlamaIndex agent with explicit RAVEN policy."""
+    """Start autonomous agent runs whose authoritative output is events."""
 
-    def __init__(self, bus: EventBus) -> None:
-        self._bus = bus
-
-    def _emit(self, run: AgentRunContext, etype: EventType, data: dict[str, Any]) -> None:
-        self._bus.publish(Event(type=etype, data=data, op_id=run.operation_id))
-
-    def _prompt(self, session: ConversationSession, policy: AgentPolicy) -> str:
-        facts = "\n".join(f"<fact>{fact}</fact>" for fact in session.facts)
-        preference_block = f"\n[PREFERENCES]\n{facts}\n[/PREFERENCES]" if facts else ""
-        return SYSTEM_PROMPT.format(
-            conversation_type=session.conversation.type,
-            knowledge_name=session.conversation.knowledge_name or "None",
-            retrieval_mode=policy.retrieval_mode,
-        ) + preference_block
-
-    def build_tools(
+    def __init__(
         self,
-        session: ConversationSession,
-        run: AgentRunContext | None = None,
-        policy: AgentPolicy | None = None,
-    ) -> list[FunctionTool]:
-        """Build the tool registry for one run.
-
-        ``run`` is optional for compatibility inspection; real execution always
-        supplies it so results can be recorded without mutable session queues.
-        """
-        return build_agent_tools(
-            session,
-            run,
-            policy or AgentPolicy(),
-            self._bus,
-        )
-
-    def _agent(self, session: ConversationSession, tools: list[FunctionTool], policy: AgentPolicy) -> FunctionAgent:
-        return FunctionAgent(
-            name="Raven",
-            description="Raven grounded knowledge assistant",
-            system_prompt=self._prompt(session, policy),
-            tools=tools,
-            llm=session.llm,
-            streaming=True,
-            allow_parallel_tool_calls=policy.allow_parallel_tool_calls,
-        )
-
-    async def _generate_title(self, session: ConversationSession, user_text: str, run: AgentRunContext) -> None:
-        try:
-            response = await session.llm.achat(messages=[
-                ChatMessage(role=MessageRole.SYSTEM, content="Generate a short 4-6 word title for a conversation. Output only the title."),
-                ChatMessage(role=MessageRole.USER, content=user_text),
-            ])
-            title = (response.message.content or "").strip()
-            if title:
-                await session.set_title(title)
-                self._emit(run, EventType.CONVERSATION_TITLE_GENERATED, {
-                    "conversation_id": session.conversation.conversation_id,
-                    "title": title,
-                })
-        except Exception:
-            # Title generation is a best-effort metadata enhancement.
-            return
-
-    async def run(
-        self,
-        session: ConversationSession,
-        user_text: str,
+        llm: Any,
+        knowledge_base: KnowledgeBase,
+        retrieval_pipelines: RetrievalPipelines,
+        operation_manager: OperationManager,
         *,
-        retrieval_mode: str = "auto",
-        operation_id: str,
-        max_iterations: int = 12,
-    ) -> AsyncIterator[Event]:
-        policy = AgentPolicy(retrieval_mode=retrieval_mode, max_iterations=max_iterations)
-        if retrieval_mode != "auto" and retrieval_mode not in policy.allowed_tools(session.conversation.type):
-            raise ValueError(
-                f"retrieval tool '{retrieval_mode}' is unavailable for "
-                f"{session.conversation.type} conversations"
-            )
-        run = AgentRunContext(operation_id=operation_id, bus=self._bus)
-        final_output: AgentOutput | None = None
-        try:
-            if not session.title_generated:
-                await self._generate_title(session, user_text, run)
-            tools = self.build_tools(session, run, policy)
-            if not tools:
-                raise ValueError(f"no tools are available for retrieval_mode '{retrieval_mode}'")
-            agent = self._agent(session, tools, policy)
-            handler = agent.run(
-                user_msg=user_text,
-                memory=session.memory,
-                max_iterations=policy.max_iterations,
-                early_stopping_method="force",
-            )
-            async for workflow_event in handler.stream_events():
-                if isinstance(workflow_event, AgentStream):
-                    if workflow_event.thinking_delta:
-                        event = Event(type=EventType.CHAT_DELTA, data={"kind": "thinking_chunk", "delta": workflow_event.thinking_delta}, op_id=operation_id)
-                        self._bus.publish(event)
-                        yield event
-                    if workflow_event.delta:
-                        event = Event(type=EventType.CHAT_DELTA, data={"kind": "response_chunk", "delta": workflow_event.delta}, op_id=operation_id)
-                        self._bus.publish(event)
-                        yield event
-                elif isinstance(workflow_event, ToolCall):
-                    step = run.next_step()
-                    event = Event(type=EventType.CHAT_TOOL_CALL, data={"call_id": workflow_event.tool_id, "step": step, "name": workflow_event.tool_name, "args": workflow_event.tool_kwargs}, op_id=operation_id)
-                    self._bus.publish(event)
-                    yield event
-                elif isinstance(workflow_event, ToolCallResult):
-                    result = run.latest_result(workflow_event.tool_name)
-                    tool_failed = workflow_event.tool_output.is_error or (
-                        isinstance(result, dict) and result.get("ok") is False
-                    )
-                    error = (
-                        str(workflow_event.tool_output.raw_output)
-                        if workflow_event.tool_output.is_error
-                        else result.get("error")
-                        if isinstance(result, dict) and result.get("ok") is False
-                        else None
-                    )
-                    event = Event(type=EventType.CHAT_TOOL_RESULT, data={
-                        "call_id": workflow_event.tool_id,
-                        "step": run.step,
-                        "name": workflow_event.tool_name,
-                        "ok": not tool_failed,
-                        "result": result,
-                        "error": error,
-                        "next_action": result.get("next_action") if isinstance(result, dict) else None,
-                    }, op_id=operation_id)
-                    self._bus.publish(event)
-                    yield event
-                elif isinstance(workflow_event, AgentOutput):
-                    final_output = workflow_event
-            stop = await handler
-            if isinstance(stop, AgentOutput):
-                final_output = stop
-            elif hasattr(stop, "result") and isinstance(stop.result, AgentOutput):
-                final_output = stop.result
+        reconstructor: Reconstructor | None = None,
+        max_iterations: int = 10,
+        top_k: int = 3,
+        agent_factory: Callable[..., Any] = FunctionAgent,
+    ) -> None:
+        if llm is None:
+            raise ValueError("llm is required")
+        if max_iterations <= 0:
+            raise ValueError("max_iterations must be positive")
+        if top_k <= 0:
+            raise ValueError("top_k must be positive")
 
-            await session.persist(handler)
-            reply = (final_output.response.content if final_output and final_output.response else "") or ""
-            event = Event(type=EventType.CHAT_COMPLETE, data={"reply": reply}, op_id=operation_id)
-            self._bus.publish(event)
-            yield event
+        self._llm = llm
+        self._knowledge_base = knowledge_base
+        self._retrieval_pipelines = retrieval_pipelines
+        self._operation_manager = operation_manager
+        self._reconstructor = reconstructor or Reconstructor(
+            knowledge_base,
+            operation_manager,
+        )
+        self._max_iterations = max_iterations
+        self._top_k = top_k
+        self._agent_factory = agent_factory
+        self._prompt_cache: dict[str, list[_CachedPrompt]] = {}
+
+
+    async def start(
+        self,
+        conversation: Conversation,
+        user_query: str,
+        *,
+        retrieval_mode: RetrievalMode | str | None = None,
+        operation: Operation | None = None,
+    ) -> AgentRun:
+        """Start one agent task in a new or caller-owned operation."""
+        query = user_query.strip() if isinstance(user_query, str) else ""
+        if not query:
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                "user_query must be a non-empty string.",
+            )
+        policy = AgentPolicy.create(
+            conversation,
+            retrieval_mode,
+            max_iterations=self._max_iterations,
+            top_k=self._top_k,
+        )
+        transcript = AgentTranscript.from_query(query)
+
+        async def worker(operation: Operation) -> None:
+            await self._execute(
+                conversation,
+                query,
+                policy,
+                operation,
+                transcript,
+            )
+
+        task = await self._operation_manager.run(
+            OperationType.CHAT_GENERATE_RESPONSE,
+            worker,
+            operation=operation,
+        )
+        return AgentRun(task, transcript)
+
+
+    def invalidate_system_prompt(self, conversation_id: str) -> None:
+        """Invalidate prompts cached for one conversation."""
+        self._prompt_cache.pop(conversation_id, None)
+
+
+    async def _execute(
+        self,
+        conversation: Conversation,
+        query: str,
+        policy: AgentPolicy,
+        operation: Operation,
+        transcript: AgentTranscript,
+    ) -> None:
+        handler: Any = None
+        translator: WorkflowEventTranslator | None = None
+        try:
+            operation.raise_if_cancelled()
+            tools = ToolBuilder(
+                self._knowledge_base,
+                self._retrieval_pipelines,
+            ).build(
+                conversation,
+                policy,
+                operation,
+                on_preferences_changed=self.invalidate_system_prompt,
+            )
+            prompt = self._update_system_prompt(conversation, policy)
+            history = await conversation.get_context_messages(
+                initial_token_count=prompt.token_count,
+            )
+            operation.raise_if_cancelled()
+
+            agent = self._agent_factory(
+                llm=self._llm,
+                tools=tools,
+                system_prompt=prompt.text,
+                streaming=True,
+                allow_parallel_tool_calls=False,
+                early_stopping_method="generate",
+            )
+            handler = agent.run(
+                user_msg=query,
+                chat_history=history,
+                max_iterations=policy.max_iterations,
+                early_stopping_method="generate",
+            )
+            translator = WorkflowEventTranslator(policy.max_iterations)
+            evidence: dict[tuple[str, str, str], dict[str, str]] = {}
+            pending_response_events: list[Event] = []
+
+            async for workflow_event in handler.stream_events(expose_internal=False):
+                operation.raise_if_cancelled()
+                self._record_transcript_event(workflow_event, transcript)
+                for event in translator.translate(workflow_event):
+                    if (
+                        event.type == EventType.CHAT_RESPONSE_DELTA
+                        and translator.knowledge_tool_used
+                        and not evidence
+                    ):
+                        pending_response_events.append(event)
+                        continue
+
+                    self._remember_evidence(event, evidence)
+                    await operation.publish(event)
+                    if event.type == EventType.CHAT_TOOL_RESULT and event.data.get("fatal") is True:
+                        raise RavenError(
+                            ErrorCode.INTERNAL_ERROR,
+                            "An unrecoverable tool failure stopped the agent run.",
+                        )
+                    if evidence and pending_response_events:
+                        for pending_event in pending_response_events:
+                            await operation.publish(pending_event)
+                        pending_response_events.clear()
+
+            output = await handler
+            response = self._response_text(output)
+            if translator.knowledge_tool_used and not evidence:
+                response = INSUFFICIENT_EVIDENCE_RESPONSE
+                await operation.publish(
+                    Event(
+                        type=EventType.CHAT_RESPONSE_DELTA,
+                        data={"delta": response, "agent": "Raven"},
+                    )
+                )
+            elif pending_response_events:
+                for pending_event in pending_response_events:
+                    await operation.publish(pending_event)
+
+            transcript.add_assistant_response(response)
+
+            reconstructed_sources: list[dict[str, Any]] = []
+            if evidence:
+                reconstruction_task = await self._reconstructor.reconstruct(
+                    list(evidence.values()),
+                    operation=operation,
+                )
+                reconstructed_sources = cast(
+                    list[dict[str, Any]],
+                    await reconstruction_task.result(),
+                )
+            await operation.publish(
+                Event(
+                    type=EventType.CHAT_COMPLETED,
+                    data={
+                        "response": response,
+                        "evidence": list(evidence.values()),
+                        "tool_call_count": translator.tool_call_count,
+                        "reconstructed_file_count": len(reconstructed_sources),
+                        "iteration_limit_reached": translator.iteration_limit_reached,
+                    },
+                )
+            )
         except asyncio.CancelledError:
+            await self._cancel_handler(handler)
             raise
         except Exception as exc:
-            event = Event(type=EventType.ERROR, data={"op": "chat", "error": str(exc)}, op_id=operation_id)
-            self._bus.publish(event)
-            yield event
-            raise
+            await self._cancel_handler(handler)
+            failure = self._iteration_failure(exc, translator, policy)
+            await operation.publish(
+                Event(
+                    type=EventType.CHAT_FAILED,
+                    data={"error": error_payload(failure)},
+                )
+            )
+            raise failure
+
+
+    @staticmethod
+    def _record_transcript_event(
+        workflow_event: Any,
+        transcript: AgentTranscript,
+    ) -> None:
+        if isinstance(workflow_event, ToolCall):
+            call_id = str(getattr(workflow_event, "tool_id", None) or "")
+            if not call_id:
+                return
+            name = str(getattr(workflow_event, "tool_name", "unknown"))
+            arguments = getattr(workflow_event, "tool_kwargs", {})
+            if not isinstance(arguments, dict):
+                arguments = {}
+            transcript.add_tool_call(
+                call_id=call_id,
+                name=name,
+                arguments=arguments,
+            )
+            return
+
+        if isinstance(workflow_event, ToolCallResult):
+            call_id = str(getattr(workflow_event, "tool_id", None) or "")
+            if not call_id:
+                return
+            name = str(getattr(workflow_event, "tool_name", "unknown"))
+            tool_output = getattr(workflow_event, "tool_output", None)
+            content = getattr(tool_output, "content", "")
+            transcript.add_tool_result(
+                call_id=call_id,
+                name=name,
+                content=content if isinstance(content, str) else str(content),
+            )
+
+
+    def _update_system_prompt(
+        self,
+        conversation: Conversation,
+        policy: AgentPolicy,
+    ) -> PromptBundle:
+        preferences = conversation.get_preferences()
+        key = (
+            policy.conversation_type,
+            policy.knowledge_name,
+            policy.retrieval_mode,
+            tuple(
+                (preference["preference_id"], preference["text"])
+                for preference in preferences
+            ),
+        )
+        cached_prompts = self._prompt_cache.setdefault(
+            conversation.conversation_id,
+            [],
+        )
+        for cached in cached_prompts:
+            if cached.key == key:
+                return cached.bundle
+
+        bundle = PromptBuilder.build(policy, preferences)
+        cached_prompts.append(_CachedPrompt(key=key, bundle=bundle))
+        return bundle
+
+
+    @staticmethod
+    def _remember_evidence(
+        event: Event,
+        evidence: dict[tuple[str, str, str], dict[str, str]],
+    ) -> None:
+        if event.type != EventType.CHAT_TOOL_RESULT:
+            return
+        value = event.data.get("evidence")
+        if not isinstance(value, list):
+            return
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            knowledge_name = item.get("knowledge_name")
+            file_name = item.get("file_name")
+            section_id = item.get("section_id")
+            if (
+                isinstance(knowledge_name, str)
+                and knowledge_name
+                and isinstance(file_name, str)
+                and file_name
+                and isinstance(section_id, str)
+                and section_id
+            ):
+                key = (knowledge_name, file_name, section_id)
+                evidence[key] = {
+                    "knowledge_name": knowledge_name,
+                    "file_name": file_name,
+                    "section_id": section_id,
+                }
+
+
+    @staticmethod
+    def _response_text(output: Any) -> str:
+        response = getattr(output, "response", output)
+        if isinstance(response, ChatMessage):
+            return response.content or ""
+        if isinstance(response, str):
+            return response
+        content = getattr(response, "content", None)
+        if isinstance(content, str):
+            return content
+        return str(response)
+
+
+    @staticmethod
+    async def _cancel_handler(handler: Any) -> None:
+        if handler is None:
+            return
+        cancel_run = cast(
+            Callable[[], Awaitable[Any]] | None,
+            getattr(handler, "cancel_run", None),
+        )
+        is_done = cast(
+            Callable[[], bool] | None,
+            getattr(handler, "is_done", None),
+        )
+        if is_done is not None and is_done():
+            return
+        if cancel_run is not None:
+            await cancel_run()
+
+
+    @staticmethod
+    def _iteration_failure(
+        error: Exception,
+        translator: WorkflowEventTranslator | None,
+        policy: AgentPolicy,
+    ) -> Exception:
+        if translator is None or not translator.iteration_limit_reached:
+            return error
+        return RavenError(
+            ErrorCode.AGENT_MAX_ITERATIONS,
+            "The agent reached its iteration limit and failed to generate a final response.",
+            details={"limit": policy.max_iterations},
+        )

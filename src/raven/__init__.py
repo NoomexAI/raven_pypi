@@ -1,80 +1,78 @@
-"""RAVEN — Retrieval Augmented Adaptive Epistemic Navigation.
+"""RAVEN's public library API."""
 
-Privacy-first, fully offline RAG backend (v2): llama-index FunctionAgent +
-Ollama + Qdrant local. Everything here is the domain core: async, event-emitting,
-transport-agnostic. See `raven/chat_session.py` for the main entrypoint.
-"""
-
-from .conversation_manager import Conversation, ConversationManager, DEFAULT_TITLE
-from .events import Event, EventBus, EventType
-from .knowledge import Knowledge, KnowledgeBase
-from .model import (
-    DEFAULT_BASE_MODEL,
-    DEFAULT_EMBED_MODEL,
-    ModelManager,
+from .agent import AgentHarness, AgentPolicy
+from .core.events import Event, EventStream, EventStreamRegistry, EventType
+from .core.operations import (
+    Operation,
+    OperationManager,
+    OperationStatus,
+    OperationTask,
+    OperationType,
 )
-from .pipeline import (
+from .data_management.conversation_manager import Conversation, ConversationManager
+from .data_management.knowledge_base import Knowledge, KnowledgeBase
+from .document_processing.document_parser import (
+    DocumentParser,
+    ElementType,
+    NavigationType,
+    ParsedDocument,
+    ParsedElement,
+)
+from .document_processing.semantic_splitter import (
+    ProvenanceAwareSemanticSplitter,
+    SemanticSection,
+    SemanticUnit,
+)
+from .h_api import Raven
+from .pipelines.ingestion import IngestionPipeline
+from .pipelines.reconstructor import Reconstructor
+from .pipelines.retrieval import (
     AgreementBasedRetrievalPipeline,
     EmbeddedRetrievalPipeline,
-    GLOBAL_AGREEMENT_RETRIEVAL,
-    GLOBAL_EMBEDDED_RETRIEVAL,
-    GLOBAL_HIERARCHICAL_RETRIEVAL,
-    GLOBAL_VECTOR_CONDITIONED_RETRIEVAL,
-    HIERARCHICAL_BY_FILE,
-    HIERARCHICAL_BY_KNOWLEDGE,
     HierarchicalRetrievalPipeline,
-    IngestionPipeline,
-    LOCAL_AGREEMENT_RETRIEVAL,
-    LOCAL_EMBEDDED_RETRIEVAL,
-    LOCAL_HIERARCHICAL_RETRIEVAL,
-    LOCAL_VECTOR_CONDITIONED_RETRIEVAL,
     RetrievalPipeline,
     VectorConditionedRetrievalPipeline,
 )
-from .reconstructor import Reconstructor
-from .operations import OperationManager, OperationRecord, OperationStatus
-from .chat_session import ChatSession
-from .conversation_session import ConversationSession
-from .agent import AgentHarness, AgentPolicy
-from .local_ollama import LocalOllama
-from .high_level_api import Raven
+from .providers import LiteLLMManager, ModelRole, ModelSpec, OllamaManager, Provider
+from .session import Session, SessionRun
 
 __all__ = [
-    "ChatSession",
-    "ConversationSession",
     "AgentHarness",
     "AgentPolicy",
-    "Raven",
+    "AgreementBasedRetrievalPipeline",
     "Conversation",
     "ConversationManager",
-    "DEFAULT_BASE_MODEL",
-    "DEFAULT_EMBED_MODEL",
-    "DEFAULT_TITLE",
+    "DocumentParser",
+    "ElementType",
+    "EmbeddedRetrievalPipeline",
     "Event",
-    "EventBus",
+    "EventStream",
+    "EventStreamRegistry",
     "EventType",
+    "HierarchicalRetrievalPipeline",
+    "IngestionPipeline",
     "Knowledge",
     "KnowledgeBase",
-    "ModelManager",
-    "LocalOllama",
-    "IngestionPipeline",
-    "RetrievalPipeline",
-    "EmbeddedRetrievalPipeline",
-    "HierarchicalRetrievalPipeline",
-    "AgreementBasedRetrievalPipeline",
-    "VectorConditionedRetrievalPipeline",
-    "Reconstructor",
+    "LiteLLMManager",
+    "ModelRole",
+    "ModelSpec",
+    "NavigationType",
+    "OllamaManager",
+    "Operation",
     "OperationManager",
-    "OperationRecord",
     "OperationStatus",
-    "LOCAL_EMBEDDED_RETRIEVAL",
-    "LOCAL_HIERARCHICAL_RETRIEVAL",
-    "LOCAL_AGREEMENT_RETRIEVAL",
-    "LOCAL_VECTOR_CONDITIONED_RETRIEVAL",
-    "GLOBAL_EMBEDDED_RETRIEVAL",
-    "GLOBAL_HIERARCHICAL_RETRIEVAL",
-    "GLOBAL_AGREEMENT_RETRIEVAL",
-    "GLOBAL_VECTOR_CONDITIONED_RETRIEVAL",
-    "HIERARCHICAL_BY_FILE",
-    "HIERARCHICAL_BY_KNOWLEDGE",
+    "OperationTask",
+    "OperationType",
+    "ParsedDocument",
+    "ParsedElement",
+    "Provider",
+    "ProvenanceAwareSemanticSplitter",
+    "Raven",
+    "Reconstructor",
+    "RetrievalPipeline",
+    "SemanticSection",
+    "SemanticUnit",
+    "Session",
+    "SessionRun",
+    "VectorConditionedRetrievalPipeline",
 ]

@@ -1,13 +1,22 @@
-"""Agent execution primitives for RAVEN."""
+"""Event-first autonomous agent execution for Raven."""
 
+from .contracts import (
+    AgentRun,
+    AgentRunResult,
+    AgentTranscript,
+    EvidenceReference,
+    RetrievalPipelines,
+)
 from .harness import AgentHarness
-from .policy import AgentPolicy
-from .tools import MemoryToolProvider, NavigationToolProvider, RetrievalToolProvider
+from .policy import AgentPolicy, RetrievalMode
 
 __all__ = [
     "AgentHarness",
     "AgentPolicy",
-    "MemoryToolProvider",
-    "NavigationToolProvider",
-    "RetrievalToolProvider",
+    "AgentRun",
+    "AgentRunResult",
+    "AgentTranscript",
+    "EvidenceReference",
+    "RetrievalMode",
+    "RetrievalPipelines",
 ]
