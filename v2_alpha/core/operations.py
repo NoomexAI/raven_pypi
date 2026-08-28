@@ -24,6 +24,55 @@ class OperationStatus(StrEnum):
 
 
 
+class OperationType(StrEnum):
+    """Stable names for operations provided by Raven's built-in components."""
+
+    RAVEN_LOAD_MODELS = "raven.load_models"
+
+    MODEL_CHECK_CONNECTION = "model.check_connection"
+    MODEL_LIST = "model.list"
+    MODEL_INSPECT = "model.inspect"
+    MODEL_PULL = "model.pull"
+    MODEL_DELETE = "model.delete"
+    MODEL_LOAD_LLM = "model.load_llm"
+    MODEL_LOAD_EMBEDDING = "model.load_embedding"
+    MODEL_UNLOAD_LLM = "model.unload_llm"
+    MODEL_UNLOAD_EMBEDDING = "model.unload_embedding"
+
+    KNOWLEDGE_SET_SUMMARY = "knowledge.set_summary"
+    KNOWLEDGE_INGEST = "knowledge.ingest"
+    KNOWLEDGE_DELETE_FILE = "knowledge.delete_file"
+    KNOWLEDGE_CREATE = "knowledge.create"
+    KNOWLEDGE_DELETE = "knowledge.delete"
+
+    INGESTION_RUN = "ingestion.run"
+
+    RETRIEVAL_EMBEDDED_LOCAL = "retrieval.embedded.local"
+    RETRIEVAL_EMBEDDED_GLOBAL = "retrieval.embedded.global"
+    RETRIEVAL_HIERARCHICAL_LOCAL = "retrieval.hierarchical.local"
+    RETRIEVAL_HIERARCHICAL_GLOBAL = "retrieval.hierarchical.global"
+    RETRIEVAL_HIERARCHICAL_BY_KNOWLEDGE = "retrieval.hierarchical.by_knowledge"
+    RETRIEVAL_HIERARCHICAL_BY_FILE = "retrieval.hierarchical.by_file"
+    RETRIEVAL_AGREEMENT_LOCAL = "retrieval.agreement.local"
+    RETRIEVAL_AGREEMENT_GLOBAL = "retrieval.agreement.global"
+    RETRIEVAL_VECTOR_CONDITIONED_LOCAL = "retrieval.vector_conditioned.local"
+    RETRIEVAL_VECTOR_CONDITIONED_GLOBAL = "retrieval.vector_conditioned.global"
+
+    RECONSTRUCTION_RECONSTRUCT = "reconstruction.reconstruct"
+
+    CONVERSATION_SAVE_PREFERENCE = "conversation.save_preference"
+    CONVERSATION_REMOVE_PREFERENCE = "conversation.remove_preference"
+    CONVERSATION_UPDATE = "conversation.update"
+    CONVERSATION_GENERATE_TITLE = "conversation.generate_title"
+    CONVERSATION_CREATE = "conversation.create"
+    CONVERSATION_UPDATE_METADATA = "conversation.update_metadata"
+    CONVERSATION_DELETE = "conversation.delete"
+
+    CHAT_GENERATE_RESPONSE = "chat.generate_response"
+    SESSION_GENERATE_RESPONSE = "session.generate_response"
+
+
+
 OperationWorker = Callable[["Operation"], Awaitable[Any]]
 TaskWorker = Callable[["Operation"], Awaitable[Any]]
 _TERMINAL_STATUSES = frozenset(

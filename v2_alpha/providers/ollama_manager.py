@@ -16,7 +16,7 @@ from llama_index.llms.ollama import Ollama
 
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
-from ..core.operations import Operation, OperationManager, OperationTask
+from ..core.operations import Operation, OperationManager, OperationTask, OperationType
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 
@@ -45,7 +45,7 @@ class OllamaManager:
 
     async def check_connection(self, *, operation: Operation | None = None) -> OperationTask:
         return await self._operation_manager.run(
-            "model.check_connection",
+            OperationType.MODEL_CHECK_CONNECTION,
             lambda active_operation: self._check_connection(operation=active_operation),
             operation=operation,
         )
@@ -69,7 +69,7 @@ class OllamaManager:
 
     async def list_models(self, *, operation: Operation | None = None) -> OperationTask:
         return await self._operation_manager.run(
-            "model.list",
+            OperationType.MODEL_LIST,
             lambda active_operation: self._list_models_with_events(
                 operation=active_operation,
             ),
@@ -105,7 +105,7 @@ class OllamaManager:
 
     async def inspect(self, model: str, *, operation: Operation | None = None) -> OperationTask:
         return await self._operation_manager.run(
-            "model.inspect",
+            OperationType.MODEL_INSPECT,
             lambda active_operation: self._inspect(
                 model,
                 operation=active_operation,
@@ -144,7 +144,7 @@ class OllamaManager:
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "model.pull",
+            OperationType.MODEL_PULL,
             lambda active_operation: self._pull(
                 model,
                 on_progress,
@@ -189,7 +189,7 @@ class OllamaManager:
 
     async def delete(self, model: str, *, operation: Operation | None = None) -> OperationTask:
         return await self._operation_manager.run(
-            "model.delete",
+            OperationType.MODEL_DELETE,
             lambda active_operation: self._delete(
                 model,
                 operation=active_operation,
@@ -217,7 +217,7 @@ class OllamaManager:
 
     async def load_llm(self, model: str, *, operation: Operation | None = None) -> OperationTask:
         return await self._operation_manager.run(
-            "model.load_llm",
+            OperationType.MODEL_LOAD_LLM,
             lambda active_operation: self._load_llm(
                 model,
                 operation=active_operation,
@@ -262,7 +262,7 @@ class OllamaManager:
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "model.load_embedding",
+            OperationType.MODEL_LOAD_EMBEDDING,
             lambda active_operation: self._load_embedding(
                 model,
                 operation=active_operation,
@@ -317,7 +317,7 @@ class OllamaManager:
 
     async def unload_llm(self, model: str, *, operation: Operation | None = None) -> OperationTask:
         return await self._operation_manager.run(
-            "model.unload_llm",
+            OperationType.MODEL_UNLOAD_LLM,
             lambda active_operation: self._unload_llm(
                 model,
                 operation=active_operation,
@@ -354,7 +354,7 @@ class OllamaManager:
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "model.unload_embedding",
+            OperationType.MODEL_UNLOAD_EMBEDDING,
             lambda active_operation: self._unload_embedding(
                 model,
                 operation=active_operation,

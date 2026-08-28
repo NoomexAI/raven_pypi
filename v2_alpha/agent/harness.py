@@ -12,7 +12,7 @@ from llama_index.core.llms import ChatMessage
 
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
-from ..core.operations import Operation, OperationManager
+from ..core.operations import Operation, OperationManager, OperationType
 from ..data_management.conversation_manager import Conversation
 from ..data_management.knowledge_base import KnowledgeBase
 from ..pipelines.reconstructor import Reconstructor
@@ -105,7 +105,7 @@ class AgentHarness:
             )
 
         task = await self._operation_manager.run(
-            "chat.generate_response",
+            OperationType.CHAT_GENERATE_RESPONSE,
             worker,
             operation=operation,
         )

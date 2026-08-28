@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
-from ..core.operations import Operation, OperationManager, OperationTask
+from ..core.operations import Operation, OperationManager, OperationTask, OperationType
 from ..data_management.knowledge_base import KnowledgeBase
 from ..document_processing.document_parser import DocumentParser
 from ..document_processing.semantic_splitter import ProvenanceAwareSemanticSplitter
@@ -101,7 +101,7 @@ class IngestionPipeline:
         chunk_overlap: int = 50,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "ingestion.run",
+            OperationType.INGESTION_RUN,
             lambda active_operation: self._run(
                 knowledge_name,
                 source_path,

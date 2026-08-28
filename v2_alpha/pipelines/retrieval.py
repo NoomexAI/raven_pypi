@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from ..core.errors import error_payload
 from ..core.events import Event, EventType
-from ..core.operations import Operation, OperationManager, OperationTask
+from ..core.operations import Operation, OperationManager, OperationTask, OperationType
 from ..data_management.knowledge_base import KnowledgeBase
 
 
@@ -165,7 +165,7 @@ class EmbeddedRetrievalPipeline(RetrievalPipeline):
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "retrieval.embedded.local",
+            OperationType.RETRIEVAL_EMBEDDED_LOCAL,
             lambda active_operation: self._retrieve_local_context(
                 knowledge_name,
                 user_query,
@@ -258,7 +258,7 @@ class EmbeddedRetrievalPipeline(RetrievalPipeline):
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "retrieval.embedded.global",
+            OperationType.RETRIEVAL_EMBEDDED_GLOBAL,
             lambda active_operation: self._retrieve_global_context(
                 user_query,
                 top_k,
@@ -577,7 +577,7 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "retrieval.hierarchical.local",
+            OperationType.RETRIEVAL_HIERARCHICAL_LOCAL,
             lambda active_operation: self._retrieve_local_context(
                 knowledge_name,
                 user_query,
@@ -661,7 +661,7 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "retrieval.hierarchical.global",
+            OperationType.RETRIEVAL_HIERARCHICAL_GLOBAL,
             lambda active_operation: self._retrieve_global_context(
                 user_query,
                 top_k_section,
@@ -769,7 +769,7 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "retrieval.hierarchical.by_knowledge",
+            OperationType.RETRIEVAL_HIERARCHICAL_BY_KNOWLEDGE,
             lambda active_operation: self._retrieve_by_knowledge(
                 user_query,
                 knowledge_names,
@@ -818,7 +818,7 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "retrieval.hierarchical.by_file",
+            OperationType.RETRIEVAL_HIERARCHICAL_BY_FILE,
             lambda active_operation: self._retrieve_by_file(
                 knowledge_name,
                 user_query,
@@ -942,7 +942,7 @@ class AgreementBasedRetrievalPipeline(RetrievalPipeline):
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "retrieval.agreement.local",
+            OperationType.RETRIEVAL_AGREEMENT_LOCAL,
             lambda active_operation: self._retrieve_local_context(
                 knowledge_name,
                 user_query,
@@ -1049,7 +1049,7 @@ class AgreementBasedRetrievalPipeline(RetrievalPipeline):
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "retrieval.agreement.global",
+            OperationType.RETRIEVAL_AGREEMENT_GLOBAL,
             lambda active_operation: self._retrieve_global_context(
                 user_query,
                 top_k,
@@ -1168,7 +1168,7 @@ class VectorConditionedRetrievalPipeline(RetrievalPipeline):
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "retrieval.vector_conditioned.local",
+            OperationType.RETRIEVAL_VECTOR_CONDITIONED_LOCAL,
             lambda active_operation: self._retrieve_local_context(
                 knowledge_name,
                 user_query,
@@ -1265,7 +1265,7 @@ class VectorConditionedRetrievalPipeline(RetrievalPipeline):
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "retrieval.vector_conditioned.global",
+            OperationType.RETRIEVAL_VECTOR_CONDITIONED_GLOBAL,
             lambda active_operation: self._retrieve_global_context(
                 user_query,
                 top_k_section,

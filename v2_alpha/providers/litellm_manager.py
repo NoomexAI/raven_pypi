@@ -8,7 +8,7 @@ from typing import Any
 
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
-from ..core.operations import Operation, OperationManager, OperationTask
+from ..core.operations import Operation, OperationManager, OperationTask, OperationType
 
 
 class LiteLLMManager:
@@ -30,7 +30,7 @@ class LiteLLMManager:
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "model.load_llm",
+            OperationType.MODEL_LOAD_LLM,
             lambda active_operation: self._load_llm(
                 model,
                 provider=provider,
@@ -116,7 +116,7 @@ class LiteLLMManager:
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "model.load_embedding",
+            OperationType.MODEL_LOAD_EMBEDDING,
             lambda active_operation: self._load_embedding(
                 model,
                 api_key=api_key,

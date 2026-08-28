@@ -18,6 +18,7 @@ from ..core.operations import (
     Operation,
     OperationManager,
     OperationTask,
+    OperationType,
     OperationWorker,
     TaskWorker,
 )
@@ -31,6 +32,7 @@ from ..pipelines.retrieval import (
     HierarchicalRetrievalPipeline,
     VectorConditionedRetrievalPipeline,
 )
+from ..providers import ModelRole, ModelSpec, Provider
 from ..session.session import Session
 
 
@@ -40,63 +42,33 @@ class Raven:
     def __init__(
         self,
         raven_home: str | Path | PathConfig,
-        *,
-        llm: Any,
-        embed_model: Any,
     ) -> None:
-        if llm is None:
-            raise ValueError("llm is required")
-        if embed_model is None:
-            raise ValueError("embed_model is required")
-
         self.paths = (
             raven_home
             if isinstance(raven_home, PathConfig)
             else PathConfig(Path(raven_home))
         )
-        self.llm = llm
-        self.embed_model = embed_model
+        self.llm: Any | None = None
+        self.embed_model: Any | None = None
 
         self.event_streams = EventStreamRegistry(self.paths)
         self.operation_manager = OperationManager(self.event_streams)
+        self.provider = Provider(operation_manager=self.operation_manager)
         self.knowledge_base = KnowledgeBase(self.paths, self.operation_manager)
         self.conversation_manager = ConversationManager(
             self.paths,
             self.knowledge_base,
             self.operation_manager,
         )
-        self.embedded_retrieval = EmbeddedRetrievalPipeline(
-            self.knowledge_base,
-            self.embed_model,
-            self.operation_manager,
-        )
-        self.hierarchical_retrieval = HierarchicalRetrievalPipeline(
-            self.knowledge_base,
-            self.llm,
-            self.operation_manager,
-        )
-        self.agreement_retrieval = AgreementBasedRetrievalPipeline(
-            self.knowledge_base,
-            self.embedded_retrieval,
-            self.hierarchical_retrieval,
-            self.operation_manager,
-        )
-        self.vector_conditioned_retrieval = VectorConditionedRetrievalPipeline(
-            self.knowledge_base,
-            self.embedded_retrieval,
-            self.hierarchical_retrieval,
-            self.operation_manager,
-        )
         self.reconstructor = Reconstructor(
             self.knowledge_base,
             self.operation_manager,
         )
-        self.retrieval_pipelines = RetrievalPipelines(
-            embedded=self.embedded_retrieval,
-            hierarchical=self.hierarchical_retrieval,
-            agreement=self.agreement_retrieval,
-            vector_conditioned=self.vector_conditioned_retrieval,
-        )
+        self.embedded_retrieval: EmbeddedRetrievalPipeline | None = None
+        self.hierarchical_retrieval: HierarchicalRetrievalPipeline | None = None
+        self.agreement_retrieval: AgreementBasedRetrievalPipeline | None = None
+        self.vector_conditioned_retrieval: VectorConditionedRetrievalPipeline | None = None
+        self.retrieval_pipelines: RetrievalPipelines | None = None
         self._sessions: dict[str, Session] = {}
         self._lifecycle_lock = asyncio.Lock()
         self._started = False
@@ -106,6 +78,11 @@ class Raven:
     @property
     def is_started(self) -> bool:
         return self._started and not self._closed
+
+
+    @property
+    def models_loaded(self) -> bool:
+        return self.llm is not None and self.embed_model is not None
 
 
     async def submit_operation(
@@ -155,6 +132,116 @@ class Raven:
             after_event_id=after_event_id,
         ):
             yield event
+
+
+    async def load(
+        self,
+        llm_spec: ModelSpec,
+        embedding_spec: ModelSpec,
+        *,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        """Load both model adapters and configure model-dependent components."""
+        self._validate_model_specs(llm_spec, embedding_spec)
+        return await self.operation_manager.run(
+            OperationType.RAVEN_LOAD_MODELS,
+            lambda active_operation: self._load_models(
+                llm_spec,
+                embedding_spec,
+                operation=active_operation,
+            ),
+            operation=operation,
+        )
+
+
+    async def _load_models(
+        self,
+        llm_spec: ModelSpec,
+        embedding_spec: ModelSpec,
+        *,
+        operation: Operation,
+    ) -> dict[str, dict[str, str]]:
+        llm_task = await self.provider.load(llm_spec, operation=operation)
+        embedding_task = await self.provider.load(embedding_spec, operation=operation)
+        llm, embed_model = await asyncio.gather(
+            llm_task.result(),
+            embedding_task.result(),
+        )
+
+        self.llm = llm
+        self.embed_model = embed_model
+        self._configure_model_components()
+        return {
+            "llm": self._model_result(llm_spec),
+            "embedding": self._model_result(embedding_spec),
+        }
+
+
+    def _configure_model_components(self) -> None:
+        if self.llm is None or self.embed_model is None:
+            raise RavenError(
+                ErrorCode.LLM_MODEL_REQUIRED,
+                "Both LLM and embedding models are required.",
+            )
+
+        embedded_retrieval = EmbeddedRetrievalPipeline(
+            self.knowledge_base,
+            self.embed_model,
+            self.operation_manager,
+        )
+        hierarchical_retrieval = HierarchicalRetrievalPipeline(
+            self.knowledge_base,
+            self.llm,
+            self.operation_manager,
+        )
+        agreement_retrieval = AgreementBasedRetrievalPipeline(
+            self.knowledge_base,
+            embedded_retrieval,
+            hierarchical_retrieval,
+            self.operation_manager,
+        )
+        vector_conditioned_retrieval = VectorConditionedRetrievalPipeline(
+            self.knowledge_base,
+            embedded_retrieval,
+            hierarchical_retrieval,
+            self.operation_manager,
+        )
+        self.embedded_retrieval = embedded_retrieval
+        self.hierarchical_retrieval = hierarchical_retrieval
+        self.agreement_retrieval = agreement_retrieval
+        self.vector_conditioned_retrieval = vector_conditioned_retrieval
+        self.retrieval_pipelines = RetrievalPipelines(
+            embedded=embedded_retrieval,
+            hierarchical=hierarchical_retrieval,
+            agreement=agreement_retrieval,
+            vector_conditioned=vector_conditioned_retrieval,
+        )
+
+
+    @staticmethod
+    def _validate_model_specs(
+        llm_spec: ModelSpec,
+        embedding_spec: ModelSpec,
+    ) -> None:
+        if llm_spec.role != ModelRole.LLM:
+            raise RavenError(
+                ErrorCode.LLM_MODEL_REQUIRED,
+                "llm_spec must describe an LLM model.",
+            )
+        if embedding_spec.role != ModelRole.EMBEDDING:
+            raise RavenError(
+                ErrorCode.EMBEDDING_MODEL_REQUIRED,
+                "embedding_spec must describe an embedding model.",
+            )
+
+
+    @staticmethod
+    def _model_result(spec: ModelSpec) -> dict[str, str]:
+        return {
+            "provider": spec.provider,
+            "model": spec.model,
+            "role": spec.role.value,
+        }
 
 
     async def start(self) -> None:
@@ -236,6 +323,9 @@ class Raven:
         chunk_overlap: int = 50,
         operation: Operation | None = None,
     ) -> OperationTask:
+        self._ensure_models_loaded()
+        assert self.llm is not None
+        assert self.embed_model is not None
         pipeline = IngestionPipeline(
             self.knowledge_base,
             self.operation_manager,
@@ -264,6 +354,7 @@ class Raven:
         operation: Operation | None = None,
     ) -> OperationTask:
         """Run one retrieval strategy while preserving its operation events."""
+        self._ensure_models_loaded()
         try:
             selected = mode if isinstance(mode, RetrievalMode) else RetrievalMode(mode)
         except ValueError as exc:
@@ -372,6 +463,10 @@ class Raven:
         memory_top_k: int = 5,
     ) -> Session:
         """Return the managed session for a conversation object."""
+        self._ensure_models_loaded()
+        assert self.llm is not None
+        assert self.embed_model is not None
+        assert self.retrieval_pipelines is not None
         conversation_id = conversation.conversation_id
         existing = self._sessions.get(conversation_id)
         if existing is not None:
@@ -397,3 +492,21 @@ class Raven:
         )
         self._sessions[conversation_id] = session
         return session
+
+
+    def _ensure_models_loaded(self) -> None:
+        if self.llm is None:
+            raise RavenError(
+                ErrorCode.LLM_MODEL_REQUIRED,
+                "Call Raven.load() before using model-dependent operations.",
+            )
+        if self.embed_model is None:
+            raise RavenError(
+                ErrorCode.EMBEDDING_MODEL_REQUIRED,
+                "Call Raven.load() before using model-dependent operations.",
+            )
+        if self.retrieval_pipelines is None:
+            raise RavenError(
+                ErrorCode.INTERNAL_ERROR,
+                "Model-dependent Raven components are not configured.",
+            )

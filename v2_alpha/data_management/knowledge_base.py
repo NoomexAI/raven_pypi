@@ -21,7 +21,7 @@ from qdrant_client.http import models as qmodels
 from ..core.config import PathConfig
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
-from ..core.operations import Operation, OperationManager, OperationTask
+from ..core.operations import Operation, OperationManager, OperationTask, OperationType
 
 COLLECTION_NAME = "chunks"
 PERSISTENCE_VERSION = 1
@@ -125,7 +125,7 @@ class Knowledge:
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "knowledge.set_summary",
+            OperationType.KNOWLEDGE_SET_SUMMARY,
             lambda active_operation: self._set_summary(
                 summary,
                 operation=active_operation,
@@ -218,7 +218,7 @@ class Knowledge:
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "knowledge.ingest",
+            OperationType.KNOWLEDGE_INGEST,
             lambda active_operation: self._ingest(
                 file_name,
                 sections,
@@ -453,7 +453,7 @@ class Knowledge:
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "knowledge.delete_file",
+            OperationType.KNOWLEDGE_DELETE_FILE,
             lambda active_operation: self._delete_file(
                 file_id,
                 operation=active_operation,
@@ -816,7 +816,7 @@ class KnowledgeBase:
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "knowledge.create",
+            OperationType.KNOWLEDGE_CREATE,
             lambda active_operation: self._create(
                 name,
                 user_summary,
@@ -913,7 +913,7 @@ class KnowledgeBase:
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "knowledge.delete",
+            OperationType.KNOWLEDGE_DELETE,
             lambda active_operation: self._delete(
                 name,
                 operation=active_operation,

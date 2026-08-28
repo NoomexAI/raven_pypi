@@ -64,6 +64,7 @@ example_tests/
 *.log
 
 # Local config / secrets
+.env
 *.env
 *.env.local
 .pypirc

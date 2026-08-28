@@ -25,7 +25,7 @@ from qdrant_client.http import models as qdrant_models
 from ..core.config import PathConfig
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
-from ..core.operations import Operation, OperationManager, OperationTask
+from ..core.operations import Operation, OperationManager, OperationTask, OperationType
 from .knowledge_base import KnowledgeBase
 
 
@@ -297,7 +297,7 @@ class Conversation:
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "conversation.save_preference",
+            OperationType.CONVERSATION_SAVE_PREFERENCE,
             lambda active_operation: self._save_preference(
                 text,
                 operation=active_operation,
@@ -350,7 +350,7 @@ class Conversation:
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "conversation.remove_preference",
+            OperationType.CONVERSATION_REMOVE_PREFERENCE,
             lambda active_operation: self._remove_preference(
                 preference_id,
                 operation=active_operation,
@@ -400,7 +400,7 @@ class Conversation:
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "conversation.update",
+            OperationType.CONVERSATION_UPDATE,
             lambda active_operation: self._update(
                 title=title,
                 pinned=pinned,
@@ -476,7 +476,7 @@ class Conversation:
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "conversation.generate_title",
+            OperationType.CONVERSATION_GENERATE_TITLE,
             lambda active_operation: self._generate_title(
                 llm,
                 first_user_message,
@@ -975,7 +975,7 @@ class ConversationManager:
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "conversation.create",
+            OperationType.CONVERSATION_CREATE,
             lambda active_operation: self._create(
                 knowledge_name,
                 operation=active_operation,
@@ -1067,7 +1067,7 @@ class ConversationManager:
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "conversation.update_metadata",
+            OperationType.CONVERSATION_UPDATE_METADATA,
             lambda active_operation: self._update_metadata(
                 conversation_id,
                 title=title,
@@ -1103,7 +1103,7 @@ class ConversationManager:
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "conversation.delete",
+            OperationType.CONVERSATION_DELETE,
             lambda active_operation: self._delete(
                 conversation_id,
                 operation=active_operation,

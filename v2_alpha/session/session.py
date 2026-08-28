@@ -12,7 +12,13 @@ from ..agent.harness import AgentHarness
 from ..agent.policy import RetrievalMode
 from ..core.errors import ErrorCode, RavenError
 from ..core.events import Event
-from ..core.operations import Operation, OperationManager, OperationStatus, OperationTask
+from ..core.operations import (
+    Operation,
+    OperationManager,
+    OperationStatus,
+    OperationTask,
+    OperationType,
+)
 from ..data_management.conversation_manager import Conversation
 
 
@@ -229,7 +235,7 @@ class Session:
 
         try:
             task = await self._operation_manager.run(
-                "session.generate_response",
+                OperationType.SESSION_GENERATE_RESPONSE,
                 worker,
                 operation=operation,
             )

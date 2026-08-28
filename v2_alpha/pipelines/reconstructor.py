@@ -7,7 +7,7 @@ from typing import Any
 
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
-from ..core.operations import Operation, OperationManager, OperationTask
+from ..core.operations import Operation, OperationManager, OperationTask, OperationType
 from ..data_management.knowledge_base import KnowledgeBase
 
 
@@ -30,7 +30,7 @@ class Reconstructor:
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self._operation_manager.run(
-            "reconstruction.reconstruct",
+            OperationType.RECONSTRUCTION_RECONSTRUCT,
             lambda active_operation: self._reconstruct(
                 retrieval_result,
                 operation=active_operation,
