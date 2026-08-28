@@ -59,6 +59,9 @@ class EventType(StrEnum):
     CONVERSATION_DELETE_STARTED = "conversation.delete.started"
     CONVERSATION_DELETE_COMPLETED = "conversation.delete.completed"
     CONVERSATION_DELETE_FAILED = "conversation.delete.failed"
+    CONVERSATION_MEMORY_COMPACTION_STARTED = "conversation.memory_compaction.started"
+    CONVERSATION_MEMORY_COMPACTION_COMPLETED = "conversation.memory_compaction.completed"
+    CONVERSATION_MEMORY_COMPACTION_FAILED = "conversation.memory_compaction.failed"
 
     RETRIEVAL_EMBEDDED_STARTED = "retrieval.embedded.started"
     RETRIEVAL_EMBEDDED_COMPLETED = "retrieval.embedded.completed"

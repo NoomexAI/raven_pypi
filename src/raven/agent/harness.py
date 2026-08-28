@@ -139,9 +139,11 @@ class AgentHarness:
                 on_preferences_changed=self.invalidate_system_prompt,
             )
             prompt = self._update_system_prompt(conversation, policy)
-            history = await conversation.get_context_messages(
+            context_task = await conversation.get_context_messages(
                 initial_token_count=prompt.token_count,
+                operation=operation,
             )
+            history = await context_task.result()
             operation.raise_if_cancelled()
 
             agent = self._agent_factory(

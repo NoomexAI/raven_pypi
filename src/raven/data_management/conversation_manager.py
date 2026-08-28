@@ -196,13 +196,97 @@ class Conversation:
         self,
         *,
         initial_token_count: int = 0,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        """Start a context-loading task for this conversation."""
+        return await self._operation_manager.run(
+            OperationType.CONVERSATION_GET_CONTEXT,
+            lambda active_operation: self._get_context_messages(
+                initial_token_count=initial_token_count,
+                operation=active_operation,
+            ),
+            operation=operation,
+        )
+
+
+    async def _get_context_messages(
+        self,
+        *,
+        initial_token_count: int,
+        operation: Operation,
     ) -> list[ChatMessage]:
-        """Return context-fit messages, compacting older history when needed."""
+        """Load context-fit messages and compact older history when needed."""
         memory = self._require_chat_memory()
         async with self._memory_lock:
-            messages = await memory.aget(initial_token_count=initial_token_count)
-            await self.persist_messages()
+            messages_before = await asyncio.to_thread(memory.get_all)
+            message_count_before = len(messages_before)
+            compaction_needed = await asyncio.to_thread(
+                self._memory_compaction_needed,
+                memory,
+                messages_before,
+                initial_token_count,
+            )
+
+            if compaction_needed and operation is not None:
+                await operation.publish(
+                    Event(
+                        type=EventType.CONVERSATION_MEMORY_COMPACTION_STARTED,
+                        data={
+                            "conversation_id": self.conversation_id,
+                            "message_count": message_count_before,
+                        },
+                    )
+                )
+
+            try:
+                messages = await memory.aget(initial_token_count=initial_token_count)
+                await self.persist_messages()
+            except Exception as exc:
+                if compaction_needed and operation is not None:
+                    await operation.publish(
+                        Event(
+                            type=EventType.CONVERSATION_MEMORY_COMPACTION_FAILED,
+                            data={
+                                "conversation_id": self.conversation_id,
+                                "message_count": message_count_before,
+                                "error": error_payload(exc),
+                            },
+                        )
+                    )
+                raise
+
+            if compaction_needed and operation is not None:
+                await operation.publish(
+                    Event(
+                        type=EventType.CONVERSATION_MEMORY_COMPACTION_COMPLETED,
+                        data={
+                            "conversation_id": self.conversation_id,
+                            "messages_before": message_count_before,
+                            "messages_after": len(messages),
+                            "summarized_message_count": max(
+                                0,
+                                message_count_before - len(messages) + 1,
+                            ),
+                        },
+                    )
+                )
             return messages
+
+
+    @staticmethod
+    def _memory_compaction_needed(
+        memory: ChatSummaryMemoryBuffer,
+        messages: list[ChatMessage],
+        initial_token_count: int,
+    ) -> bool:
+        """Estimate whether ChatSummaryMemoryBuffer will compact history."""
+        if not messages:
+            return False
+
+        initial_tokens = initial_token_count if memory.count_initial_tokens else 0
+        history_text = " ".join(str(message.content) for message in messages)
+        history_tokens = len(memory.tokenizer_fn(history_text))
+        return initial_tokens + history_tokens > memory.token_limit
 
 
     async def get_messages(self) -> list[ChatMessage]:

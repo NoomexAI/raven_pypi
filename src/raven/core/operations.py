@@ -64,6 +64,7 @@ class OperationType(StrEnum):
     CONVERSATION_REMOVE_PREFERENCE = "conversation.remove_preference"
     CONVERSATION_UPDATE = "conversation.update"
     CONVERSATION_GENERATE_TITLE = "conversation.generate_title"
+    CONVERSATION_GET_CONTEXT = "conversation.get_context"
     CONVERSATION_CREATE = "conversation.create"
     CONVERSATION_UPDATE_METADATA = "conversation.update_metadata"
     CONVERSATION_DELETE = "conversation.delete"
