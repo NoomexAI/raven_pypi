@@ -161,22 +161,44 @@ class Operation:
         return tuple(self._child_tasks.values())
 
 
-    async def start(self, worker: OperationWorker) -> None:
-        """Queue this root operation and start its worker task."""
+    async def run(self, name: str, worker: TaskWorker) -> "OperationTask":
+        """Run the root task or a child task within this operation."""
         async with self._lock:
-            if self._task is not None:
-                raise RuntimeError(f"operation '{self.operation_id}' has already started")
-
-            await self._stream.publish(
-                Event(
-                    type=EventType.OPERATION_QUEUED,
-                    data={"name": self.name},
+            if self.is_finished:
+                raise RavenError(
+                    ErrorCode.OPERATION_FINISHED,
+                    f"Operation '{self.operation_id}' is already finished.",
                 )
-            )
-            self._task = asyncio.create_task(
-                self._run(worker),
-                name=f"raven-operation-{self.operation_id}",
-            )
+
+            is_root = self._task is None
+            if is_root:
+                if name != self.name:
+                    raise RavenError(
+                        ErrorCode.INVALID_OPERATION_NAME,
+                        "The root task name must match the operation name.",
+                        details={
+                            "operation_name": self.name,
+                            "task_name": name,
+                        },
+                    )
+
+                task = OperationTask(self, name, worker, root=True)
+                self._task = asyncio.create_task(
+                    self._run(task._run_root),
+                    name=f"raven-operation-{self.operation_id}",
+                )
+                return task
+
+            if self._status != OperationStatus.RUNNING:
+                raise RavenError(
+                    ErrorCode.OPERATION_FINISHED,
+                    f"Operation '{self.operation_id}' is not accepting child tasks.",
+                )
+
+            task = OperationTask(self, name, worker, root=False)
+
+        await task.start()
+        return task
 
 
     async def wait(self) -> "Operation":
@@ -268,6 +290,15 @@ class Operation:
         await self._stream.publish(
             Event(
                 type=EventType.OPERATION_STARTED,
+                data={"name": self.name},
+            )
+        )
+
+
+    async def _persist_queued(self) -> None:
+        await self._stream.publish(
+            Event(
+                type=EventType.OPERATION_QUEUED,
                 data={"name": self.name},
             )
         )
@@ -614,42 +645,33 @@ class OperationManager:
             return recovered
 
 
-    async def submit(self, name: str, worker: OperationWorker) -> Operation:
-        """Create and start a root operation using a low-level worker."""
-        operation = await self._create_operation(name)
-        await operation.start(worker)
+    async def create(self, name: str) -> Operation:
+        """Create, persist, and register a queued operation."""
+        if not isinstance(name, str) or not name.strip():
+            raise RavenError(
+                ErrorCode.INVALID_OPERATION_NAME,
+                "Operation name cannot be empty.",
+            )
+        self._ensure_open()
+        await self._registry.start()
+        operation_id = uuid4()
+        key = str(operation_id)
+        async with self._lock:
+            self._ensure_open()
+            operation = Operation(
+                operation_id=operation_id,
+                name=name,
+                stream=self._registry.get(key),
+            )
+            self._operations[key] = operation
+
+        try:
+            await operation._persist_queued()
+        except BaseException:
+            async with self._lock:
+                self._operations.pop(key, None)
+            raise
         return operation
-
-
-    async def run(
-        self,
-        name: str,
-        worker: TaskWorker,
-        *,
-        operation: Operation | None = None,
-    ) -> OperationTask:
-        """Run one component invocation in a new or supplied operation."""
-        if operation is None:
-            root = await self._create_operation(name)
-            task = OperationTask(root, name, worker, root=True)
-            await root.start(task._run_root)
-            return task
-
-        self._ensure_operation_active(operation)
-        task = OperationTask(operation, name, worker, root=False)
-        await task.start()
-        return task
-
-
-    async def execute(
-        self,
-        name: str,
-        worker: TaskWorker,
-        *,
-        operation: Operation | None = None,
-    ) -> OperationTask:
-        """Explicit alias for ``run`` when used by component wrappers."""
-        return await self.run(name, worker, operation=operation)
 
 
     async def get(self, operation_id: UUID | str) -> Operation:
@@ -721,27 +743,6 @@ class OperationManager:
         await self._registry.close()
 
 
-    async def _create_operation(self, name: str) -> Operation:
-        if not isinstance(name, str) or not name.strip():
-            raise RavenError(
-                ErrorCode.INVALID_OPERATION_NAME,
-                "Operation name cannot be empty.",
-            )
-        self._ensure_open()
-        await self._registry.start()
-        operation_id = uuid4()
-        key = str(operation_id)
-        async with self._lock:
-            self._ensure_open()
-            operation = Operation(
-                operation_id=operation_id,
-                name=name,
-                stream=self._registry.get(key),
-            )
-            self._operations[key] = operation
-            return operation
-
-
     @staticmethod
     def _parse_operation_id(operation_id: UUID | str) -> UUID:
         try:
@@ -751,15 +752,6 @@ class OperationManager:
                 ErrorCode.INVALID_OPERATION_ID,
                 "operation_id must be a valid UUID.",
             ) from exc
-
-
-    @staticmethod
-    def _ensure_operation_active(operation: Operation) -> None:
-        if operation.is_finished:
-            raise RavenError(
-                ErrorCode.OPERATION_FINISHED,
-                f"Operation '{operation.operation_id}' is already finished.",
-            )
 
 
     def _ensure_open(self) -> None:

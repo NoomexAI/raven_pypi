@@ -164,7 +164,10 @@ class EmbeddedRetrievalPipeline(RetrievalPipeline):
         *,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.RETRIEVAL_EMBEDDED_LOCAL
+        )
+        return await active_operation.run(
             OperationType.RETRIEVAL_EMBEDDED_LOCAL,
             lambda active_operation: self._retrieve_local_context(
                 knowledge_name,
@@ -172,7 +175,6 @@ class EmbeddedRetrievalPipeline(RetrievalPipeline):
                 top_k,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -257,14 +259,16 @@ class EmbeddedRetrievalPipeline(RetrievalPipeline):
         *,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.RETRIEVAL_EMBEDDED_GLOBAL
+        )
+        return await active_operation.run(
             OperationType.RETRIEVAL_EMBEDDED_GLOBAL,
             lambda active_operation: self._retrieve_global_context(
                 user_query,
                 top_k,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -576,7 +580,10 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
         anchor_count: int = 4,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.RETRIEVAL_HIERARCHICAL_LOCAL
+        )
+        return await active_operation.run(
             OperationType.RETRIEVAL_HIERARCHICAL_LOCAL,
             lambda active_operation: self._retrieve_local_context(
                 knowledge_name,
@@ -586,7 +593,6 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
                 anchor_count=anchor_count,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -660,7 +666,10 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
         anchor_count: int = 4,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.RETRIEVAL_HIERARCHICAL_GLOBAL
+        )
+        return await active_operation.run(
             OperationType.RETRIEVAL_HIERARCHICAL_GLOBAL,
             lambda active_operation: self._retrieve_global_context(
                 user_query,
@@ -671,7 +680,6 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
                 anchor_count=anchor_count,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -768,7 +776,10 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
         anchor_count: int = 4,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.RETRIEVAL_HIERARCHICAL_BY_KNOWLEDGE
+        )
+        return await active_operation.run(
             OperationType.RETRIEVAL_HIERARCHICAL_BY_KNOWLEDGE,
             lambda active_operation: self._retrieve_by_knowledge(
                 user_query,
@@ -778,7 +789,6 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
                 anchor_count=anchor_count,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -817,7 +827,10 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
         anchor_count: int = 4,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.RETRIEVAL_HIERARCHICAL_BY_FILE
+        )
+        return await active_operation.run(
             OperationType.RETRIEVAL_HIERARCHICAL_BY_FILE,
             lambda active_operation: self._retrieve_by_file(
                 knowledge_name,
@@ -828,7 +841,6 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
                 anchor_count=anchor_count,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -941,7 +953,10 @@ class AgreementBasedRetrievalPipeline(RetrievalPipeline):
         anchor_count: int = 4,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.RETRIEVAL_AGREEMENT_LOCAL
+        )
+        return await active_operation.run(
             OperationType.RETRIEVAL_AGREEMENT_LOCAL,
             lambda active_operation: self._retrieve_local_context(
                 knowledge_name,
@@ -953,7 +968,6 @@ class AgreementBasedRetrievalPipeline(RetrievalPipeline):
                 anchor_count=anchor_count,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -1048,7 +1062,10 @@ class AgreementBasedRetrievalPipeline(RetrievalPipeline):
         anchor_count: int = 4,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.RETRIEVAL_AGREEMENT_GLOBAL
+        )
+        return await active_operation.run(
             OperationType.RETRIEVAL_AGREEMENT_GLOBAL,
             lambda active_operation: self._retrieve_global_context(
                 user_query,
@@ -1061,7 +1078,6 @@ class AgreementBasedRetrievalPipeline(RetrievalPipeline):
                 anchor_count=anchor_count,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -1167,7 +1183,10 @@ class VectorConditionedRetrievalPipeline(RetrievalPipeline):
         anchor_count: int = 4,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.RETRIEVAL_VECTOR_CONDITIONED_LOCAL
+        )
+        return await active_operation.run(
             OperationType.RETRIEVAL_VECTOR_CONDITIONED_LOCAL,
             lambda active_operation: self._retrieve_local_context(
                 knowledge_name,
@@ -1178,7 +1197,6 @@ class VectorConditionedRetrievalPipeline(RetrievalPipeline):
                 anchor_count=anchor_count,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -1264,7 +1282,10 @@ class VectorConditionedRetrievalPipeline(RetrievalPipeline):
         anchor_count: int = 4,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.RETRIEVAL_VECTOR_CONDITIONED_GLOBAL
+        )
+        return await active_operation.run(
             OperationType.RETRIEVAL_VECTOR_CONDITIONED_GLOBAL,
             lambda active_operation: self._retrieve_global_context(
                 user_query,
@@ -1274,7 +1295,6 @@ class VectorConditionedRetrievalPipeline(RetrievalPipeline):
                 anchor_count=anchor_count,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 

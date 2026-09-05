@@ -199,13 +199,15 @@ class Conversation:
         operation: Operation | None = None,
     ) -> OperationTask:
         """Start a context-loading task for this conversation."""
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.CONVERSATION_GET_CONTEXT
+        )
+        return await active_operation.run(
             OperationType.CONVERSATION_GET_CONTEXT,
             lambda active_operation: self._get_context_messages(
                 initial_token_count=initial_token_count,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -380,13 +382,15 @@ class Conversation:
         *,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.CONVERSATION_SAVE_PREFERENCE
+        )
+        return await active_operation.run(
             OperationType.CONVERSATION_SAVE_PREFERENCE,
             lambda active_operation: self._save_preference(
                 text,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -433,13 +437,15 @@ class Conversation:
         *,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.CONVERSATION_REMOVE_PREFERENCE
+        )
+        return await active_operation.run(
             OperationType.CONVERSATION_REMOVE_PREFERENCE,
             lambda active_operation: self._remove_preference(
                 preference_id,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -483,14 +489,16 @@ class Conversation:
         pinned: bool | None = None,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.CONVERSATION_UPDATE
+        )
+        return await active_operation.run(
             OperationType.CONVERSATION_UPDATE,
             lambda active_operation: self._update(
                 title=title,
                 pinned=pinned,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -559,14 +567,16 @@ class Conversation:
         *,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.CONVERSATION_GENERATE_TITLE
+        )
+        return await active_operation.run(
             OperationType.CONVERSATION_GENERATE_TITLE,
             lambda active_operation: self._generate_title(
                 llm,
                 first_user_message,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -1058,13 +1068,15 @@ class ConversationManager:
         *,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.CONVERSATION_CREATE
+        )
+        return await active_operation.run(
             OperationType.CONVERSATION_CREATE,
             lambda active_operation: self._create(
                 knowledge_name,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -1150,7 +1162,10 @@ class ConversationManager:
         pinned: bool | None = None,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.CONVERSATION_UPDATE_METADATA
+        )
+        return await active_operation.run(
             OperationType.CONVERSATION_UPDATE_METADATA,
             lambda active_operation: self._update_metadata(
                 conversation_id,
@@ -1158,7 +1173,6 @@ class ConversationManager:
                 pinned=pinned,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -1186,13 +1200,15 @@ class ConversationManager:
         *,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.CONVERSATION_DELETE
+        )
+        return await active_operation.run(
             OperationType.CONVERSATION_DELETE,
             lambda active_operation: self._delete(
                 conversation_id,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 

@@ -100,7 +100,10 @@ class IngestionPipeline:
         chunk_size: int = 512,
         chunk_overlap: int = 50,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.INGESTION_RUN
+        )
+        return await active_operation.run(
             OperationType.INGESTION_RUN,
             lambda active_operation: self._run(
                 knowledge_name,
@@ -111,7 +114,6 @@ class IngestionPipeline:
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
             ),
-            operation=operation,
         )
 
 

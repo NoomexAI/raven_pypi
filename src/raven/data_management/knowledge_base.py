@@ -124,13 +124,15 @@ class Knowledge:
         *,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.KNOWLEDGE_SET_SUMMARY
+        )
+        return await active_operation.run(
             OperationType.KNOWLEDGE_SET_SUMMARY,
             lambda active_operation: self._set_summary(
                 summary,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -217,7 +219,10 @@ class Knowledge:
         chunk_overlap: int = 50,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.KNOWLEDGE_INGEST
+        )
+        return await active_operation.run(
             OperationType.KNOWLEDGE_INGEST,
             lambda active_operation: self._ingest(
                 file_name,
@@ -229,7 +234,6 @@ class Knowledge:
                 chunk_overlap=chunk_overlap,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -452,13 +456,15 @@ class Knowledge:
         *,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.KNOWLEDGE_DELETE_FILE
+        )
+        return await active_operation.run(
             OperationType.KNOWLEDGE_DELETE_FILE,
             lambda active_operation: self._delete_file(
                 file_id,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -815,14 +821,16 @@ class KnowledgeBase:
         *,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.KNOWLEDGE_CREATE
+        )
+        return await active_operation.run(
             OperationType.KNOWLEDGE_CREATE,
             lambda active_operation: self._create(
                 name,
                 user_summary,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -912,13 +920,15 @@ class KnowledgeBase:
         *,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.KNOWLEDGE_DELETE
+        )
+        return await active_operation.run(
             OperationType.KNOWLEDGE_DELETE,
             lambda active_operation: self._delete(
                 name,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 

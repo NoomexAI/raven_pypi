@@ -44,10 +44,12 @@ class OllamaManager:
 
 
     async def check_connection(self, *, operation: Operation | None = None) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.MODEL_CHECK_CONNECTION
+        )
+        return await active_operation.run(
             OperationType.MODEL_CHECK_CONNECTION,
             lambda active_operation: self._check_connection(operation=active_operation),
-            operation=operation,
         )
 
 
@@ -68,12 +70,14 @@ class OllamaManager:
 
 
     async def list_models(self, *, operation: Operation | None = None) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.MODEL_LIST
+        )
+        return await active_operation.run(
             OperationType.MODEL_LIST,
             lambda active_operation: self._list_models_with_events(
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -104,13 +108,15 @@ class OllamaManager:
 
 
     async def inspect(self, model: str, *, operation: Operation | None = None) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.MODEL_INSPECT
+        )
+        return await active_operation.run(
             OperationType.MODEL_INSPECT,
             lambda active_operation: self._inspect(
                 model,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -143,14 +149,16 @@ class OllamaManager:
         *,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.MODEL_PULL
+        )
+        return await active_operation.run(
             OperationType.MODEL_PULL,
             lambda active_operation: self._pull(
                 model,
                 on_progress,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -188,13 +196,15 @@ class OllamaManager:
 
 
     async def delete(self, model: str, *, operation: Operation | None = None) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.MODEL_DELETE
+        )
+        return await active_operation.run(
             OperationType.MODEL_DELETE,
             lambda active_operation: self._delete(
                 model,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -216,13 +226,15 @@ class OllamaManager:
 
 
     async def load_llm(self, model: str, *, operation: Operation | None = None) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.MODEL_LOAD_LLM
+        )
+        return await active_operation.run(
             OperationType.MODEL_LOAD_LLM,
             lambda active_operation: self._load_llm(
                 model,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -261,13 +273,15 @@ class OllamaManager:
         *,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.MODEL_LOAD_EMBEDDING
+        )
+        return await active_operation.run(
             OperationType.MODEL_LOAD_EMBEDDING,
             lambda active_operation: self._load_embedding(
                 model,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -316,13 +330,15 @@ class OllamaManager:
             await pull_task.result()
 
     async def unload_llm(self, model: str, *, operation: Operation | None = None) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.MODEL_UNLOAD_LLM
+        )
+        return await active_operation.run(
             OperationType.MODEL_UNLOAD_LLM,
             lambda active_operation: self._unload_llm(
                 model,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -353,13 +369,15 @@ class OllamaManager:
         *,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.MODEL_UNLOAD_EMBEDDING
+        )
+        return await active_operation.run(
             OperationType.MODEL_UNLOAD_EMBEDDING,
             lambda active_operation: self._unload_embedding(
                 model,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 

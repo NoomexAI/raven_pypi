@@ -91,7 +91,14 @@ class Raven:
         worker: OperationWorker,
     ) -> Operation:
         """Create and start a root operation from a worker."""
-        return await self.operation_manager.submit(name, worker)
+        operation = await self.operation_manager.create(name)
+        await operation.run(name, worker)
+        return operation
+
+
+    async def create_operation(self, name: str) -> Operation:
+        """Create an operation whose tasks can be run by the caller."""
+        return await self.operation_manager.create(name)
 
 
     async def run_operation(
@@ -102,10 +109,10 @@ class Raven:
         operation: Operation | None = None,
     ) -> OperationTask:
         """Run a root task or a child task in a supplied operation."""
-        return await self.operation_manager.run(
+        active_operation = operation or await self.operation_manager.create(name)
+        return await active_operation.run(
             name,
             worker,
-            operation=operation,
         )
 
 
@@ -143,14 +150,16 @@ class Raven:
     ) -> OperationTask:
         """Load both model adapters and configure model-dependent components."""
         self._validate_model_specs(llm_spec, embedding_spec)
-        return await self.operation_manager.run(
+        active_operation = operation or await self.operation_manager.create(
+            OperationType.RAVEN_LOAD_MODELS
+        )
+        return await active_operation.run(
             OperationType.RAVEN_LOAD_MODELS,
             lambda active_operation: self._load_models(
                 llm_spec,
                 embedding_spec,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 

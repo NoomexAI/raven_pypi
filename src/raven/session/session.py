@@ -234,10 +234,12 @@ class Session:
                     run._release_once()
 
         try:
-            task = await self._operation_manager.run(
+            active_operation = operation or await self._operation_manager.create(
+                OperationType.SESSION_GENERATE_RESPONSE
+            )
+            task = await active_operation.run(
                 OperationType.SESSION_GENERATE_RESPONSE,
                 worker,
-                operation=operation,
             )
             session_run = SessionRun(task, self._release_run)
             run_holder["run"] = session_run

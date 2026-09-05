@@ -104,10 +104,12 @@ class AgentHarness:
                 transcript,
             )
 
-        task = await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.CHAT_GENERATE_RESPONSE
+        )
+        task = await active_operation.run(
             OperationType.CHAT_GENERATE_RESPONSE,
             worker,
-            operation=operation,
         )
         return AgentRun(task, transcript)
 

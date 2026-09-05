@@ -29,7 +29,10 @@ class LiteLLMManager:
         options: dict[str, Any] | None = None,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.MODEL_LOAD_LLM
+        )
+        return await active_operation.run(
             OperationType.MODEL_LOAD_LLM,
             lambda active_operation: self._load_llm(
                 model,
@@ -38,7 +41,6 @@ class LiteLLMManager:
                 options=options,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
@@ -115,7 +117,10 @@ class LiteLLMManager:
         options: dict[str, Any] | None = None,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.MODEL_LOAD_EMBEDDING
+        )
+        return await active_operation.run(
             OperationType.MODEL_LOAD_EMBEDDING,
             lambda active_operation: self._load_embedding(
                 model,
@@ -123,7 +128,6 @@ class LiteLLMManager:
                 options=options,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 

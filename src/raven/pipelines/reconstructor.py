@@ -29,13 +29,15 @@ class Reconstructor:
         *,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self._operation_manager.run(
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.RECONSTRUCTION_RECONSTRUCT
+        )
+        return await active_operation.run(
             OperationType.RECONSTRUCTION_RECONSTRUCT,
             lambda active_operation: self._reconstruct(
                 retrieval_result,
                 operation=active_operation,
             ),
-            operation=operation,
         )
 
 
