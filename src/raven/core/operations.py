@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextvars import ContextVar, Token
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
+
+from pydantic import BaseModel, ConfigDict
 
 from .errors import ErrorCode, RavenError, error_payload
 from .events import Event, EventStream, EventStreamRegistry, EventType
@@ -71,6 +75,51 @@ class OperationType(StrEnum):
 
     CHAT_GENERATE_RESPONSE = "chat.generate_response"
     SESSION_GENERATE_RESPONSE = "session.generate_response"
+
+
+
+class RetryPolicy(StrEnum):
+    """User-visible retry behavior allowed for an operation task."""
+
+    NEVER = "never"
+    USER_CONFIRMED = "user_confirmed"
+
+
+
+class OperationTaskRecord(BaseModel):
+    """Durable task state used to evaluate a user-confirmed retry."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    task_id: UUID
+    operation_id: UUID
+    name: str
+    is_root: bool
+    status: OperationStatus
+    retry_policy: RetryPolicy
+    retry_input: dict[str, Any] | None
+    attempt: int
+    retry_of_operation_id: UUID | None
+    retry_of_task_id: UUID | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    error: dict[str, Any] | None
+
+
+    @property
+    def can_retry(self) -> bool:
+        return (
+            self.retry_policy == RetryPolicy.USER_CONFIRMED
+            and self.retry_input is not None
+            and self.status == OperationStatus.FAILED
+        )
+
+
+
+_RETRY_POLICY_BY_TASK = {
+    OperationType.RECONSTRUCTION_RECONSTRUCT.value: RetryPolicy.USER_CONFIRMED,
+}
 
 
 
@@ -161,8 +210,34 @@ class Operation:
         return tuple(self._child_tasks.values())
 
 
-    async def run(self, name: str, worker: TaskWorker) -> "OperationTask":
+    async def run(
+        self,
+        name: str,
+        worker: TaskWorker,
+        *,
+        retry_input: dict[str, Any] | None = None,
+        retry_of: OperationTaskRecord | None = None,
+    ) -> "OperationTask":
         """Run the root task or a child task within this operation."""
+        retry_policy = _RETRY_POLICY_BY_TASK.get(str(name), RetryPolicy.NEVER)
+        normalized_retry_input = self._normalize_retry_input(
+            retry_input,
+            retry_policy,
+        )
+        if retry_of is not None:
+            if not retry_of.can_retry or retry_of.name != str(name):
+                raise RavenError(
+                    ErrorCode.OPERATION_TASK_NOT_RETRYABLE,
+                    f"Operation task '{retry_of.task_id}' cannot be retried as '{name}'.",
+                )
+            attempt = retry_of.attempt + 1
+            retry_of_operation_id = retry_of.operation_id
+            retry_of_task_id = retry_of.task_id
+        else:
+            attempt = 1
+            retry_of_operation_id = None
+            retry_of_task_id = None
+
         async with self._lock:
             if self.is_finished:
                 raise RavenError(
@@ -182,7 +257,19 @@ class Operation:
                         },
                     )
 
-                task = OperationTask(self, name, worker, root=True)
+                task = OperationTask(
+                    self,
+                    name,
+                    worker,
+                    root=True,
+                    retry_policy=retry_policy,
+                    retry_input=normalized_retry_input,
+                    attempt=attempt,
+                    retry_of_operation_id=retry_of_operation_id,
+                    retry_of_task_id=retry_of_task_id,
+                )
+                await task._persist()
+                self._register_task(task)
                 self._task = asyncio.create_task(
                     self._run(task._run_root),
                     name=f"raven-operation-{self.operation_id}",
@@ -195,10 +282,43 @@ class Operation:
                     f"Operation '{self.operation_id}' is not accepting child tasks.",
                 )
 
-            task = OperationTask(self, name, worker, root=False)
+            task = OperationTask(
+                self,
+                name,
+                worker,
+                root=False,
+                retry_policy=retry_policy,
+                retry_input=normalized_retry_input,
+                attempt=attempt,
+                retry_of_operation_id=retry_of_operation_id,
+                retry_of_task_id=retry_of_task_id,
+            )
+            await task._persist()
+            self._register_task(task)
 
         await task.start()
         return task
+
+
+    @staticmethod
+    def _normalize_retry_input(
+        retry_input: dict[str, Any] | None,
+        retry_policy: RetryPolicy,
+    ) -> dict[str, Any] | None:
+        if retry_input is None:
+            return None
+        if retry_policy == RetryPolicy.NEVER:
+            raise RavenError(
+                ErrorCode.OPERATION_TASK_NOT_RETRYABLE,
+                "This operation task type does not permit retry input.",
+            )
+        try:
+            return json.loads(json.dumps(retry_input, allow_nan=False))
+        except (TypeError, ValueError) as exc:
+            raise RavenError(
+                ErrorCode.INVALID_RETRY_INPUT,
+                "Retry input must be JSON serializable.",
+            ) from exc
 
 
     async def wait(self) -> "Operation":
@@ -451,6 +571,11 @@ class OperationTask:
         worker: TaskWorker,
         *,
         root: bool,
+        retry_policy: RetryPolicy,
+        retry_input: dict[str, Any] | None,
+        attempt: int,
+        retry_of_operation_id: UUID | None,
+        retry_of_task_id: UUID | None,
         task_id: UUID | None = None,
     ) -> None:
         self.operation = operation
@@ -458,11 +583,16 @@ class OperationTask:
         self.name = name
         self._worker = worker
         self._root = root
+        self._retry_policy = retry_policy
+        self._retry_input = retry_input
+        self._attempt = attempt
+        self._retry_of_operation_id = retry_of_operation_id
+        self._retry_of_task_id = retry_of_task_id
+        self._created_at = datetime.now(timezone.utc)
         self._status = OperationStatus.QUEUED
         self._result: Any = None
         self._error: BaseException | None = None
         self._task: asyncio.Task[Any] | None = None
-        operation._register_task(self)
 
 
     @property
@@ -494,6 +624,47 @@ class OperationTask:
     @property
     def is_root(self) -> bool:
         return self._root
+
+
+    @property
+    def retry_policy(self) -> RetryPolicy:
+        return self._retry_policy
+
+
+    @property
+    def retry_input(self) -> dict[str, Any] | None:
+        return copy.deepcopy(self._retry_input)
+
+
+    @property
+    def attempt(self) -> int:
+        return self._attempt
+
+
+    @property
+    def retry_of_operation_id(self) -> UUID | None:
+        return self._retry_of_operation_id
+
+
+    @property
+    def retry_of_task_id(self) -> UUID | None:
+        return self._retry_of_task_id
+
+
+    async def _persist(self) -> None:
+        await self.operation._stream.register_task(
+            task_id=self.task_id,
+            name=self.name,
+            is_root=self._root,
+            retry_policy=self._retry_policy.value,
+            retry_input=self._retry_input,
+            attempt=self._attempt,
+            retry_of_operation_id=self._retry_of_operation_id,
+            retry_of_task_id=self._retry_of_task_id,
+            created_at=self._created_at,
+        )
+        if self._retry_policy != RetryPolicy.NEVER and self._retry_input is not None:
+            await self.operation._stream.sync()
 
 
     async def start(self) -> None:
@@ -637,12 +808,27 @@ class OperationManager:
                 if operation.is_finished:
                     continue
 
+                await self._recover_interrupted_tasks(operation)
                 await operation._recover_interrupted()
                 async with self._lock:
                     self._operations.setdefault(key, operation)
                 recovered.append(operation)
 
             return recovered
+
+
+    async def get_task(self, task_id: UUID | str) -> OperationTaskRecord:
+        """Load the durable record for one operation task."""
+        self._ensure_open()
+        await self._registry.start()
+        parsed_id = self._parse_task_id(task_id)
+        record = await self._registry.task_record(str(parsed_id))
+        if record is None:
+            raise RavenError(
+                ErrorCode.OPERATION_TASK_NOT_FOUND,
+                f"Operation task '{parsed_id}' was not found.",
+            )
+        return OperationTaskRecord.model_validate(record)
 
 
     async def create(self, name: str) -> Operation:
@@ -672,6 +858,28 @@ class OperationManager:
                 self._operations.pop(key, None)
             raise
         return operation
+
+
+    async def _recover_interrupted_tasks(self, operation: Operation) -> None:
+        records = await self._registry.unfinished_tasks(str(operation.operation_id))
+        interruption = RavenError(
+            ErrorCode.OPERATION_INTERRUPTED,
+            "The operation task was interrupted by a previous process termination.",
+        )
+        for record in records:
+            await operation.publish(
+                Event(
+                    type=EventType.OPERATION_TASK_FAILED,
+                    task_id=UUID(str(record["task_id"])),
+                    task_name=str(record["name"]),
+                    data={
+                        "name": str(record["name"]),
+                        "error": interruption.as_payload(),
+                        "previous_status": str(record["status"]),
+                        "recovered_after_restart": True,
+                    },
+                )
+            )
 
 
     async def get(self, operation_id: UUID | str) -> Operation:
@@ -751,6 +959,17 @@ class OperationManager:
             raise RavenError(
                 ErrorCode.INVALID_OPERATION_ID,
                 "operation_id must be a valid UUID.",
+            ) from exc
+
+
+    @staticmethod
+    def _parse_task_id(task_id: UUID | str) -> UUID:
+        try:
+            return task_id if isinstance(task_id, UUID) else UUID(task_id)
+        except (TypeError, ValueError) as exc:
+            raise RavenError(
+                ErrorCode.OPERATION_TASK_NOT_FOUND,
+                "task_id must be a valid UUID.",
             ) from exc
 
 

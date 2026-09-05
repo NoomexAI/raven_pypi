@@ -7,7 +7,9 @@ from .core.operations import (
     OperationManager,
     OperationStatus,
     OperationTask,
+    OperationTaskRecord,
     OperationType,
+    RetryPolicy,
 )
 from .data_management.conversation_manager import Conversation, ConversationManager
 from .data_management.knowledge_base import Knowledge, KnowledgeBase
@@ -62,12 +64,14 @@ __all__ = [
     "OperationManager",
     "OperationStatus",
     "OperationTask",
+    "OperationTaskRecord",
     "OperationType",
     "ParsedDocument",
     "ParsedElement",
     "Provider",
     "ProvenanceAwareSemanticSplitter",
     "Raven",
+    "RetryPolicy",
     "Reconstructor",
     "RetrievalPipeline",
     "SemanticSection",

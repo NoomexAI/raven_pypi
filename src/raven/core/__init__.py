@@ -5,7 +5,9 @@ from .operations import (
     OperationManager,
     OperationStatus,
     OperationTask,
+    OperationTaskRecord,
     OperationType,
+    RetryPolicy,
 )
 
 __all__ = [
@@ -13,5 +15,7 @@ __all__ = [
     "OperationManager",
     "OperationStatus",
     "OperationTask",
+    "OperationTaskRecord",
     "OperationType",
+    "RetryPolicy",
 ]

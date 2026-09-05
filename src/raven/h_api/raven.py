@@ -18,6 +18,7 @@ from ..core.operations import (
     Operation,
     OperationManager,
     OperationTask,
+    OperationTaskRecord,
     OperationType,
     OperationWorker,
     TaskWorker,
@@ -118,6 +119,38 @@ class Raven:
 
     async def get_operation(self, operation_id: UUID | str) -> Operation:
         return await self.operation_manager.get(operation_id)
+
+
+    async def get_operation_task(self, task_id: UUID | str) -> OperationTaskRecord:
+        return await self.operation_manager.get_task(task_id)
+
+
+    async def retry_task(self, task_id: UUID | str) -> OperationTask:
+        """Start a user-confirmed retry as a new linked operation."""
+        failed_task = await self.operation_manager.get_task(task_id)
+        if not failed_task.can_retry:
+            raise RavenError(
+                ErrorCode.OPERATION_TASK_NOT_RETRYABLE,
+                f"Operation task '{failed_task.task_id}' is not retryable.",
+            )
+
+        if failed_task.name == OperationType.RECONSTRUCTION_RECONSTRUCT.value:
+            retry_input = failed_task.retry_input or {}
+            sections = retry_input.get("sections")
+            if not isinstance(sections, list):
+                raise RavenError(
+                    ErrorCode.INVALID_RETRY_INPUT,
+                    "Reconstruction retry input does not contain a section list.",
+                )
+            return await self.reconstructor.reconstruct(
+                sections,
+                retry_of=failed_task,
+            )
+
+        raise RavenError(
+            ErrorCode.OPERATION_TASK_NOT_RETRYABLE,
+            f"Operation task type '{failed_task.name}' has no retry handler.",
+        )
 
 
     async def wait_operation(self, operation_id: UUID | str) -> Operation:

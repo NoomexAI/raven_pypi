@@ -52,6 +52,9 @@ class ErrorCode(StrEnum):
     OPERATION_FINISHED = "operation_finished"
     INVALID_OPERATION_ID = "invalid_operation_id"
     OPERATION_MANAGER_CLOSED = "operation_manager_closed"
+    OPERATION_TASK_NOT_FOUND = "operation_task_not_found"
+    OPERATION_TASK_NOT_RETRYABLE = "operation_task_not_retryable"
+    INVALID_RETRY_INPUT = "invalid_retry_input"
 
     INVALID_METADATA = "invalid_metadata"
     UNSUPPORTED_METADATA_VERSION = "unsupported_metadata_version"

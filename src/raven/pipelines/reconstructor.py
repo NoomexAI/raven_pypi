@@ -7,7 +7,13 @@ from typing import Any
 
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
-from ..core.operations import Operation, OperationManager, OperationTask, OperationType
+from ..core.operations import (
+    Operation,
+    OperationManager,
+    OperationTask,
+    OperationTaskRecord,
+    OperationType,
+)
 from ..data_management.knowledge_base import KnowledgeBase
 
 
@@ -28,16 +34,20 @@ class Reconstructor:
         retrieval_result: list[dict[str, Any]] | dict[str, Any] | None,
         *,
         operation: Operation | None = None,
+        retry_of: OperationTaskRecord | None = None,
     ) -> OperationTask:
+        retry_sections = self._normalize_retrieval_result(retrieval_result)
         active_operation = operation or await self._operation_manager.create(
             OperationType.RECONSTRUCTION_RECONSTRUCT
         )
         return await active_operation.run(
             OperationType.RECONSTRUCTION_RECONSTRUCT,
             lambda active_operation: self._reconstruct(
-                retrieval_result,
+                retry_sections,
                 operation=active_operation,
             ),
+            retry_input={"sections": retry_sections},
+            retry_of=retry_of,
         )
 
 

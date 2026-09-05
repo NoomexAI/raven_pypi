@@ -141,6 +141,20 @@ _OPERATION_STATUS_BY_EVENT = {
     EventType.OPERATION_CANCELLED: "cancelled",
 }
 
+_TASK_STATUS_BY_EVENT = {
+    EventType.OPERATION_TASK_QUEUED: "queued",
+    EventType.OPERATION_TASK_STARTED: "running",
+    EventType.OPERATION_TASK_COMPLETED: "completed",
+    EventType.OPERATION_TASK_FAILED: "failed",
+    EventType.OPERATION_TASK_CANCELLED: "cancelled",
+}
+
+_TERMINAL_TASK_EVENT_TYPES = {
+    EventType.OPERATION_TASK_COMPLETED,
+    EventType.OPERATION_TASK_FAILED,
+    EventType.OPERATION_TASK_CANCELLED,
+}
+
 
 
 class Event(BaseModel):
@@ -220,6 +234,80 @@ class SQLiteEventStore:
                 ) from exc
             self._write_generation += 1
             return self._write_generation
+
+
+    async def register_task(
+        self,
+        *,
+        task_id: str,
+        operation_id: str,
+        name: str,
+        is_root: bool,
+        retry_policy: str,
+        retry_input: dict[str, Any] | None,
+        attempt: int,
+        retry_of_operation_id: str | None,
+        retry_of_task_id: str | None,
+        created_at: datetime,
+    ) -> int:
+        await self.start()
+        async with self._lock:
+            try:
+                await asyncio.to_thread(
+                    self._register_task,
+                    task_id,
+                    operation_id,
+                    name,
+                    is_root,
+                    retry_policy,
+                    retry_input,
+                    attempt,
+                    retry_of_operation_id,
+                    retry_of_task_id,
+                    created_at.isoformat(),
+                )
+            except RavenError:
+                raise
+            except Exception as exc:
+                raise self._database_error("The operation task could not be persisted.") from exc
+            self._write_generation += 1
+            return self._write_generation
+
+
+    async def read_task(self, task_id: str) -> dict[str, Any] | None:
+        await self.start()
+        async with self._lock:
+            try:
+                row = await asyncio.to_thread(self._read_task, task_id)
+            except Exception as exc:
+                raise self._database_error("The operation task could not be read.") from exc
+        if row is None:
+            return None
+        try:
+            return self._task_from_row(row)
+        except Exception as exc:
+            raise RavenError(
+                ErrorCode.EVENT_DATABASE_CORRUPTED,
+                "The event database contains an invalid operation task record.",
+                details={"task_id": task_id},
+            ) from exc
+
+
+    async def unfinished_tasks(self, operation_id: str) -> list[dict[str, Any]]:
+        await self.start()
+        async with self._lock:
+            try:
+                rows = await asyncio.to_thread(self._unfinished_tasks, operation_id)
+            except Exception as exc:
+                raise self._database_error("Unfinished operation tasks could not be read.") from exc
+        try:
+            return [self._task_from_row(row) for row in rows]
+        except Exception as exc:
+            raise RavenError(
+                ErrorCode.EVENT_DATABASE_CORRUPTED,
+                "The event database contains an invalid operation task record.",
+                details={"operation_id": operation_id},
+            ) from exc
 
 
     async def read_metadata(
@@ -384,16 +472,102 @@ class SQLiteEventStore:
                         ON DELETE CASCADE
                 ) WITHOUT ROWID;
 
+                CREATE TABLE IF NOT EXISTS tasks (
+                    task_id TEXT PRIMARY KEY NOT NULL,
+                    operation_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    is_root INTEGER NOT NULL CHECK (is_root IN (0, 1)),
+                    status TEXT NOT NULL,
+                    retry_policy TEXT NOT NULL,
+                    retry_input_json TEXT,
+                    attempt INTEGER NOT NULL CHECK (attempt > 0),
+                    retry_of_operation_id TEXT,
+                    retry_of_task_id TEXT,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    error_json TEXT,
+                    FOREIGN KEY (operation_id)
+                        REFERENCES operations(operation_id)
+                        ON DELETE CASCADE
+                );
+
                 CREATE INDEX IF NOT EXISTS operations_finished_at
                     ON operations(finished_at)
                     WHERE finished_at IS NOT NULL;
 
-                PRAGMA user_version = 1;
+                CREATE INDEX IF NOT EXISTS tasks_operation_id
+                    ON tasks(operation_id, created_at);
+
+                CREATE INDEX IF NOT EXISTS tasks_retry_of_task_id
+                    ON tasks(retry_of_task_id)
+                    WHERE retry_of_task_id IS NOT NULL;
+
+                PRAGMA user_version = 2;
                 """
             )
             return connection
         except Exception:
             connection.close()
+            raise
+
+
+    def _register_task(
+        self,
+        task_id: str,
+        operation_id: str,
+        name: str,
+        is_root: bool,
+        retry_policy: str,
+        retry_input: dict[str, Any] | None,
+        attempt: int,
+        retry_of_operation_id: str | None,
+        retry_of_task_id: str | None,
+        created_at: str,
+    ) -> None:
+        connection = self._require_connection()
+        retry_input_json = (
+            json.dumps(retry_input, separators=(",", ":"), allow_nan=False)
+            if retry_input is not None
+            else None
+        )
+
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                INSERT INTO tasks (
+                    task_id,
+                    operation_id,
+                    name,
+                    is_root,
+                    status,
+                    retry_policy,
+                    retry_input_json,
+                    attempt,
+                    retry_of_operation_id,
+                    retry_of_task_id,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    operation_id,
+                    name,
+                    int(is_root),
+                    "queued",
+                    retry_policy,
+                    retry_input_json,
+                    attempt,
+                    retry_of_operation_id,
+                    retry_of_task_id,
+                    created_at,
+                ),
+            )
+            connection.commit()
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
             raise
 
 
@@ -477,6 +651,11 @@ class SQLiteEventStore:
                             "received_event_id": event.event_id,
                         },
                     )
+                operation_name = (
+                    name
+                    if status is not None and name
+                    else str(existing["name"])
+                )
                 connection.execute(
                     """
                     UPDATE operations
@@ -489,7 +668,7 @@ class SQLiteEventStore:
                     WHERE operation_id = ?
                     """,
                     (
-                        name or str(existing["name"]),
+                        operation_name,
                         status or str(existing["status"]),
                         event.event_id,
                         (
@@ -502,6 +681,42 @@ class SQLiteEventStore:
                         operation_id,
                     ),
                 )
+
+            task_status = _TASK_STATUS_BY_EVENT.get(event.type)
+            if event.task_id is not None and task_status is not None:
+                task_error = event.data.get("error")
+                error_json = (
+                    json.dumps(task_error, separators=(",", ":"))
+                    if isinstance(task_error, dict)
+                    else None
+                )
+                cursor = connection.execute(
+                    """
+                    UPDATE tasks
+                    SET status = ?,
+                        started_at = COALESCE(?, started_at),
+                        finished_at = COALESCE(?, finished_at),
+                        error_json = COALESCE(?, error_json)
+                    WHERE task_id = ? AND operation_id = ?
+                    """,
+                    (
+                        task_status,
+                        timestamp if event.type == EventType.OPERATION_TASK_STARTED else None,
+                        timestamp if event.type in _TERMINAL_TASK_EVENT_TYPES else None,
+                        error_json,
+                        str(event.task_id),
+                        operation_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RavenError(
+                        ErrorCode.EVENT_DATABASE_CORRUPTED,
+                        "A task lifecycle event references an unknown operation task.",
+                        details={
+                            "operation_id": operation_id,
+                            "task_id": str(event.task_id),
+                        },
+                    )
 
             connection.execute(
                 """
@@ -575,6 +790,58 @@ class SQLiteEventStore:
         ).fetchall()
 
 
+    def _read_task(self, task_id: str) -> sqlite3.Row | None:
+        return self._require_connection().execute(
+            """
+            SELECT
+                task_id,
+                operation_id,
+                name,
+                is_root,
+                status,
+                retry_policy,
+                retry_input_json,
+                attempt,
+                retry_of_operation_id,
+                retry_of_task_id,
+                created_at,
+                started_at,
+                finished_at,
+                error_json
+            FROM tasks
+            WHERE task_id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+
+
+    def _unfinished_tasks(self, operation_id: str) -> list[sqlite3.Row]:
+        return self._require_connection().execute(
+            """
+            SELECT
+                task_id,
+                operation_id,
+                name,
+                is_root,
+                status,
+                retry_policy,
+                retry_input_json,
+                attempt,
+                retry_of_operation_id,
+                retry_of_task_id,
+                created_at,
+                started_at,
+                finished_at,
+                error_json
+            FROM tasks
+            WHERE operation_id = ?
+              AND status NOT IN ('completed', 'failed', 'cancelled')
+            ORDER BY created_at
+            """,
+            (operation_id,),
+        ).fetchall()
+
+
     def _expired_operation_ids(self, cutoff: str) -> list[str]:
         rows = self._require_connection().execute(
             """
@@ -640,6 +907,34 @@ class SQLiteEventStore:
 
 
     @staticmethod
+    def _task_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "task_id": row["task_id"],
+            "operation_id": row["operation_id"],
+            "name": row["name"],
+            "is_root": bool(row["is_root"]),
+            "status": row["status"],
+            "retry_policy": row["retry_policy"],
+            "retry_input": (
+                json.loads(row["retry_input_json"])
+                if row["retry_input_json"] is not None
+                else None
+            ),
+            "attempt": row["attempt"],
+            "retry_of_operation_id": row["retry_of_operation_id"],
+            "retry_of_task_id": row["retry_of_task_id"],
+            "created_at": row["created_at"],
+            "started_at": row["started_at"],
+            "finished_at": row["finished_at"],
+            "error": (
+                json.loads(row["error_json"])
+                if row["error_json"] is not None
+                else None
+            ),
+        }
+
+
+    @staticmethod
     def _database_error(message: str) -> RavenError:
         return RavenError(ErrorCode.EVENT_DATABASE_FAILED, message)
 
@@ -672,6 +967,46 @@ class EventStream:
     @property
     def is_dirty(self) -> bool:
         return self._last_write_generation > self._store.synced_generation
+
+
+    async def register_task(
+        self,
+        *,
+        task_id: UUID,
+        name: str,
+        is_root: bool,
+        retry_policy: str,
+        retry_input: dict[str, Any] | None,
+        attempt: int,
+        retry_of_operation_id: UUID | None,
+        retry_of_task_id: UUID | None,
+        created_at: datetime,
+    ) -> None:
+        """Persist a task descriptor before its worker starts."""
+        self._ensure_open()
+        self._raise_if_unhealthy()
+        async with self._condition:
+            await self._load()
+            self._last_write_generation = await self._store.register_task(
+                task_id=str(task_id),
+                operation_id=self.operation_id,
+                name=name,
+                is_root=is_root,
+                retry_policy=retry_policy,
+                retry_input=retry_input,
+                attempt=attempt,
+                retry_of_operation_id=(
+                    str(retry_of_operation_id)
+                    if retry_of_operation_id is not None
+                    else None
+                ),
+                retry_of_task_id=(
+                    str(retry_of_task_id)
+                    if retry_of_task_id is not None
+                    else None
+                ),
+                created_at=created_at,
+            )
 
 
     async def publish(self, event: Event) -> Event:
@@ -927,6 +1262,18 @@ class EventStreamRegistry:
         """Return operation UUIDs that do not have a terminal event."""
         self._ensure_open()
         return await self._store.unfinished_operation_ids()
+
+
+    async def task_record(self, task_id: str) -> dict[str, Any] | None:
+        """Return one persisted task descriptor and its current state."""
+        self._ensure_open()
+        return await self._store.read_task(task_id)
+
+
+    async def unfinished_tasks(self, operation_id: str) -> list[dict[str, Any]]:
+        """Return non-terminal tasks belonging to an operation."""
+        self._ensure_open()
+        return await self._store.unfinished_tasks(operation_id)
 
 
     async def expired_operation_ids(self, cutoff: datetime) -> list[str]:
