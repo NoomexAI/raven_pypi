@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+import sqlite3
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
@@ -13,7 +14,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .config import PathConfig
+from .config import EVENT_SYNC_INTERVAL_SECONDS, PathConfig
 from .errors import ErrorCode, RavenError
 
 
@@ -124,6 +125,24 @@ class EventType(StrEnum):
 
 
 
+_IMMEDIATE_SYNC_EVENT_TYPES = {
+    EventType.OPERATION_QUEUED,
+    EventType.OPERATION_STARTED,
+    EventType.OPERATION_COMPLETED,
+    EventType.OPERATION_FAILED,
+    EventType.OPERATION_CANCELLED,
+}
+
+_OPERATION_STATUS_BY_EVENT = {
+    EventType.OPERATION_QUEUED: "queued",
+    EventType.OPERATION_STARTED: "running",
+    EventType.OPERATION_COMPLETED: "completed",
+    EventType.OPERATION_FAILED: "failed",
+    EventType.OPERATION_CANCELLED: "cancelled",
+}
+
+
+
 class Event(BaseModel):
     """An event stored in an operation's event stream."""
 
@@ -140,26 +159,529 @@ class Event(BaseModel):
 
 
 
+class SQLiteEventStore:
+    """Persist one user's operation events in a SQLite database."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._connection: sqlite3.Connection | None = None
+        self._lock = asyncio.Lock()
+        self._start_lock = asyncio.Lock()
+        self._write_generation = 0
+        self._synced_generation = 0
+        self._closed = False
+
+
+    @property
+    def is_dirty(self) -> bool:
+        return self._write_generation > self._synced_generation
+
+
+    @property
+    def synced_generation(self) -> int:
+        return self._synced_generation
+
+
+    async def start(self) -> None:
+        if self._closed:
+            raise RavenError(
+                ErrorCode.EVENT_STREAM_CLOSED,
+                "Event database is closed.",
+            )
+        if self._connection is not None:
+            return
+
+        async with self._start_lock:
+            if self._connection is not None:
+                return
+            try:
+                self._connection = await asyncio.to_thread(self._open)
+            except RavenError:
+                raise
+            except Exception as exc:
+                raise RavenError(
+                    ErrorCode.EVENT_DATABASE_FAILED,
+                    "The event database could not be opened.",
+                ) from exc
+
+
+    async def append(self, event: Event) -> int:
+        await self.start()
+        async with self._lock:
+            try:
+                await asyncio.to_thread(self._append, event)
+            except RavenError:
+                raise
+            except Exception as exc:
+                raise RavenError(
+                    ErrorCode.EVENT_DATABASE_FAILED,
+                    "The event could not be persisted.",
+                    details={"operation_id": str(event.operation_id)},
+                ) from exc
+            self._write_generation += 1
+            return self._write_generation
+
+
+    async def read_metadata(
+        self,
+        operation_id: str,
+    ) -> tuple[int, bool, datetime | None]:
+        await self.start()
+        async with self._lock:
+            try:
+                row = await asyncio.to_thread(self._read_metadata, operation_id)
+            except Exception as exc:
+                raise self._database_error("Event metadata could not be read.") from exc
+
+        if row is None:
+            return 0, False, None
+        last_event_id, is_finished, finished_at = row
+        return (
+            int(last_event_id),
+            bool(is_finished),
+            datetime.fromisoformat(str(finished_at)) if finished_at else None,
+        )
+
+
+    async def read_after(self, operation_id: str, after_event_id: int) -> list[Event]:
+        await self.start()
+        async with self._lock:
+            try:
+                rows = await asyncio.to_thread(
+                    self._read_after,
+                    operation_id,
+                    after_event_id,
+                )
+            except Exception as exc:
+                raise self._database_error("Events could not be read.") from exc
+
+        try:
+            return [self._event_from_row(row) for row in rows]
+        except Exception as exc:
+            raise RavenError(
+                ErrorCode.EVENT_DATABASE_CORRUPTED,
+                "The event database contains an invalid event record.",
+                details={"operation_id": operation_id},
+            ) from exc
+
+
+    def operation_ids_from_disk(self) -> list[str]:
+        if not self.path.exists():
+            return []
+        try:
+            with sqlite3.connect(self.path, timeout=30.0) as connection:
+                rows = connection.execute(
+                    "SELECT operation_id FROM operations ORDER BY created_at"
+                ).fetchall()
+        except Exception as exc:
+            raise self._database_error("Operation IDs could not be read.") from exc
+        return [str(row[0]) for row in rows]
+
+
+    async def unfinished_operation_ids(self) -> list[str]:
+        await self.start()
+        async with self._lock:
+            try:
+                return await asyncio.to_thread(self._unfinished_operation_ids)
+            except Exception as exc:
+                raise self._database_error(
+                    "Unfinished operation IDs could not be read."
+                ) from exc
+
+
+    async def expired_operation_ids(self, cutoff: datetime) -> list[str]:
+        await self.start()
+        async with self._lock:
+            try:
+                return await asyncio.to_thread(
+                    self._expired_operation_ids,
+                    cutoff.isoformat(),
+                )
+            except Exception as exc:
+                raise self._database_error("Expired operations could not be read.") from exc
+
+
+    async def delete(self, operation_id: str) -> None:
+        await self.start()
+        async with self._lock:
+            try:
+                changed = await asyncio.to_thread(self._delete, operation_id)
+            except Exception as exc:
+                raise self._database_error("The operation events could not be deleted.") from exc
+            if changed:
+                self._write_generation += 1
+
+
+    async def checkpoint(self) -> bool:
+        await self.start()
+        async with self._lock:
+            if not self.is_dirty:
+                return False
+            try:
+                await asyncio.to_thread(self._checkpoint)
+            except Exception as exc:
+                raise RavenError(
+                    ErrorCode.EVENT_SYNC_FAILED,
+                    "The event database could not be synchronized to durable storage.",
+                ) from exc
+            self._synced_generation = self._write_generation
+            return True
+
+
+    async def close(self) -> None:
+        async with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            connection = self._connection
+            self._connection = None
+            if connection is not None:
+                await asyncio.to_thread(connection.close)
+
+
+    def _open(self) -> sqlite3.Connection:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(
+            self.path,
+            timeout=30.0,
+            isolation_level=None,
+            check_same_thread=False,
+        )
+        connection.row_factory = sqlite3.Row
+
+        try:
+            connection.execute("PRAGMA busy_timeout = 5000")
+            connection.execute("PRAGMA foreign_keys = ON")
+            journal_mode = connection.execute("PRAGMA journal_mode = WAL").fetchone()
+            if journal_mode is None or str(journal_mode[0]).lower() != "wal":
+                raise sqlite3.OperationalError("WAL mode could not be enabled")
+            connection.execute("PRAGMA synchronous = NORMAL")
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS operations (
+                    operation_id TEXT PRIMARY KEY NOT NULL,
+                    name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    last_event_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    is_finished INTEGER NOT NULL CHECK (is_finished IN (0, 1))
+                );
+
+                CREATE TABLE IF NOT EXISTS events (
+                    operation_id TEXT NOT NULL,
+                    event_id INTEGER NOT NULL CHECK (event_id > 0),
+                    type TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    task_id TEXT,
+                    task_name TEXT,
+                    is_final INTEGER NOT NULL CHECK (is_final IN (0, 1)),
+                    data_json TEXT NOT NULL,
+                    PRIMARY KEY (operation_id, event_id),
+                    FOREIGN KEY (operation_id)
+                        REFERENCES operations(operation_id)
+                        ON DELETE CASCADE
+                ) WITHOUT ROWID;
+
+                CREATE INDEX IF NOT EXISTS operations_finished_at
+                    ON operations(finished_at)
+                    WHERE finished_at IS NOT NULL;
+
+                PRAGMA user_version = 1;
+                """
+            )
+            return connection
+        except Exception:
+            connection.close()
+            raise
+
+
+    def _append(self, event: Event) -> None:
+        if event.operation_id is None or event.event_id is None:
+            raise RavenError(
+                ErrorCode.EVENT_DATABASE_CORRUPTED,
+                "A persisted event requires operation_id and event_id.",
+            )
+
+        connection = self._require_connection()
+        operation_id = str(event.operation_id)
+        serialized = event.model_dump(mode="json")
+        timestamp = str(serialized["timestamp"])
+        event_name = event.data.get("name")
+        name = event_name if isinstance(event_name, str) else ""
+        status = _OPERATION_STATUS_BY_EVENT.get(event.type)
+
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                """
+                SELECT
+                    name,
+                    status,
+                    last_event_id,
+                    started_at,
+                    finished_at,
+                    is_finished
+                FROM operations
+                WHERE operation_id = ?
+                """,
+                (operation_id,),
+            ).fetchone()
+
+            if existing is None:
+                if event.event_id != 1:
+                    raise RavenError(
+                        ErrorCode.EVENT_DATABASE_CORRUPTED,
+                        "The first persisted event must have event_id 1.",
+                        details={"operation_id": operation_id},
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO operations (
+                        operation_id,
+                        name,
+                        status,
+                        last_event_id,
+                        created_at,
+                        started_at,
+                        finished_at,
+                        is_finished
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        operation_id,
+                        name,
+                        status or "running",
+                        event.event_id,
+                        timestamp,
+                        timestamp if event.type == EventType.OPERATION_STARTED else None,
+                        timestamp if event.is_final else None,
+                        int(event.is_final),
+                    ),
+                )
+            else:
+                if bool(existing["is_finished"]):
+                    raise RavenError(
+                        ErrorCode.EVENT_STREAM_FINISHED,
+                        f"Operation '{operation_id}' is already finished.",
+                    )
+                expected_event_id = int(existing["last_event_id"]) + 1
+                if event.event_id != expected_event_id:
+                    raise RavenError(
+                        ErrorCode.EVENT_DATABASE_CORRUPTED,
+                        "Event IDs must be contiguous within an operation.",
+                        details={
+                            "operation_id": operation_id,
+                            "expected_event_id": expected_event_id,
+                            "received_event_id": event.event_id,
+                        },
+                    )
+                connection.execute(
+                    """
+                    UPDATE operations
+                    SET name = ?,
+                        status = ?,
+                        last_event_id = ?,
+                        started_at = ?,
+                        finished_at = ?,
+                        is_finished = ?
+                    WHERE operation_id = ?
+                    """,
+                    (
+                        name or str(existing["name"]),
+                        status or str(existing["status"]),
+                        event.event_id,
+                        (
+                            timestamp
+                            if event.type == EventType.OPERATION_STARTED
+                            else existing["started_at"]
+                        ),
+                        timestamp if event.is_final else existing["finished_at"],
+                        int(event.is_final),
+                        operation_id,
+                    ),
+                )
+
+            connection.execute(
+                """
+                INSERT INTO events (
+                    operation_id,
+                    event_id,
+                    type,
+                    timestamp,
+                    task_id,
+                    task_name,
+                    is_final,
+                    data_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    operation_id,
+                    event.event_id,
+                    event.type.value,
+                    timestamp,
+                    serialized["task_id"],
+                    event.task_name,
+                    int(event.is_final),
+                    json.dumps(serialized["data"], separators=(",", ":")),
+                ),
+            )
+            connection.commit()
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+
+
+    def _read_metadata(
+        self,
+        operation_id: str,
+    ) -> tuple[int, int, str | None] | None:
+        row = self._require_connection().execute(
+            """
+            SELECT last_event_id, is_finished, finished_at
+            FROM operations
+            WHERE operation_id = ?
+            """,
+            (operation_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return int(row["last_event_id"]), int(row["is_finished"]), row["finished_at"]
+
+
+    def _read_after(
+        self,
+        operation_id: str,
+        after_event_id: int,
+    ) -> list[sqlite3.Row]:
+        return self._require_connection().execute(
+            """
+            SELECT
+                operation_id,
+                event_id,
+                type,
+                timestamp,
+                task_id,
+                task_name,
+                is_final,
+                data_json
+            FROM events
+            WHERE operation_id = ? AND event_id > ?
+            ORDER BY event_id
+            """,
+            (operation_id, after_event_id),
+        ).fetchall()
+
+
+    def _expired_operation_ids(self, cutoff: str) -> list[str]:
+        rows = self._require_connection().execute(
+            """
+            SELECT operation_id
+            FROM operations
+            WHERE is_finished = 1 AND finished_at < ?
+            ORDER BY finished_at
+            """,
+            (cutoff,),
+        ).fetchall()
+        return [str(row["operation_id"]) for row in rows]
+
+
+    def _unfinished_operation_ids(self) -> list[str]:
+        rows = self._require_connection().execute(
+            """
+            SELECT operation_id
+            FROM operations
+            WHERE is_finished = 0
+            ORDER BY created_at
+            """
+        ).fetchall()
+        return [str(row["operation_id"]) for row in rows]
+
+
+    def _delete(self, operation_id: str) -> bool:
+        connection = self._require_connection()
+        cursor = connection.execute(
+            "DELETE FROM operations WHERE operation_id = ?",
+            (operation_id,),
+        )
+        return cursor.rowcount > 0
+
+
+    def _checkpoint(self) -> None:
+        row = self._require_connection().execute(
+            "PRAGMA wal_checkpoint(FULL)"
+        ).fetchone()
+        if row is not None and int(row[0]) != 0:
+            raise sqlite3.OperationalError("The WAL checkpoint remained busy")
+
+
+    def _require_connection(self) -> sqlite3.Connection:
+        if self._connection is None:
+            raise RuntimeError("Event database is not open.")
+        return self._connection
+
+
+    @staticmethod
+    def _event_from_row(row: sqlite3.Row) -> Event:
+        return Event.model_validate(
+            {
+                "operation_id": row["operation_id"],
+                "event_id": row["event_id"],
+                "type": row["type"],
+                "timestamp": row["timestamp"],
+                "task_id": row["task_id"],
+                "task_name": row["task_name"],
+                "is_final": bool(row["is_final"]),
+                "data": json.loads(row["data_json"]),
+            }
+        )
+
+
+    @staticmethod
+    def _database_error(message: str) -> RavenError:
+        return RavenError(ErrorCode.EVENT_DATABASE_FAILED, message)
+
+
+
 class EventStream:
     """The persistent event stream belonging to one operation."""
 
-    def __init__(self, operation_id: str, path: Path) -> None:
+    def __init__(
+        self,
+        operation_id: str,
+        store: SQLiteEventStore,
+        health_check: Callable[[], None] | None = None,
+        sync_failure: Callable[[RavenError, str | None], Awaitable[None]] | None = None,
+    ) -> None:
         self.operation_id = operation_id
-        self._path = path
+        self._store = store
+        self._health_check = health_check
+        self._sync_failure = sync_failure
         self._condition = asyncio.Condition()
         self._last_event_id = 0
+        self._last_write_generation = 0
         self._finished = False
         self._finished_at: datetime | None = None
+        self._sync_error: RavenError | None = None
         self._loaded = False
         self._closed = False
 
 
+    @property
+    def is_dirty(self) -> bool:
+        return self._last_write_generation > self._store.synced_generation
+
+
     async def publish(self, event: Event) -> Event:
-        """Persist an event, then wake subscribers to this stream."""
+        """Persist an event and synchronize lifecycle boundaries immediately."""
         self._ensure_open()
+        self._raise_if_unhealthy()
 
         async with self._condition:
             await self._load()
+            self._raise_if_unhealthy()
             if self._finished:
                 raise RavenError(
                     ErrorCode.EVENT_STREAM_FINISHED,
@@ -172,7 +694,10 @@ class EventStream:
                     "event_id": self._last_event_id + 1,
                 }
             )
-            await asyncio.to_thread(self._append, persisted)
+            self._last_write_generation = await self._store.append(persisted)
+
+            if persisted.is_final or persisted.type in _IMMEDIATE_SYNC_EVENT_TYPES:
+                await self._sync_locked()
 
             self._last_event_id = persisted.event_id or self._last_event_id
             self._finished = persisted.is_final
@@ -188,18 +713,26 @@ class EventStream:
 
         async with self._condition:
             await self._load()
-            return await asyncio.to_thread(self._read_after, after_event_id)
+            self._raise_if_unhealthy()
+            self._validate_available_cursor(after_event_id)
+            return await self._store.read_after(self.operation_id, after_event_id)
 
 
     async def events(self, after_event_id: int = 0) -> AsyncIterator[Event]:
-        """Yield events after a cursor, then wait for future stream events."""
+        """Yield retained events after a cursor, then wait for new events."""
         self._validate_cursor(after_event_id)
         cursor = after_event_id
+
+        async with self._condition:
+            await self._load()
+            self._raise_if_unhealthy()
+            self._validate_available_cursor(after_event_id)
 
         while True:
             async with self._condition:
                 await self._load()
-                events = await asyncio.to_thread(self._read_after, cursor)
+                self._raise_if_unhealthy()
+                events = await self._store.read_after(self.operation_id, cursor)
 
                 if not events:
                     if self._finished or self._closed:
@@ -212,11 +745,28 @@ class EventStream:
                 yield event
 
 
-    async def delete(self) -> None:
-        """Delete this stream's persisted event log and wake subscribers."""
+    async def sync(self) -> bool:
+        """Checkpoint pending writes to durable storage."""
+        self._ensure_open()
+
         async with self._condition:
             await self._load()
-            await asyncio.to_thread(self._path.unlink, missing_ok=True)
+            return await self._sync_locked()
+
+
+    async def mark_sync_failed(self, error: RavenError) -> None:
+        """Make a registry-level synchronization failure visible to readers."""
+        async with self._condition:
+            if self._sync_error is None:
+                self._sync_error = error
+            self._condition.notify_all()
+
+
+    async def delete(self) -> None:
+        """Delete this operation's events and wake waiting readers."""
+        async with self._condition:
+            await self._load()
+            await self._store.delete(self.operation_id)
             self._finished = True
             self._closed = True
             self._condition.notify_all()
@@ -226,15 +776,21 @@ class EventStream:
         """Return whether a finished stream predates ``timestamp``."""
         async with self._condition:
             await self._load()
-            return self._finished and self._finished_at is not None and self._finished_at < timestamp
+            return (
+                self._finished
+                and self._finished_at is not None
+                and self._finished_at < timestamp
+            )
 
 
     async def close(self) -> None:
-        """Stop live activity without deleting the persisted event log."""
-        if self._closed:
-            return
-        self._closed = True
+        """Checkpoint pending writes and stop live stream activity."""
         async with self._condition:
+            if self._closed:
+                return
+            if self._store.is_dirty:
+                await self._sync_locked()
+            self._closed = True
             self._condition.notify_all()
 
 
@@ -246,6 +802,13 @@ class EventStream:
             )
 
 
+    def _raise_if_unhealthy(self) -> None:
+        if self._health_check is not None:
+            self._health_check()
+        if self._sync_error is not None:
+            raise self._sync_error
+
+
     @staticmethod
     def _validate_cursor(after_event_id: int) -> None:
         if after_event_id < 0:
@@ -255,117 +818,121 @@ class EventStream:
             )
 
 
+    def _validate_available_cursor(self, after_event_id: int) -> None:
+        if after_event_id <= self._last_event_id:
+            return
+        raise RavenError(
+            ErrorCode.EVENT_HISTORY_GAP,
+            "The requested event cursor is ahead of the recovered event history.",
+            details={
+                "operation_id": self.operation_id,
+                "requested_after_event_id": after_event_id,
+                "available_last_event_id": self._last_event_id,
+            },
+        )
+
+
     async def _load(self) -> None:
         if self._loaded:
             return
-        self._last_event_id, self._finished, self._finished_at = await asyncio.to_thread(
-            self._read_metadata
+        self._last_event_id, self._finished, self._finished_at = (
+            await self._store.read_metadata(self.operation_id)
         )
         self._loaded = True
 
 
-    def _append(self, event: Event) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with self._path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(event.model_dump(mode="json"), separators=(",", ":")) + "\n")
-            stream.flush()
+    async def _sync_locked(self) -> bool:
+        if not self._store.is_dirty:
+            return False
 
-
-    def _read_metadata(self) -> tuple[int, bool, datetime | None]:
-        if not self._path.exists():
-            return 0, False, None
-
-        last_event_id = 0
-        finished = False
-        finished_at: datetime | None = None
-        with self._path.open("r", encoding="utf-8") as stream:
-            for line in stream:
-                record = self._decode_line(line)
-                if record is None:
-                    break
-                event = Event.model_validate(record)
-                if event.event_id is None:
-                    raise RavenError(
-                        ErrorCode.CORRUPTED_EVENT_LOG,
-                        "Event log entry is missing event_id.",
-                    )
-                last_event_id = event.event_id
-                finished = event.is_final
-                if finished:
-                    finished_at = event.timestamp
-        return last_event_id, finished, finished_at
-
-
-    def _read_after(self, after_event_id: int) -> list[Event]:
-        if not self._path.exists():
-            return []
-
-        events: list[Event] = []
-        with self._path.open("r", encoding="utf-8") as stream:
-            for line in stream:
-                record = self._decode_line(line)
-                if record is None:
-                    break
-                if int(record["event_id"]) > after_event_id:
-                    events.append(Event.model_validate(record))
-        return events
-
-
-    @staticmethod
-    def _decode_line(line: str) -> dict[str, Any] | None:
         try:
-            value = json.loads(line)
-        except json.JSONDecodeError:
-            if not line.endswith("\n"):
-                return None
-            raise RavenError(
-                ErrorCode.CORRUPTED_EVENT_LOG,
-                "Event log contains invalid JSON.",
+            return await self._store.checkpoint()
+        except Exception as exc:
+            error = (
+                exc
+                if isinstance(exc, RavenError) and exc.code == ErrorCode.EVENT_SYNC_FAILED
+                else RavenError(
+                    ErrorCode.EVENT_SYNC_FAILED,
+                    "The event database could not be synchronized to durable storage.",
+                )
             )
-        if not isinstance(value, dict):
-            raise RavenError(
-                ErrorCode.CORRUPTED_EVENT_LOG,
-                "Event log entry must be a JSON object.",
-            )
-        return value
+            self._sync_error = error
+            if self._sync_failure is not None:
+                await self._sync_failure(error, self.operation_id)
+            self._condition.notify_all()
+            raise error from exc
 
 
 
 class EventStreamRegistry:
-    """Create and retrieve operation-scoped event streams."""
+    """Own one user's SQLite event store and operation streams."""
 
-    def __init__(self, paths: PathConfig) -> None:
+    def __init__(
+        self,
+        paths: PathConfig,
+        *,
+        sync_interval: float = EVENT_SYNC_INTERVAL_SECONDS,
+    ) -> None:
+        if sync_interval <= 0:
+            raise RavenError(
+                ErrorCode.INVALID_EVENT_SYNC_INTERVAL,
+                "Event synchronization interval must be greater than zero.",
+            )
         self.storage_dir = paths.event_storage_dir
-        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        self.database_path = paths.event_database_path
+        self.sync_interval = sync_interval
+        self._store = SQLiteEventStore(self.database_path)
         self._streams: dict[str, EventStream] = {}
+        self._sync_service = EventSyncService(self, sync_interval)
+        self._sync_error: RavenError | None = None
         self._closed = False
 
 
+    @property
+    def is_healthy(self) -> bool:
+        return self._sync_error is None
+
+
+    async def start(self) -> None:
+        """Open the event database and start periodic checkpoints."""
+        self._ensure_open()
+        self._ensure_sync_healthy()
+        await self._store.start()
+        await self._sync_service.start()
+
+
     def get(self, operation_id: str) -> EventStream:
-        """Return the stream for an operation, reopening it from disk if needed."""
+        """Return the stream for an operation, reopening it from SQLite if needed."""
         self._ensure_open()
         self._validate_operation_id(operation_id)
         stream = self._streams.get(operation_id)
         if stream is None:
             stream = EventStream(
                 operation_id=operation_id,
-                path=self.storage_dir / f"{operation_id}.jsonl",
+                store=self._store,
+                health_check=self._ensure_sync_healthy,
+                sync_failure=self._record_sync_failure,
             )
             self._streams[operation_id] = stream
         return stream
 
 
     def stored_operation_ids(self) -> list[str]:
-        """Return UUIDs for persisted operation logs in this registry."""
-        operation_ids: list[str] = []
-        for path in self.storage_dir.glob("*.jsonl"):
-            operation_id = path.stem
-            try:
-                self._validate_operation_id(operation_id)
-            except ValueError:
-                continue
-            operation_ids.append(operation_id)
-        return operation_ids
+        """Return operation UUIDs persisted in this user's event database."""
+        self._ensure_open()
+        return self._store.operation_ids_from_disk()
+
+
+    async def unfinished_operation_ids(self) -> list[str]:
+        """Return operation UUIDs that do not have a terminal event."""
+        self._ensure_open()
+        return await self._store.unfinished_operation_ids()
+
+
+    async def expired_operation_ids(self, cutoff: datetime) -> list[str]:
+        """Return terminal operation IDs older than the retention cutoff."""
+        self._ensure_open()
+        return await self._store.expired_operation_ids(cutoff)
 
 
     async def delete(self, operation_id: str) -> None:
@@ -374,12 +941,45 @@ class EventStreamRegistry:
         self._streams.pop(operation_id, None)
 
 
+    async def sync_dirty(self) -> list[str]:
+        """Checkpoint dirty event data and return affected active operation IDs."""
+        self._ensure_open()
+        self._ensure_sync_healthy()
+        dirty_operation_ids = [
+            stream.operation_id
+            for stream in self._streams.values()
+            if stream.is_dirty
+        ]
+        if not self._store.is_dirty:
+            return []
+
+        try:
+            await self._store.checkpoint()
+        except RavenError as exc:
+            await self._record_sync_failure(exc)
+            raise
+        return dirty_operation_ids
+
+
     async def close(self) -> None:
-        """Close all active streams while preserving their event logs."""
+        """Checkpoint and close this user's event database and active streams."""
         if self._closed:
             return
-        self._closed = True
+
+        await self._sync_service.close()
+        close_error: BaseException | None = None
+        if self._store.is_dirty:
+            try:
+                await self._store.checkpoint()
+            except BaseException as exc:
+                close_error = exc
+
         await asyncio.gather(*(stream.close() for stream in self._streams.values()))
+        await self._store.close()
+        self._closed = True
+
+        if close_error is not None:
+            raise close_error
 
 
     def _ensure_open(self) -> None:
@@ -388,6 +988,28 @@ class EventStreamRegistry:
                 ErrorCode.EVENT_STREAM_CLOSED,
                 "Event stream registry is closed.",
             )
+
+
+    def _ensure_sync_healthy(self) -> None:
+        if self._sync_error is not None:
+            raise self._sync_error
+
+
+    async def _record_sync_failure(
+        self,
+        error: RavenError,
+        source_operation_id: str | None = None,
+    ) -> None:
+        if self._sync_error is None:
+            self._sync_error = error
+        active_error = self._sync_error or error
+        await asyncio.gather(
+            *(
+                stream.mark_sync_failed(active_error)
+                for stream in self._streams.values()
+                if stream.operation_id != source_operation_id
+            )
+        )
 
 
     @staticmethod
@@ -408,8 +1030,59 @@ class EventStreamRegistry:
 
 
 
+class EventSyncService:
+    """Periodically checkpoint one user's dirty SQLite event store."""
+
+    def __init__(self, registry: EventStreamRegistry, interval: float) -> None:
+        self._registry = registry
+        self.interval = interval
+        self._stop = asyncio.Event()
+        self._task: asyncio.Task[None] | None = None
+        self._closed = False
+
+
+    async def start(self) -> None:
+        if self._closed:
+            raise RavenError(
+                ErrorCode.EVENT_STREAM_CLOSED,
+                "Event synchronization service is closed.",
+            )
+        if self._task is not None:
+            return
+        self._task = asyncio.create_task(
+            self._run(),
+            name="raven-event-sync",
+        )
+
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._stop.set()
+        if self._task is not None:
+            await asyncio.gather(self._task, return_exceptions=True)
+
+
+    async def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self.interval)
+            except TimeoutError:
+                pass
+
+            if self._stop.is_set():
+                return
+
+            try:
+                await self._registry.sync_dirty()
+            except RavenError:
+                return
+
+
+
 class EventCleanupService:
-    """Delete finished event streams after a configured retention period."""
+    """Delete finished operation events after a configured retention period."""
 
     def __init__(self, registry: EventStreamRegistry, retention: timedelta) -> None:
         if retention < timedelta(0):
@@ -427,12 +1100,8 @@ class EventCleanupService:
         if current_time.tzinfo is None:
             current_time = current_time.replace(tzinfo=timezone.utc)
         cutoff = current_time.astimezone(timezone.utc) - self.retention
-        deleted: list[str] = []
+        operation_ids = await self._registry.expired_operation_ids(cutoff)
 
-        for operation_id in self._registry.stored_operation_ids():
-            stream = self._registry.get(operation_id)
-            if await stream.is_expired_before(cutoff):
-                await self._registry.delete(operation_id)
-                deleted.append(operation_id)
-
-        return deleted
+        for operation_id in operation_ids:
+            await self._registry.delete(operation_id)
+        return operation_ids

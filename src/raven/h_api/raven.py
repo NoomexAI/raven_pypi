@@ -245,7 +245,7 @@ class Raven:
 
 
     async def start(self) -> None:
-        """Open Raven's knowledge and conversation registries."""
+        """Recover operations and open Raven's persistent registries."""
         async with self._lifecycle_lock:
             if self.is_started:
                 return
@@ -255,6 +255,7 @@ class Raven:
                     "Raven has been closed and cannot be started again.",
                 )
 
+            await self.operation_manager.recover()
             await self.knowledge_base.start()
             try:
                 await self.conversation_manager.start()

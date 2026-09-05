@@ -296,6 +296,31 @@ class Operation:
         )
 
 
+    async def _recover_interrupted(self) -> bool:
+        """Finalize a reconstructed non-terminal operation after a restart."""
+        async with self._lock:
+            if self.is_finished:
+                return False
+            if self._task is not None:
+                raise RuntimeError("an active operation cannot be recovered as interrupted")
+            previous_status = self._status
+
+        interruption = RavenError(
+            ErrorCode.OPERATION_INTERRUPTED,
+            "The operation was interrupted by a previous process termination.",
+        )
+        await self._finish(
+            status=OperationStatus.FAILED,
+            event_type=EventType.OPERATION_FAILED,
+            error=interruption.as_payload(),
+            event_data={
+                "previous_status": previous_status.value,
+                "recovered_after_restart": True,
+            },
+        )
+        return True
+
+
     async def _finish(
         self,
         *,
@@ -303,6 +328,7 @@ class Operation:
         event_type: EventType,
         result: Any = None,
         error: dict[str, Any] | None = None,
+        event_data: dict[str, Any] | None = None,
     ) -> None:
         async with self._lock:
             if self.is_finished:
@@ -312,7 +338,7 @@ class Operation:
             self._result = result
             self._error = error
 
-        data: dict[str, Any] = {"name": self.name}
+        data: dict[str, Any] = {"name": self.name, **(event_data or {})}
         if error is not None:
             data["error"] = error
         await self._stream.publish(
@@ -548,7 +574,44 @@ class OperationManager:
         self._registry = registry
         self._operations: dict[str, Operation] = {}
         self._lock = asyncio.Lock()
+        self._recovery_lock = asyncio.Lock()
         self._closed = False
+
+
+    async def recover(self) -> list[Operation]:
+        """Finalize persisted non-terminal operations left by an earlier process."""
+        async with self._recovery_lock:
+            self._ensure_open()
+            await self._registry.start()
+            unfinished_ids = await self._registry.unfinished_operation_ids()
+            recovered: list[Operation] = []
+
+            for stored_id in unfinished_ids:
+                operation_id = self._parse_operation_id(stored_id)
+                key = str(operation_id)
+                async with self._lock:
+                    if key in self._operations:
+                        continue
+
+                stream = self._registry.get(stored_id)
+                events = await stream.read()
+                if not events:
+                    continue
+
+                operation = Operation.from_events(
+                    operation_id=operation_id,
+                    stream=stream,
+                    events=events,
+                )
+                if operation.is_finished:
+                    continue
+
+                await operation._recover_interrupted()
+                async with self._lock:
+                    self._operations.setdefault(key, operation)
+                recovered.append(operation)
+
+            return recovered
 
 
     async def submit(self, name: str, worker: OperationWorker) -> Operation:
@@ -590,6 +653,8 @@ class OperationManager:
 
 
     async def get(self, operation_id: UUID | str) -> Operation:
+        self._ensure_open()
+        await self._registry.start()
         parsed_id = self._parse_operation_id(operation_id)
         key = str(parsed_id)
         async with self._lock:
@@ -597,7 +662,8 @@ class OperationManager:
             if operation is not None:
                 return operation
 
-        if key not in self._registry.stored_operation_ids():
+        stored_ids = await asyncio.to_thread(self._registry.stored_operation_ids)
+        if key not in stored_ids:
             raise RavenError(
                 ErrorCode.OPERATION_NOT_FOUND,
                 f"Operation '{key}' was not found.",
@@ -661,6 +727,8 @@ class OperationManager:
                 ErrorCode.INVALID_OPERATION_NAME,
                 "Operation name cannot be empty.",
             )
+        self._ensure_open()
+        await self._registry.start()
         operation_id = uuid4()
         key = str(operation_id)
         async with self._lock:
