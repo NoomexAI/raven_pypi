@@ -217,7 +217,7 @@ class EmbeddedRetrievalPipeline(RetrievalPipeline):
                 if not isinstance(section_id, str) or section_id in seen:
                     continue
 
-                section = knowledge.get_section(section_id)
+                section = await asyncio.to_thread(knowledge.get_section, section_id)
                 if section is None:
                     continue
 
@@ -329,7 +329,10 @@ class EmbeddedRetrievalPipeline(RetrievalPipeline):
                 if key in seen:
                     continue
 
-                section = self._knowledge_base.get(knowledge_name).get_section(section_id)
+                section = await asyncio.to_thread(
+                    self._knowledge_base.get(knowledge_name).get_section,
+                    section_id,
+                )
                 if section is None:
                     continue
 
@@ -553,7 +556,9 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
     ) -> list[dict[str, str]]:
         candidates: list[dict[str, Any]] = []
         for knowledge_name in knowledge_names:
-            candidates.extend(self._sections_of(knowledge_name))
+            candidates.extend(
+                await asyncio.to_thread(self._sections_of, knowledge_name)
+            )
 
         selected = await self._scored_select(
             user_query,
@@ -860,9 +865,10 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
         knowledge = self._knowledge_base.get(knowledge_name)
         candidates: list[dict[str, Any]] = []
         for file_name in file_names:
+            sections = await asyncio.to_thread(knowledge.list_sections, file_name)
             candidates.extend(
                 {**section, "knowledge_name": knowledge_name}
-                for section in knowledge.list_sections(file_name)
+                for section in sections
             )
 
         selected = await self._scored_select(

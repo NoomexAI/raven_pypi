@@ -72,7 +72,8 @@ class Reconstructor:
 
             for (knowledge_name, file_name), section_ids in grouped_sections.items():
                 self._raise_if_cancelled(operation)
-                reconstructed_file = self._reconstruct_file(
+                reconstructed_file = await asyncio.to_thread(
+                    self._reconstruct_file,
                     knowledge_name,
                     file_name,
                     section_ids,

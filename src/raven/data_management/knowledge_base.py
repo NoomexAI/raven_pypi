@@ -23,6 +23,7 @@ from ..core.config import PathConfig
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
 from ..core.operations import Operation, OperationManager, OperationTask, OperationType
+from .file_store import KnowledgeFileStore
 
 COLLECTION_NAME = "chunks"
 PERSISTENCE_VERSION = 1
@@ -64,11 +65,11 @@ class Knowledge:
         self.name = self.dir_path.name
         self.qdrant_dir = self.dir_path / "qdrant"
         self.meta_path = self.dir_path / "meta.json"
-        self.files_path = self.dir_path / "file.json"
+        self.files_path = self.dir_path / "file.sqlite3"
 
         self._qdrant: qdrant_client.QdrantClient | None = None
+        self._file_store = KnowledgeFileStore(self.files_path)
         self._meta: dict[str, Any] = {}
-        self._file_meta: dict[str, Any] = {"schema_version": PERSISTENCE_VERSION, "files": {}, "sections": {}}
         self._lifecycle_lock = asyncio.Lock()
         self._mutation_lock = asyncio.Lock()
         self._pending_ingestions: set[str] = set()
@@ -121,6 +122,7 @@ class Knowledge:
             self._qdrant = None
             self._closed = True
             self._started = False
+            await asyncio.to_thread(self._file_store.close)
             if qdrant is not None:
                 await asyncio.to_thread(qdrant.close)
 
@@ -171,47 +173,22 @@ class Knowledge:
 
     def file_exists(self, file_name: str) -> bool:
         self._ensure_started()
-        return file_name in self._files_registry()
+        return self._file_store.file_exists(file_name)
 
 
     def list_files(self) -> list[dict[str, Any]]:
         self._ensure_started()
-        result: list[dict[str, Any]] = []
-        for file_name, info in self._files_registry().items():
-            result.append(
-                {
-                    "file_id": info.get("file_id"),
-                    "file_name": file_name,
-                    "section_count": info.get("sections", 0),
-                    "chunk_count": info.get("chunks", 0),
-                    "ingested_at": info.get("ingested_at"),
-                    "navigation_type": info.get("navigation_type", "none"),
-                }
-            )
-        return result
+        return self._file_store.list_files()
 
 
     def list_sections(self, file_name: str) -> list[dict[str, Any]]:
         self._ensure_started()
-        file_id = self._files_registry().get(file_name, {}).get("file_id")
-        if file_id is None:
-            return []
-
-        sections = [
-            {**section, "section_id": section_id}
-            for section_id, section in self._sections_dict().items()
-            if section.get("file_id") == file_id
-        ]
-        sections.sort(key=lambda section: section.get("section_index", 0))
-        return sections
+        return self._file_store.list_sections(file_name)
 
 
     def get_section(self, section_id: str) -> dict[str, Any] | None:
         self._ensure_started()
-        section = self._sections_dict().get(section_id)
-        if section is None:
-            return None
-        return {**section, "section_id": section_id}
+        return self._file_store.get_section(section_id)
 
 
     async def ingest(
@@ -278,7 +255,10 @@ class Knowledge:
 
         try:
             async with self._mutation_lock:
-                committed = self._file_result_by_id(file_id)
+                committed = await asyncio.to_thread(
+                    self._file_result_by_id,
+                    file_id,
+                )
                 if committed is not None:
                     result = {
                         "knowledge": self.name,
@@ -327,7 +307,10 @@ class Knowledge:
 
         async with self._mutation_lock:
             for file_id in tuple(self._pending_ingestions):
-                committed = self._file_result_by_id(file_id)
+                committed = await asyncio.to_thread(
+                    self._file_result_by_id,
+                    file_id,
+                )
                 if committed is not None:
                     self._pending_ingestions.discard(file_id)
                     results.append(
@@ -399,13 +382,14 @@ class Knowledge:
         )
 
         async with self._mutation_lock:
-            original_file_meta = copy.deepcopy(self._file_meta)
-            vectors_written = False
             metadata_written = False
             cleanup_completed = False
 
             try:
-                committed = self._file_result_by_id(file_id)
+                committed = await asyncio.to_thread(
+                    self._file_result_by_id,
+                    file_id,
+                )
                 if committed is not None:
                     if committed["file"] != file_name:
                         raise RavenError(
@@ -423,7 +407,7 @@ class Knowledge:
                     )
                     return result
 
-                if self.file_exists(file_name):
+                if await asyncio.to_thread(self._file_store.file_exists, file_name):
                     raise RavenError(
                         ErrorCode.FILE_ALREADY_EXISTS,
                         f"File '{file_name}' already exists in knowledge '{self.name}'.",
@@ -494,9 +478,7 @@ class Knowledge:
                     await asyncio.shield(upsert_task)
                 except asyncio.CancelledError:
                     await upsert_task
-                    vectors_written = True
                     raise
-                vectors_written = True
                 await self._emit(
                     operation,
                     EventType.INGESTION_VECTORS_WRITTEN,
@@ -508,19 +490,19 @@ class Knowledge:
                     },
                 )
 
-                self._file_meta = copy.deepcopy(original_file_meta)
-                files = self._files_registry()
-                sections_dict = self._sections_dict()
-                files[file_name] = {
+                file_record = {
                     "file_id": file_id,
-                    "sections": len(sections),
-                    "chunks": len(points),
+                    "file_name": file_name,
+                    "section_count": len(sections),
+                    "chunk_count": len(points),
                     "ingested_at": datetime.now(timezone.utc).isoformat(),
                     "navigation_type": navigation_type,
                 }
+                section_records: list[dict[str, Any]] = []
                 for section_index, section in enumerate(sections, start=1):
                     section_id = f"{file_id}-{section_index}"
-                    sections_dict[section_id] = {
+                    section_records.append({
+                        "section_id": section_id,
                         "file_id": file_id,
                         "file_name": file_name,
                         "section_index": section_index,
@@ -531,13 +513,13 @@ class Knowledge:
                         "raw_content": section.get("raw_content", ""),
                         "source_element_ids": section.get("source_element_ids", []),
                         "source_range": section.get("source_range"),
-                    }
+                    })
 
                 metadata_task = asyncio.create_task(
                     asyncio.to_thread(
-                        self._write_json,
-                        self.files_path,
-                        self._file_meta,
+                        self._file_store.add_file,
+                        file_record,
+                        section_records,
                     )
                 )
                 try:
@@ -567,13 +549,11 @@ class Knowledge:
                 }
             except asyncio.CancelledError:
                 if not metadata_written:
-                    self._file_meta = original_file_meta
                     await asyncio.to_thread(self._delete_points_by_file_id, file_id)
                     cleanup_completed = True
                 raise
             except Exception as exc:
                 if not metadata_written:
-                    self._file_meta = original_file_meta
                     await asyncio.to_thread(self._delete_points_by_file_id, file_id)
                     cleanup_completed = True
                 await self._emit(
@@ -615,7 +595,7 @@ class Knowledge:
             section_id = hit.get(KEY_SECTION_ID)
             if not isinstance(section_id, str) or section_id in seen:
                 continue
-            section = self.get_section(section_id)
+            section = await asyncio.to_thread(self.get_section, section_id)
             if section is None:
                 continue
             seen.add(section_id)
@@ -670,38 +650,18 @@ class Knowledge:
         )
 
         async with self._mutation_lock:
-            original_file_meta = copy.deepcopy(self._file_meta)
-            file_name = next(
-                (
-                    name
-                    for name, info in self._files_registry().items()
-                    if info.get("file_id") == file_id
-                ),
-                None,
-            )
-            if file_name is None:
+            bundle = await asyncio.to_thread(self._file_store.remove_file, file_id)
+            if bundle is None:
                 raise RavenError(
                     ErrorCode.FILE_NOT_FOUND,
                     f"File '{file_id}' does not exist in knowledge '{self.name}'.",
                 )
-
-            self._file_meta["files"] = {
-                name: info
-                for name, info in self._files_registry().items()
-                if info.get("file_id") != file_id
-            }
-            self._file_meta["sections"] = {
-                section_id: section
-                for section_id, section in self._sections_dict().items()
-                if section.get("file_id") != file_id
-            }
+            file_name = str(bundle["file"]["file_name"])
 
             try:
-                await asyncio.to_thread(self._write_json, self.files_path, self._file_meta)
                 await asyncio.to_thread(self._delete_points_by_file_id, file_id)
             except Exception as exc:
-                self._file_meta = original_file_meta
-                await asyncio.to_thread(self._write_json, self.files_path, original_file_meta)
+                await asyncio.to_thread(self._file_store.restore_file, bundle)
                 await self._emit(
                     operation,
                     EventType.KNOWLEDGE_FILE_DELETE_FAILED,
@@ -733,8 +693,12 @@ class Knowledge:
         self.dir_path.mkdir(parents=True, exist_ok=True)
         self.qdrant_dir.mkdir(parents=True, exist_ok=True)
         self._meta = self._load_meta()
-        self._file_meta = self._load_file_meta()
-        self._qdrant = qdrant_client.QdrantClient(path=str(self.qdrant_dir))
+        self._file_store.open()
+        try:
+            self._qdrant = qdrant_client.QdrantClient(path=str(self.qdrant_dir))
+        except Exception:
+            self._file_store.close()
+            raise
 
 
     def _load_meta(self) -> dict[str, Any]:
@@ -771,53 +735,22 @@ class Knowledge:
         return normalized
 
 
-    def _load_file_meta(self) -> dict[str, Any]:
-        if not self.files_path.exists():
-            data = {"schema_version": PERSISTENCE_VERSION, "files": {}, "sections": {}}
-            self._write_json(self.files_path, data)
-            return data
-
-        data = self._read_json(self.files_path)
-        if not isinstance(data, dict):
-            raise RavenError(
-                ErrorCode.INVALID_METADATA,
-                f"Invalid file metadata for knowledge '{self.name}'.",
-            )
-        if data.get("schema_version", PERSISTENCE_VERSION) != PERSISTENCE_VERSION:
-            raise RavenError(
-                ErrorCode.UNSUPPORTED_METADATA_VERSION,
-                f"Unsupported file metadata version for knowledge '{self.name}'.",
-            )
-        data.setdefault("files", {})
-        data.setdefault("sections", {})
-        return data
-
-
-    def _files_registry(self) -> dict[str, dict[str, Any]]:
-        return self._file_meta.setdefault("files", {})
-
-
-    def _sections_dict(self) -> dict[str, dict[str, Any]]:
-        return self._file_meta.setdefault("sections", {})
-
-
-    def _file_result_by_id(self, file_id: str) -> dict[str, Any] | None:
-        for file_name, info in self._files_registry().items():
-            if info.get("file_id") != file_id:
-                continue
-            return {
-                "knowledge": self.name,
-                "file": file_name,
-                "file_id": file_id,
-                "section_count": int(info.get("sections", 0)),
-                "chunk_count": int(info.get("chunks", 0)),
-            }
-        return None
-
-
     def _split(self, text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
         splitter = SentenceSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         return splitter.split_text_metadata_aware(text, "")
+
+
+    def _file_result_by_id(self, file_id: str) -> dict[str, Any] | None:
+        file = self._file_store.get_file(file_id)
+        if file is None:
+            return None
+        return {
+            "knowledge": self.name,
+            "file": file["file_name"],
+            "file_id": file["file_id"],
+            "section_count": file["section_count"],
+            "chunk_count": file["chunk_count"],
+        }
 
 
     def _collection_exists(self) -> bool:

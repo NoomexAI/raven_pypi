@@ -462,7 +462,8 @@ class ToolBuilder:
             operation.raise_if_cancelled()
             knowledge = self._knowledge(knowledge_name)
             sections = await asyncio.to_thread(knowledge.list_sections, file_name)
-            if not sections and not knowledge.file_exists(file_name):
+            file_exists = await asyncio.to_thread(knowledge.file_exists, file_name)
+            if not sections and not file_exists:
                 raise RavenError(
                     ErrorCode.FILE_NOT_FOUND,
                     f"File '{file_name}' does not exist in knowledge '{knowledge_name}'.",
