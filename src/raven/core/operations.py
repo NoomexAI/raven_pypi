@@ -7,6 +7,7 @@ import copy
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextvars import ContextVar, Token
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
@@ -50,6 +51,7 @@ class OperationType(StrEnum):
     KNOWLEDGE_DELETE = "knowledge.delete"
 
     INGESTION_RUN = "ingestion.run"
+    INGESTION_CLEANUP = "ingestion.cleanup"
 
     RETRIEVAL_EMBEDDED_LOCAL = "retrieval.embedded.local"
     RETRIEVAL_EMBEDDED_GLOBAL = "retrieval.embedded.global"
@@ -86,6 +88,72 @@ class RetryPolicy(StrEnum):
 
 
 
+@dataclass(frozen=True, slots=True)
+class RetryRule:
+    """Static retry policy for one operation task type."""
+
+    policy: RetryPolicy
+    max_attempts: int
+    retryable_error_codes: frozenset[str]
+
+
+
+
+_COMMON_RETRYABLE_ERRORS = frozenset(
+    {
+        ErrorCode.OPERATION_INTERRUPTED.value,
+        ErrorCode.INTERNAL_ERROR.value,
+        ErrorCode.EVENT_SYNC_FAILED.value,
+        ErrorCode.EVENT_DATABASE_FAILED.value,
+        ErrorCode.MODEL_PROVIDER_FAILED.value,
+        ErrorCode.OLLAMA_UNAVAILABLE.value,
+        ErrorCode.OLLAMA_OPERATION_FAILED.value,
+    }
+)
+
+_RETRY_RULES = {
+    OperationType.INGESTION_RUN.value: RetryRule(
+        policy=RetryPolicy.USER_CONFIRMED,
+        max_attempts=3,
+        retryable_error_codes=_COMMON_RETRYABLE_ERRORS
+        | {
+            ErrorCode.SOURCE_FILE_NOT_FOUND.value,
+            ErrorCode.SOURCE_FILE_CHANGED.value,
+            ErrorCode.SOURCE_FILE_UNREADABLE.value,
+            ErrorCode.DOCUMENT_PARSE_FAILED.value,
+            ErrorCode.NO_SECTIONS_PRODUCED.value,
+            ErrorCode.SECTION_METADATA_EXTRACTION_FAILED.value,
+            ErrorCode.INVALID_EMBEDDING_RESULT.value,
+            ErrorCode.EMBEDDING_DIMENSION_MISMATCH.value,
+            ErrorCode.INGESTION_RECONCILIATION_FAILED.value,
+            ErrorCode.PERSISTENCE_FAILED.value,
+        },
+    ),
+    OperationType.RECONSTRUCTION_RECONSTRUCT.value: RetryRule(
+        policy=RetryPolicy.USER_CONFIRMED,
+        max_attempts=3,
+        retryable_error_codes=_COMMON_RETRYABLE_ERRORS
+        | {
+            ErrorCode.KNOWLEDGE_NOT_FOUND.value,
+            ErrorCode.FILE_NOT_FOUND.value,
+            ErrorCode.SECTION_NOT_FOUND.value,
+        },
+    ),
+}
+
+_NO_RETRY_RULE = RetryRule(
+    policy=RetryPolicy.NEVER,
+    max_attempts=1,
+    retryable_error_codes=frozenset(),
+)
+
+
+def _retry_rule(name: str) -> RetryRule:
+    return _RETRY_RULES.get(name, _NO_RETRY_RULE)
+
+
+
+
 class OperationTaskRecord(BaseModel):
     """Durable task state used to evaluate a user-confirmed retry."""
 
@@ -108,19 +176,26 @@ class OperationTaskRecord(BaseModel):
 
 
     @property
+    def max_attempts(self) -> int:
+        return _retry_rule(self.name).max_attempts
+
+
+    @property
+    def attempts_remaining(self) -> int:
+        return max(self.max_attempts - self.attempt, 0)
+
+
+    @property
     def can_retry(self) -> bool:
+        error_code = self.error.get("code") if self.error is not None else None
+        rule = _retry_rule(self.name)
         return (
             self.retry_policy == RetryPolicy.USER_CONFIRMED
             and self.retry_input is not None
             and self.status == OperationStatus.FAILED
+            and self.attempt < rule.max_attempts
+            and error_code in rule.retryable_error_codes
         )
-
-
-
-_RETRY_POLICY_BY_TASK = {
-    OperationType.RECONSTRUCTION_RECONSTRUCT.value: RetryPolicy.USER_CONFIRMED,
-}
-
 
 
 OperationWorker = Callable[["Operation"], Awaitable[Any]]
@@ -219,7 +294,7 @@ class Operation:
         retry_of: OperationTaskRecord | None = None,
     ) -> "OperationTask":
         """Run the root task or a child task within this operation."""
-        retry_policy = _RETRY_POLICY_BY_TASK.get(str(name), RetryPolicy.NEVER)
+        retry_policy = _retry_rule(str(name)).policy
         normalized_retry_input = self._normalize_retry_input(
             retry_input,
             retry_policy,
@@ -831,6 +906,20 @@ class OperationManager:
         return OperationTaskRecord.model_validate(record)
 
 
+    async def get_retry(
+        self,
+        task_id: UUID | str,
+    ) -> OperationTaskRecord | None:
+        """Return the direct retry created from a task, if one exists."""
+        self._ensure_open()
+        await self._registry.start()
+        parsed_id = self._parse_task_id(task_id)
+        record = await self._registry.retry_record(str(parsed_id))
+        if record is None:
+            return None
+        return OperationTaskRecord.model_validate(record)
+
+
     async def create(self, name: str) -> Operation:
         """Create, persist, and register a queued operation."""
         if not isinstance(name, str) or not name.strip():
@@ -929,11 +1018,9 @@ class OperationManager:
             yield event
 
 
-    async def close(self) -> None:
+    async def cancel_active(self) -> None:
+        """Cancel and await active operations without closing event storage."""
         async with self._lock:
-            if self._closed:
-                return
-            self._closed = True
             operations = [
                 operation
                 for operation in self._operations.values()
@@ -948,6 +1035,15 @@ class OperationManager:
             *(operation.wait() for operation in operations),
             return_exceptions=True,
         )
+
+
+    async def close(self) -> None:
+        async with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+
+        await self.cancel_active()
         await self._registry.close()
 
 

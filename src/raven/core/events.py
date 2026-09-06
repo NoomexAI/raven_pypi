@@ -33,6 +33,11 @@ class EventType(StrEnum):
 
     INGESTION_STARTED = "ingestion.started"
     INGESTION_PROGRESS = "ingestion.progress"
+    INGESTION_VECTORS_WRITTEN = "ingestion.vectors_written"
+    INGESTION_METADATA_COMMITTED = "ingestion.metadata_committed"
+    INGESTION_CLEANUP_STARTED = "ingestion.cleanup.started"
+    INGESTION_CLEANUP_COMPLETED = "ingestion.cleanup.completed"
+    INGESTION_CLEANUP_FAILED = "ingestion.cleanup.failed"
     INGESTION_COMPLETED = "ingestion.completed"
     INGESTION_FAILED = "ingestion.failed"
 
@@ -293,6 +298,26 @@ class SQLiteEventStore:
             ) from exc
 
 
+    async def read_retry(self, task_id: str) -> dict[str, Any] | None:
+        """Return the task that directly retries the supplied task, if any."""
+        await self.start()
+        async with self._lock:
+            try:
+                row = await asyncio.to_thread(self._read_retry, task_id)
+            except Exception as exc:
+                raise self._database_error("The operation retry could not be read.") from exc
+        if row is None:
+            return None
+        try:
+            return self._task_from_row(row)
+        except Exception as exc:
+            raise RavenError(
+                ErrorCode.EVENT_DATABASE_CORRUPTED,
+                "The event database contains an invalid retry task record.",
+                details={"retry_of_task_id": task_id},
+            ) from exc
+
+
     async def unfinished_tasks(self, operation_id: str) -> list[dict[str, Any]]:
         await self.start()
         async with self._lock:
@@ -503,6 +528,10 @@ class SQLiteEventStore:
                     ON tasks(retry_of_task_id)
                     WHERE retry_of_task_id IS NOT NULL;
 
+                CREATE UNIQUE INDEX IF NOT EXISTS tasks_single_direct_retry
+                    ON tasks(retry_of_task_id)
+                    WHERE retry_of_task_id IS NOT NULL;
+
                 PRAGMA user_version = 2;
                 """
             )
@@ -565,6 +594,26 @@ class SQLiteEventStore:
                 ),
             )
             connection.commit()
+        except sqlite3.IntegrityError as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            if retry_of_task_id is not None:
+                existing = self._read_retry(retry_of_task_id)
+                details = {"retry_of_task_id": retry_of_task_id}
+                if existing is not None:
+                    details.update(
+                        {
+                            "existing_task_id": str(existing["task_id"]),
+                            "existing_operation_id": str(existing["operation_id"]),
+                            "existing_status": str(existing["status"]),
+                        }
+                    )
+                raise RavenError(
+                    ErrorCode.OPERATION_TASK_ALREADY_RETRIED,
+                    f"Operation task '{retry_of_task_id}' already has a retry.",
+                    details=details,
+                ) from exc
+            raise
         except Exception:
             if connection.in_transaction:
                 connection.rollback()
@@ -810,6 +859,31 @@ class SQLiteEventStore:
                 error_json
             FROM tasks
             WHERE task_id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+
+
+    def _read_retry(self, task_id: str) -> sqlite3.Row | None:
+        return self._require_connection().execute(
+            """
+            SELECT
+                task_id,
+                operation_id,
+                name,
+                is_root,
+                status,
+                retry_policy,
+                retry_input_json,
+                attempt,
+                retry_of_operation_id,
+                retry_of_task_id,
+                created_at,
+                started_at,
+                finished_at,
+                error_json
+            FROM tasks
+            WHERE retry_of_task_id = ?
             """,
             (task_id,),
         ).fetchone()
@@ -1268,6 +1342,12 @@ class EventStreamRegistry:
         """Return one persisted task descriptor and its current state."""
         self._ensure_open()
         return await self._store.read_task(task_id)
+
+
+    async def retry_record(self, task_id: str) -> dict[str, Any] | None:
+        """Return the direct retry of a persisted task, if one exists."""
+        self._ensure_open()
+        return await self._store.read_retry(task_id)
 
 
     async def unfinished_tasks(self, operation_id: str) -> list[dict[str, Any]]:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import os
 import re
 import shutil
@@ -31,6 +32,8 @@ KEY_SECTION_ID = "section_id"
 KEY_CHUNK_INDEX = "chunk_index"
 
 POINT_NAMESPACE = UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_name(name: str) -> str:
@@ -68,6 +71,7 @@ class Knowledge:
         self._file_meta: dict[str, Any] = {"schema_version": PERSISTENCE_VERSION, "files": {}, "sections": {}}
         self._lifecycle_lock = asyncio.Lock()
         self._mutation_lock = asyncio.Lock()
+        self._pending_ingestions: set[str] = set()
         self._started = False
         self._closed = False
         self._operation_manager = operation_manager
@@ -106,6 +110,9 @@ class Knowledge:
 
     async def close(self) -> None:
         """Close the local Qdrant client."""
+        if self.is_started:
+            await self.reconcile_pending_ingestions()
+
         async with self._lifecycle_lock:
             if self._closed:
                 return
@@ -237,6 +244,120 @@ class Knowledge:
         )
 
 
+    async def reconcile_ingestion(
+        self,
+        file_id: str,
+        *,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        """Remove uncommitted vectors or report an already committed ingestion."""
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.INGESTION_CLEANUP
+        )
+        return await active_operation.run(
+            OperationType.INGESTION_CLEANUP,
+            lambda active_operation: self._reconcile_ingestion(
+                file_id,
+                operation=active_operation,
+            ),
+        )
+
+
+    async def _reconcile_ingestion(
+        self,
+        file_id: str,
+        *,
+        operation: Operation,
+    ) -> dict[str, Any]:
+        self._ensure_started()
+        await self._emit(
+            operation,
+            EventType.INGESTION_CLEANUP_STARTED,
+            {"knowledge": self.name, "file_id": file_id},
+        )
+
+        try:
+            async with self._mutation_lock:
+                committed = self._file_result_by_id(file_id)
+                if committed is not None:
+                    result = {
+                        "knowledge": self.name,
+                        "file_id": file_id,
+                        "status": "committed",
+                        "points_removed": 0,
+                        "ingestion": committed,
+                    }
+                else:
+                    points_removed = await asyncio.to_thread(
+                        self._count_points_by_file_id,
+                        file_id,
+                    )
+                    await asyncio.to_thread(self._delete_points_by_file_id, file_id)
+                    self._pending_ingestions.discard(file_id)
+                    result = {
+                        "knowledge": self.name,
+                        "file_id": file_id,
+                        "status": "cleaned",
+                        "points_removed": points_removed,
+                    }
+        except Exception as exc:
+            await self._emit(
+                operation,
+                EventType.INGESTION_CLEANUP_FAILED,
+                {
+                    "knowledge": self.name,
+                    "file_id": file_id,
+                    "error": error_payload(exc),
+                },
+            )
+            raise RavenError(
+                ErrorCode.INGESTION_RECONCILIATION_FAILED,
+                f"Could not reconcile ingestion '{file_id}' in knowledge '{self.name}'.",
+                details={"knowledge": self.name, "file_id": file_id},
+            ) from exc
+
+        await self._emit(operation, EventType.INGESTION_CLEANUP_COMPLETED, result)
+        return result
+
+
+    async def reconcile_pending_ingestions(self) -> list[dict[str, Any]]:
+        """Perform the final targeted cleanup used during graceful shutdown."""
+        self._ensure_started()
+        results: list[dict[str, Any]] = []
+
+        async with self._mutation_lock:
+            for file_id in tuple(self._pending_ingestions):
+                committed = self._file_result_by_id(file_id)
+                if committed is not None:
+                    self._pending_ingestions.discard(file_id)
+                    results.append(
+                        {
+                            "knowledge": self.name,
+                            "file_id": file_id,
+                            "status": "committed",
+                            "points_removed": 0,
+                        }
+                    )
+                    continue
+
+                points_removed = await asyncio.to_thread(
+                    self._count_points_by_file_id,
+                    file_id,
+                )
+                await asyncio.to_thread(self._delete_points_by_file_id, file_id)
+                self._pending_ingestions.discard(file_id)
+                results.append(
+                    {
+                        "knowledge": self.name,
+                        "file_id": file_id,
+                        "status": "cleaned",
+                        "points_removed": points_removed,
+                    }
+                )
+
+        return results
+
+
     async def _ingest(
         self,
         file_name: str,
@@ -281,8 +402,27 @@ class Knowledge:
             original_file_meta = copy.deepcopy(self._file_meta)
             vectors_written = False
             metadata_written = False
+            cleanup_completed = False
 
             try:
+                committed = self._file_result_by_id(file_id)
+                if committed is not None:
+                    if committed["file"] != file_name:
+                        raise RavenError(
+                            ErrorCode.INVALID_METADATA,
+                            f"File ID '{file_id}' is already assigned to "
+                            f"'{committed['file']}'.",
+                        )
+                    result = committed
+                    metadata_written = True
+                    cleanup_completed = True
+                    await self._emit(
+                        operation,
+                        EventType.KNOWLEDGE_INGEST_COMPLETED,
+                        result,
+                    )
+                    return result
+
                 if self.file_exists(file_name):
                     raise RavenError(
                         ErrorCode.FILE_ALREADY_EXISTS,
@@ -346,8 +486,27 @@ class Knowledge:
 
                 if operation is not None:
                     operation.raise_if_cancelled()
-                await asyncio.to_thread(self._upsert_points, points)
+                self._pending_ingestions.add(file_id)
+                upsert_task = asyncio.create_task(
+                    asyncio.to_thread(self._upsert_points, points)
+                )
+                try:
+                    await asyncio.shield(upsert_task)
+                except asyncio.CancelledError:
+                    await upsert_task
+                    vectors_written = True
+                    raise
                 vectors_written = True
+                await self._emit(
+                    operation,
+                    EventType.INGESTION_VECTORS_WRITTEN,
+                    {
+                        "knowledge": self.name,
+                        "file": file_name,
+                        "file_id": file_id,
+                        "point_count": len(points),
+                    },
+                )
 
                 self._file_meta = copy.deepcopy(original_file_meta)
                 files = self._files_registry()
@@ -374,8 +533,31 @@ class Knowledge:
                         "source_range": section.get("source_range"),
                     }
 
-                await asyncio.to_thread(self._write_json, self.files_path, self._file_meta)
+                metadata_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        self._write_json,
+                        self.files_path,
+                        self._file_meta,
+                    )
+                )
+                try:
+                    await asyncio.shield(metadata_task)
+                except asyncio.CancelledError:
+                    await metadata_task
+                    metadata_written = True
+                    raise
                 metadata_written = True
+                self._pending_ingestions.discard(file_id)
+                cleanup_completed = True
+                await self._emit(
+                    operation,
+                    EventType.INGESTION_METADATA_COMMITTED,
+                    {
+                        "knowledge": self.name,
+                        "file": file_name,
+                        "file_id": file_id,
+                    },
+                )
                 result = {
                     "knowledge": self.name,
                     "file": file_name,
@@ -384,14 +566,16 @@ class Knowledge:
                     "chunk_count": len(points),
                 }
             except asyncio.CancelledError:
-                self._file_meta = original_file_meta
-                if vectors_written and not metadata_written:
+                if not metadata_written:
+                    self._file_meta = original_file_meta
                     await asyncio.to_thread(self._delete_points_by_file_id, file_id)
+                    cleanup_completed = True
                 raise
             except Exception as exc:
-                self._file_meta = original_file_meta
-                if vectors_written and not metadata_written:
+                if not metadata_written:
+                    self._file_meta = original_file_meta
                     await asyncio.to_thread(self._delete_points_by_file_id, file_id)
+                    cleanup_completed = True
                 await self._emit(
                     operation,
                     EventType.KNOWLEDGE_INGEST_FAILED,
@@ -402,6 +586,9 @@ class Knowledge:
                     },
                 )
                 raise
+            finally:
+                if metadata_written or cleanup_completed:
+                    self._pending_ingestions.discard(file_id)
 
         await self._emit(operation, EventType.KNOWLEDGE_INGEST_COMPLETED, result)
         return result
@@ -614,6 +801,20 @@ class Knowledge:
         return self._file_meta.setdefault("sections", {})
 
 
+    def _file_result_by_id(self, file_id: str) -> dict[str, Any] | None:
+        for file_name, info in self._files_registry().items():
+            if info.get("file_id") != file_id:
+                continue
+            return {
+                "knowledge": self.name,
+                "file": file_name,
+                "file_id": file_id,
+                "section_count": int(info.get("sections", 0)),
+                "chunk_count": int(info.get("chunks", 0)),
+            }
+        return None
+
+
     def _split(self, text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
         splitter = SentenceSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         return splitter.split_text_metadata_aware(text, "")
@@ -691,6 +892,23 @@ class Knowledge:
             ),
             wait=True,
         )
+
+
+    def _count_points_by_file_id(self, file_id: str) -> int:
+        if not self._collection_exists():
+            return 0
+        return self._require_qdrant().count(
+            collection_name=COLLECTION_NAME,
+            count_filter=qmodels.Filter(
+                must=[
+                    qmodels.FieldCondition(
+                        key=KEY_FILE_ID,
+                        match=qmodels.MatchValue(value=file_id),
+                    )
+                ]
+            ),
+            exact=True,
+        ).count
 
 
     def _search(self, query_vector: list[float], top_k: int) -> list[dict[str, Any]]:
@@ -912,6 +1130,22 @@ class KnowledgeBase:
             }
             for knowledge in self._knowledges.values()
         ]
+
+
+    async def reconcile_pending_ingestions(self) -> list[dict[str, Any]]:
+        """Run final cleanup checks for active ingestion writes."""
+        self._ensure_started()
+        results: list[dict[str, Any]] = []
+        for knowledge in tuple(self._knowledges.values()):
+            try:
+                results.extend(await knowledge.reconcile_pending_ingestions())
+            except Exception:
+                logger.exception(
+                    "Final ingestion reconciliation failed for knowledge %s",
+                    knowledge.name,
+                )
+                raise
+        return results
 
 
     async def delete(

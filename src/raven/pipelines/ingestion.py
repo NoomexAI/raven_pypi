@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from llama_index.core.prompts.base import ChatPromptTemplate
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
-from ..core.operations import Operation, OperationManager, OperationTask, OperationType
+from ..core.operations import (
+    Operation,
+    OperationManager,
+    OperationTask,
+    OperationTaskRecord,
+    OperationType,
+)
 from ..data_management.knowledge_base import KnowledgeBase
 from ..document_processing.document_parser import DocumentParser
 from ..document_processing.semantic_splitter import ProvenanceAwareSemanticSplitter
@@ -53,6 +60,24 @@ class SectionMetadata(BaseModel):
         default_factory=list,
         description="Answers to what/who questions answerable from this section",
     )
+
+
+
+
+class IngestionRetryInput(BaseModel):
+    """Durable inputs required to safely repeat one ingestion."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    knowledge_name: str
+    source_path: str
+    source_sha256: str | None
+    file_id: str
+    breakpoint_percentile_threshold: int
+    buffer_size: int
+    max_extraction_retries: int
+    chunk_size: int
+    chunk_overlap: int
 
 
 class IngestionPipeline:
@@ -97,23 +122,54 @@ class IngestionPipeline:
         llm: Any,
         embed_model: Any,
         operation: Operation | None = None,
+        retry_of: OperationTaskRecord | None = None,
         chunk_size: int = 512,
         chunk_overlap: int = 50,
     ) -> OperationTask:
+        if retry_of is None:
+            path = Path(source_path).expanduser().resolve()
+            retry_input = IngestionRetryInput(
+                knowledge_name=knowledge_name,
+                source_path=str(path),
+                source_sha256=await asyncio.to_thread(
+                    self._source_sha256_if_available,
+                    path,
+                ),
+                file_id=uuid4().hex[:12],
+                breakpoint_percentile_threshold=self._breakpoint_percentile_threshold,
+                buffer_size=self._buffer_size,
+                max_extraction_retries=self._max_extraction_retries,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+            )
+        else:
+            try:
+                retry_input = IngestionRetryInput.model_validate(retry_of.retry_input)
+            except ValidationError as exc:
+                raise RavenError(
+                    ErrorCode.INVALID_RETRY_INPUT,
+                    "The ingestion retry input is invalid.",
+                ) from exc
+
         active_operation = operation or await self._operation_manager.create(
             OperationType.INGESTION_RUN
         )
         return await active_operation.run(
             OperationType.INGESTION_RUN,
             lambda active_operation: self._run(
-                knowledge_name,
-                source_path,
+                retry_input.knowledge_name,
+                retry_input.source_path,
                 llm=llm,
                 embed_model=embed_model,
                 operation=active_operation,
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
+                file_id=retry_input.file_id,
+                expected_source_sha256=retry_input.source_sha256,
+                reconcile_before_run=retry_of is not None,
+                chunk_size=retry_input.chunk_size,
+                chunk_overlap=retry_input.chunk_overlap,
             ),
+            retry_input=retry_input.model_dump(mode="json"),
+            retry_of=retry_of,
         )
 
 
@@ -125,6 +181,9 @@ class IngestionPipeline:
         llm: Any,
         embed_model: Any,
         operation: Operation,
+        file_id: str,
+        expected_source_sha256: str | None,
+        reconcile_before_run: bool,
         chunk_size: int = 512,
         chunk_overlap: int = 50,
     ) -> dict[str, Any]:
@@ -134,18 +193,50 @@ class IngestionPipeline:
         await self._emit(
             operation,
             EventType.INGESTION_STARTED,
-            {"knowledge": knowledge_name, "file": file_name},
+            {
+                "knowledge": knowledge_name,
+                "file": file_name,
+                "file_id": file_id,
+            },
         )
 
         try:
+            knowledge = self._knowledge_base.get(knowledge_name)
+            if reconcile_before_run:
+                cleanup_task = await knowledge.reconcile_ingestion(
+                    file_id,
+                    operation=operation,
+                )
+                cleanup = await cleanup_task.result()
+                if cleanup["status"] == "committed":
+                    result = {
+                        **cleanup["ingestion"],
+                        "source_path": str(path),
+                        "already_committed": True,
+                    }
+                    await self._emit(operation, EventType.INGESTION_COMPLETED, result)
+                    return result
+
             if not await asyncio.to_thread(path.is_file):
                 raise RavenError(
                     ErrorCode.SOURCE_FILE_NOT_FOUND,
                     f"Source file '{path}' was not found.",
                 )
 
-            knowledge = self._knowledge_base.get(knowledge_name)
-            file_id = uuid4().hex[:12]
+            current_source_sha256 = await asyncio.to_thread(self._source_sha256, path)
+            if (
+                expected_source_sha256 is not None
+                and current_source_sha256 != expected_source_sha256
+            ):
+                raise RavenError(
+                    ErrorCode.SOURCE_FILE_CHANGED,
+                    f"Source file '{path}' changed after ingestion was submitted.",
+                    details={
+                        "expected_sha256": expected_source_sha256,
+                        "actual_sha256": current_source_sha256,
+                    },
+                )
+
             parsed_document = await self._document_parser.parse(path, file_id=file_id)
             self._raise_if_cancelled(operation)
 
@@ -307,3 +398,22 @@ class IngestionPipeline:
     ) -> None:
         if operation is not None:
             await operation.publish(Event(type=event_type, data=data))
+
+
+    @staticmethod
+    def _source_sha256_if_available(path: Path) -> str | None:
+        if not path.is_file():
+            return None
+        try:
+            return IngestionPipeline._source_sha256(path)
+        except OSError:
+            return None
+
+
+    @staticmethod
+    def _source_sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()

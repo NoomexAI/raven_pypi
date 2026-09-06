@@ -39,11 +39,13 @@ class ErrorCode(StrEnum):
     INVALID_EMBEDDING_RESULT = "invalid_embedding_result"
     EMBEDDING_DIMENSION_MISMATCH = "embedding_dimension_mismatch"
     SOURCE_FILE_NOT_FOUND = "source_file_not_found"
+    SOURCE_FILE_CHANGED = "source_file_changed"
     SOURCE_FILE_UNREADABLE = "source_file_unreadable"
     UNSUPPORTED_SOURCE_FILE = "unsupported_source_file"
     DOCUMENT_PARSE_FAILED = "document_parse_failed"
     NO_SECTIONS_PRODUCED = "no_sections_produced"
     SECTION_METADATA_EXTRACTION_FAILED = "section_metadata_extraction_failed"
+    INGESTION_RECONCILIATION_FAILED = "ingestion_reconciliation_failed"
 
     INVALID_OPERATION_NAME = "invalid_operation_name"
     OPERATION_NOT_FOUND = "operation_not_found"
@@ -54,6 +56,7 @@ class ErrorCode(StrEnum):
     OPERATION_MANAGER_CLOSED = "operation_manager_closed"
     OPERATION_TASK_NOT_FOUND = "operation_task_not_found"
     OPERATION_TASK_NOT_RETRYABLE = "operation_task_not_retryable"
+    OPERATION_TASK_ALREADY_RETRIED = "operation_task_already_retried"
     INVALID_RETRY_INPUT = "invalid_retry_input"
 
     INVALID_METADATA = "invalid_metadata"

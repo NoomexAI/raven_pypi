@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from pydantic import ValidationError
+
 from ..agent.contracts import RetrievalPipelines
 from ..agent.harness import AgentHarness
 from ..agent.policy import GLOBAL_RETRIEVAL_MODES, LOCAL_RETRIEVAL_MODES, RetrievalMode
@@ -25,7 +27,7 @@ from ..core.operations import (
 )
 from ..data_management.conversation_manager import Conversation, ConversationManager
 from ..data_management.knowledge_base import Knowledge, KnowledgeBase
-from ..pipelines.ingestion import IngestionPipeline
+from ..pipelines.ingestion import IngestionPipeline, IngestionRetryInput
 from ..pipelines.reconstructor import Reconstructor
 from ..pipelines.retrieval import (
     AgreementBasedRetrievalPipeline,
@@ -72,6 +74,7 @@ class Raven:
         self.retrieval_pipelines: RetrievalPipelines | None = None
         self._sessions: dict[str, Session] = {}
         self._lifecycle_lock = asyncio.Lock()
+        self._retry_lock = asyncio.Lock()
         self._started = False
         self._closed = False
 
@@ -127,11 +130,70 @@ class Raven:
 
     async def retry_task(self, task_id: UUID | str) -> OperationTask:
         """Start a user-confirmed retry as a new linked operation."""
+        async with self._retry_lock:
+            return await self._retry_task(task_id)
+
+
+    async def _retry_task(self, task_id: UUID | str) -> OperationTask:
         failed_task = await self.operation_manager.get_task(task_id)
+        existing_retry = await self.operation_manager.get_retry(task_id)
+        if existing_retry is not None:
+            raise RavenError(
+                ErrorCode.OPERATION_TASK_ALREADY_RETRIED,
+                f"Operation task '{failed_task.task_id}' already has a retry.",
+                details={
+                    "retry_task_id": str(existing_retry.task_id),
+                    "retry_operation_id": str(existing_retry.operation_id),
+                    "retry_status": existing_retry.status.value,
+                },
+            )
         if not failed_task.can_retry:
             raise RavenError(
                 ErrorCode.OPERATION_TASK_NOT_RETRYABLE,
                 f"Operation task '{failed_task.task_id}' is not retryable.",
+                details={
+                    "status": failed_task.status.value,
+                    "attempt": failed_task.attempt,
+                    "max_attempts": failed_task.max_attempts,
+                    "attempts_remaining": failed_task.attempts_remaining,
+                    "error_code": (
+                        failed_task.error.get("code")
+                        if failed_task.error is not None
+                        else None
+                    ),
+                },
+            )
+
+        if failed_task.name == OperationType.INGESTION_RUN.value:
+            self._ensure_models_loaded()
+            assert self.llm is not None
+            assert self.embed_model is not None
+            try:
+                retry_input = IngestionRetryInput.model_validate(
+                    failed_task.retry_input
+                )
+            except ValidationError as exc:
+                raise RavenError(
+                    ErrorCode.INVALID_RETRY_INPUT,
+                    "The ingestion retry input is invalid.",
+                ) from exc
+            pipeline = IngestionPipeline(
+                self.knowledge_base,
+                self.operation_manager,
+                breakpoint_percentile_threshold=(
+                    retry_input.breakpoint_percentile_threshold
+                ),
+                buffer_size=retry_input.buffer_size,
+                max_extraction_retries=retry_input.max_extraction_retries,
+            )
+            return await pipeline.run(
+                retry_input.knowledge_name,
+                retry_input.source_path,
+                llm=self.llm,
+                embed_model=self.embed_model,
+                retry_of=failed_task,
+                chunk_size=retry_input.chunk_size,
+                chunk_overlap=retry_input.chunk_overlap,
             )
 
         if failed_task.name == OperationType.RECONSTRUCTION_RECONSTRUCT.value:
@@ -308,7 +370,7 @@ class Raven:
 
 
     async def close(self) -> None:
-        """Close sessions, storage registries, and the operation manager."""
+        """Cancel work, reconcile pending writes, and close all resources."""
         async with self._lifecycle_lock:
             if self._closed:
                 return
@@ -317,10 +379,21 @@ class Raven:
             sessions = list(self._sessions.values())
             self._sessions.clear()
 
-        await asyncio.gather(*(session.close() for session in sessions))
-        await self.conversation_manager.close()
-        await self.knowledge_base.close()
-        await self.operation_manager.close()
+        shutdown_error: BaseException | None = None
+        try:
+            await asyncio.gather(*(session.close() for session in sessions))
+            await self.operation_manager.cancel_active()
+            if self.knowledge_base.is_started:
+                await self.knowledge_base.reconcile_pending_ingestions()
+        except BaseException as exc:
+            shutdown_error = exc
+        finally:
+            await self.conversation_manager.close()
+            await self.knowledge_base.close()
+            await self.operation_manager.close()
+
+        if shutdown_error is not None:
+            raise shutdown_error
 
 
     async def create_knowledge(
