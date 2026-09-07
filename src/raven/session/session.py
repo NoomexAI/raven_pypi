@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
+
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ..agent.contracts import AgentRunResult
 from ..agent.harness import AgentHarness
@@ -17,17 +19,35 @@ from ..core.operations import (
     OperationManager,
     OperationStatus,
     OperationTask,
+    OperationTaskRecord,
     OperationType,
 )
 from ..data_management.conversation_manager import Conversation
 
 
 
+class SessionRetryInput(BaseModel):
+    """Durable inputs required to retry one complete session turn."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    conversation_id: str
+    turn_id: UUID
+    user_query: str
+    retrieval_mode: RetrievalMode | None
+    max_iterations: int
+    top_k: int
+    memory_token_limit: int
+    memory_top_k: int
+
+
+
 class SessionRun:
     """Replayable handle for one complete session turn."""
 
-    def __init__(self, task: OperationTask, release: Any) -> None:
+    def __init__(self, task: OperationTask, turn_id: UUID, release: Any) -> None:
         self._task = task
+        self._turn_id = turn_id
         self._release = release
         self._released = False
 
@@ -45,6 +65,11 @@ class SessionRun:
     @property
     def task(self) -> OperationTask:
         return self._task
+
+
+    @property
+    def turn_id(self) -> UUID:
+        return self._turn_id
 
 
     @property
@@ -189,15 +214,45 @@ class Session:
         *,
         retrieval_mode: RetrievalMode | str | None = None,
         operation: Operation | None = None,
+        retry_of: OperationTaskRecord | None = None,
     ) -> SessionRun:
         """Start one serialized autonomous turn in a new or supplied operation."""
         self._ensure_started()
-        query = user_query.strip() if isinstance(user_query, str) else ""
-        if not query:
-            raise RavenError(
-                ErrorCode.INVALID_METADATA,
-                "user_query must be a non-empty string.",
+        if retry_of is None:
+            query = user_query.strip() if isinstance(user_query, str) else ""
+            if not query:
+                raise RavenError(
+                    ErrorCode.INVALID_METADATA,
+                    "user_query must be a non-empty string.",
+                )
+            selected_mode = self._normalize_retrieval_mode(retrieval_mode)
+            retry_input = SessionRetryInput(
+                conversation_id=self.conversation_id,
+                turn_id=uuid4(),
+                user_query=query,
+                retrieval_mode=selected_mode,
+                max_iterations=self.harness.max_iterations,
+                top_k=self.harness.top_k,
+                memory_token_limit=self._memory_token_limit,
+                memory_top_k=self._memory_top_k,
             )
+        else:
+            try:
+                retry_input = SessionRetryInput.model_validate(retry_of.retry_input)
+            except ValidationError as exc:
+                raise RavenError(
+                    ErrorCode.INVALID_RETRY_INPUT,
+                    "The session retry input is invalid.",
+                ) from exc
+            if retry_input.conversation_id != self.conversation_id:
+                raise RavenError(
+                    ErrorCode.INVALID_RETRY_INPUT,
+                    "The session retry belongs to a different conversation.",
+                )
+
+        query = retry_input.user_query
+        selected_mode = retry_input.retrieval_mode
+        turn_id = retry_input.turn_id
 
         await self._turn_lock.acquire()
         if self._closed:
@@ -211,14 +266,52 @@ class Session:
 
         async def worker(active_operation: Operation) -> AgentRunResult:
             try:
-                agent_run = await self.harness.start(
-                    self.conversation,
-                    query,
-                    retrieval_mode=retrieval_mode,
-                    operation=active_operation,
-                )
-                result = await agent_run.collect()
-                await self.conversation.append_turn(agent_run.conversation_messages())
+                existing = await self.conversation.get_turn(turn_id)
+                if existing is not None:
+                    if existing["user_query"] != query:
+                        raise RavenError(
+                            ErrorCode.CONVERSATION_TURN_CONFLICT,
+                            f"Turn '{turn_id}' is already assigned to a different query.",
+                        )
+                    stored_result = existing.get("result")
+                    if not isinstance(stored_result, dict):
+                        raise RavenError(
+                            ErrorCode.CONVERSATION_TURN_RESULT_MISSING,
+                            f"Turn '{turn_id}' has no stored run result.",
+                        )
+                    try:
+                        result = AgentRunResult.model_validate(
+                            stored_result
+                        ).model_copy(
+                            update={"operation_id": active_operation.operation_id}
+                        )
+                    except ValidationError as exc:
+                        raise RavenError(
+                            ErrorCode.CONVERSATION_TURN_RESULT_MISSING,
+                            f"Turn '{turn_id}' has an invalid stored run result.",
+                        ) from exc
+                    reconcile_task = await self.conversation.reconcile_turn(
+                        turn_id,
+                        operation=active_operation,
+                    )
+                    await reconcile_task.result()
+                else:
+                    agent_run = await self.harness.start(
+                        self.conversation,
+                        query,
+                        retrieval_mode=selected_mode,
+                        operation=active_operation,
+                    )
+                    result = await agent_run.collect()
+                    append_task = await self.conversation.append_turn(
+                        agent_run.conversation_messages(),
+                        turn_id=turn_id,
+                        user_query=query,
+                        result=result.model_dump(mode="json"),
+                        operation=active_operation,
+                    )
+                    await append_task.result()
+
                 generate_title = getattr(self.conversation, "generate_title", None)
                 if generate_title is not None:
                     title_task = await generate_title(
@@ -240,14 +333,35 @@ class Session:
             task = await active_operation.run(
                 OperationType.SESSION_GENERATE_RESPONSE,
                 worker,
+                retry_input=retry_input.model_dump(mode="json"),
+                retry_of=retry_of,
             )
-            session_run = SessionRun(task, self._release_run)
+            session_run = SessionRun(task, turn_id, self._release_run)
             run_holder["run"] = session_run
             self._active_runs.add(session_run)
             return session_run
         except Exception:
             self._turn_lock.release()
             raise
+
+
+    @staticmethod
+    def _normalize_retrieval_mode(
+        retrieval_mode: RetrievalMode | str | None,
+    ) -> RetrievalMode | None:
+        if retrieval_mode is None or retrieval_mode == "auto":
+            return None
+        try:
+            return (
+                retrieval_mode
+                if isinstance(retrieval_mode, RetrievalMode)
+                else RetrievalMode(retrieval_mode)
+            )
+        except ValueError as exc:
+            raise RavenError(
+                ErrorCode.INVALID_RETRIEVAL_MODE,
+                f"Unknown retrieval mode '{retrieval_mode}'.",
+            ) from exc
 
 
     def _release_run(self, run: SessionRun) -> None:

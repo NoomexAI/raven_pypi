@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 from llama_index.core.base.llms.types import MessageRole
 from llama_index.core.llms import ChatMessage
 from llama_index.core.memory import ChatSummaryMemoryBuffer, VectorMemory
+from llama_index.core.schema import TextNode
 from llama_index.core.storage.chat_store import SimpleChatStore
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
@@ -26,6 +27,7 @@ from ..core.config import PathConfig
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
 from ..core.operations import Operation, OperationManager, OperationTask, OperationType
+from .conversation_store import ConversationMessageStore
 from .knowledge_base import KnowledgeBase
 
 
@@ -59,11 +61,12 @@ class Conversation:
         self.created_at: datetime | None = None
 
         self.metadata_path = self.dir_path / "metadata.json"
-        self.messages_path = self.dir_path / "messages.json"
+        self.messages_path = self.dir_path / "messages.sqlite3"
         self.preferences_path = self.dir_path / "preferences.json"
         self.qdrant_dir = self.dir_path / "qdrant"
 
         self._qdrant: QdrantClient | None = None
+        self._message_store = ConversationMessageStore(self.messages_path)
         self._chat_store: SimpleChatStore | None = None
         self._chat_memory: ChatSummaryMemoryBuffer | None = None
         self._vector_memory: VectorMemory | None = None
@@ -135,6 +138,7 @@ class Conversation:
             self._closed = True
             self._started = False
 
+            await asyncio.to_thread(self._message_store.close)
             if qdrant is not None:
                 await asyncio.to_thread(qdrant.close)
 
@@ -191,6 +195,12 @@ class Conversation:
                 retriever_kwargs={"similarity_top_k": memory_top_k},
             )
 
+        pending_turn_ids = await asyncio.to_thread(
+            self._message_store.list_unindexed_turn_ids
+        )
+        for turn_id in pending_turn_ids:
+            await self._ensure_turn_indexed(turn_id)
+
 
     async def get_context_messages(
         self,
@@ -242,7 +252,10 @@ class Conversation:
 
             try:
                 messages = await memory.aget(initial_token_count=initial_token_count)
-                await self.persist_messages()
+                await asyncio.to_thread(
+                    self._message_store.replace_context,
+                    messages,
+                )
             except Exception as exc:
                 if compaction_needed and operation is not None:
                     await operation.publish(
@@ -293,9 +306,8 @@ class Conversation:
 
     async def get_messages(self) -> list[ChatMessage]:
         """Return the complete stored chat history without applying a window."""
-        memory = self._require_chat_memory()
-        async with self._memory_lock:
-            return await asyncio.to_thread(memory.get_all)
+        self._ensure_started()
+        return await asyncio.to_thread(self._message_store.list_messages)
 
 
     async def search_memory(self, query: str) -> list[ChatMessage]:
@@ -318,37 +330,189 @@ class Conversation:
         *,
         index_in_vector_memory: bool = True,
     ) -> None:
-        """Add one message to chat history and optionally semantic memory."""
-        memory = self._require_chat_memory()
-        vector_memory = self._require_vector_memory() if index_in_vector_memory else None
-        async with self._mutation_lock:
-            await asyncio.to_thread(memory.put, message)
-            if vector_memory is not None:
-                await vector_memory.aput(message)
+        """Persist one standalone message as its own committed turn."""
+        task = await self.append_turn(
+            [message],
+            turn_id=uuid4(),
+            user_query=str(message.content or ""),
+            index_in_vector_memory=index_in_vector_memory,
+        )
+        await task.result()
 
 
-    async def append_turn(self, messages: Sequence[ChatMessage]) -> None:
-        """Append one complete model turn and persist it with one disk write."""
+    async def append_turn(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        turn_id: UUID | str | None = None,
+        user_query: str | None = None,
+        result: dict[str, Any] | None = None,
+        index_in_vector_memory: bool = True,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        """Start an atomic, idempotent turn commit."""
         if not messages:
             raise RavenError(
                 ErrorCode.INVALID_METADATA,
                 "A conversation turn must contain at least one message.",
             )
+        normalized_turn_id = self._validate_turn_id(turn_id or uuid4())
+        normalized_query = self._turn_query(messages, user_query)
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.CONVERSATION_APPEND_TURN
+        )
+        return await active_operation.run(
+            OperationType.CONVERSATION_APPEND_TURN,
+            lambda active_operation: self._append_turn(
+                messages,
+                turn_id=normalized_turn_id,
+                user_query=normalized_query,
+                result=result,
+                index_in_vector_memory=index_in_vector_memory,
+                operation=active_operation,
+            ),
+        )
 
-        memory = self._require_chat_memory()
-        chat_store = self._chat_store
-        if chat_store is None:
-            raise RavenError(
-                ErrorCode.CONVERSATION_MEMORY_NOT_INITIALIZED,
-                "Conversation chat storage has not been initialized.",
+
+    async def _append_turn(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        turn_id: str,
+        user_query: str,
+        result: dict[str, Any] | None,
+        index_in_vector_memory: bool,
+        operation: Operation,
+    ) -> dict[str, Any]:
+        """Commit a complete turn and reconcile its derived memory index."""
+        self._require_chat_memory()
+        self._require_vector_memory()
+        await self._emit(
+            operation,
+            EventType.CONVERSATION_TURN_COMMIT_STARTED,
+            {
+                "conversation_id": self.conversation_id,
+                "turn_id": turn_id,
+            },
+        )
+
+        try:
+            async with self._mutation_lock:
+                operation.raise_if_cancelled()
+                commit_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        self._message_store.commit_turn,
+                        turn_id=turn_id,
+                        operation_id=str(operation.operation_id),
+                        user_query=user_query,
+                        messages=messages,
+                        result=result,
+                    )
+                )
+                try:
+                    record, created = await asyncio.shield(commit_task)
+                except asyncio.CancelledError:
+                    await commit_task
+                    raise
+
+                await self._reload_context_memory()
+                if index_in_vector_memory:
+                    await self._ensure_turn_indexed(turn_id, operation=operation)
+                elif not record["memory_indexed"]:
+                    await asyncio.to_thread(
+                        self._message_store.mark_memory_indexed,
+                        turn_id,
+                    )
+
+            event_type = (
+                EventType.CONVERSATION_TURN_COMMITTED
+                if created
+                else EventType.CONVERSATION_TURN_REUSED
             )
-        vector_memory = self._require_vector_memory()
+            await self._emit(
+                operation,
+                event_type,
+                {
+                    "conversation_id": self.conversation_id,
+                    "turn_id": turn_id,
+                    "message_count": len(messages),
+                },
+            )
+            updated = await asyncio.to_thread(self._message_store.get_turn, turn_id)
+            if updated is None:
+                raise RavenError(
+                    ErrorCode.CONVERSATION_TURN_NOT_FOUND,
+                    f"Turn '{turn_id}' does not exist after commit.",
+                )
+            return updated
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._emit(
+                operation,
+                EventType.CONVERSATION_TURN_COMMIT_FAILED,
+                {
+                    "conversation_id": self.conversation_id,
+                    "turn_id": turn_id,
+                    "error": error_payload(exc),
+                },
+            )
+            raise
+
+
+    async def get_turn(self, turn_id: UUID | str) -> dict[str, Any] | None:
+        """Return one committed turn by its stable identity."""
+        self._ensure_started()
+        normalized_turn_id = self._validate_turn_id(turn_id)
+        return await asyncio.to_thread(
+            self._message_store.get_turn,
+            normalized_turn_id,
+        )
+
+
+    async def reconcile_turn(
+        self,
+        turn_id: UUID | str,
+        *,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        """Reconcile context and vector memory for a committed turn."""
+        normalized_turn_id = self._validate_turn_id(turn_id)
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.CONVERSATION_RECONCILE_TURN
+        )
+        return await active_operation.run(
+            OperationType.CONVERSATION_RECONCILE_TURN,
+            lambda active_operation: self._reconcile_turn(
+                normalized_turn_id,
+                operation=active_operation,
+            ),
+        )
+
+
+    async def _reconcile_turn(
+        self,
+        turn_id: str,
+        *,
+        operation: Operation,
+    ) -> dict[str, Any]:
         async with self._mutation_lock:
-            for message in messages:
-                await asyncio.to_thread(memory.put, message)
-                if self._should_index_message(message):
-                    await vector_memory.aput(message)
-            await asyncio.to_thread(self._persist_chat_store, chat_store)
+            record = await asyncio.to_thread(
+                self._message_store.get_turn,
+                turn_id,
+            )
+            if record is None:
+                raise RavenError(
+                    ErrorCode.CONVERSATION_TURN_NOT_FOUND,
+                    f"Turn '{turn_id}' does not exist.",
+                )
+            await self._reload_context_memory()
+            await self._ensure_turn_indexed(turn_id, operation=operation)
+            updated = await asyncio.to_thread(
+                self._message_store.get_turn,
+                turn_id,
+            )
+            return updated or record
 
 
     @staticmethod
@@ -360,14 +524,150 @@ class Conversation:
 
 
     async def persist_messages(self) -> None:
-        """Atomically persist the current chat store to messages.json."""
+        """Atomically persist the current model-facing context snapshot."""
         chat_store = self._chat_store
         if chat_store is None:
             raise RavenError(
                 ErrorCode.CONVERSATION_MEMORY_NOT_INITIALIZED,
                 "Conversation memory has not been initialized.",
             )
-        await asyncio.to_thread(self._persist_chat_store, chat_store)
+        async with self._memory_lock:
+            messages = await asyncio.to_thread(
+                chat_store.get_messages,
+                "messages",
+            )
+            await asyncio.to_thread(
+                self._message_store.replace_context,
+                messages,
+            )
+
+
+    async def _reload_context_memory(self) -> None:
+        memory = self._require_chat_memory()
+        messages = await asyncio.to_thread(
+            self._message_store.get_context_messages
+        )
+        async with self._memory_lock:
+            await asyncio.to_thread(memory.set, messages)
+
+
+    async def _ensure_turn_indexed(
+        self,
+        turn_id: str,
+        *,
+        operation: Operation | None = None,
+    ) -> None:
+        record = await asyncio.to_thread(self._message_store.get_turn, turn_id)
+        if record is None:
+            raise RavenError(
+                ErrorCode.CONVERSATION_TURN_NOT_FOUND,
+                f"Turn '{turn_id}' does not exist.",
+            )
+        if record["memory_indexed"]:
+            return
+
+        await self._emit(
+            operation,
+            EventType.CONVERSATION_MEMORY_INDEX_STARTED,
+            {
+                "conversation_id": self.conversation_id,
+                "turn_id": turn_id,
+            },
+        )
+        try:
+            messages = await asyncio.to_thread(
+                self._message_store.get_turn_messages,
+                turn_id,
+            )
+            indexed_messages = [
+                message
+                for message in messages
+                if self._should_index_message(message)
+            ]
+            if indexed_messages:
+                vector_memory = self._require_vector_memory()
+                async with self._memory_lock:
+                    await asyncio.to_thread(
+                        self._index_turn,
+                        vector_memory,
+                        turn_id,
+                        indexed_messages,
+                    )
+            await asyncio.to_thread(
+                self._message_store.mark_memory_indexed,
+                turn_id,
+            )
+        except Exception as exc:
+            await self._emit(
+                operation,
+                EventType.CONVERSATION_MEMORY_INDEX_FAILED,
+                {
+                    "conversation_id": self.conversation_id,
+                    "turn_id": turn_id,
+                    "error": error_payload(exc),
+                },
+            )
+            raise
+
+        await self._emit(
+            operation,
+            EventType.CONVERSATION_MEMORY_INDEX_COMPLETED,
+            {
+                "conversation_id": self.conversation_id,
+                "turn_id": turn_id,
+                "message_count": len(indexed_messages),
+            },
+        )
+
+
+    @staticmethod
+    def _index_turn(
+        vector_memory: VectorMemory,
+        turn_id: str,
+        messages: Sequence[ChatMessage],
+    ) -> None:
+        payloads = [message.model_dump(mode="json") for message in messages]
+        text = " ".join(
+            str(message.content)
+            for message in messages
+            if message.content
+        )
+        node = TextNode(
+            id_=turn_id,
+            text=text,
+            metadata={"sub_dicts": payloads},
+            excluded_embed_metadata_keys=["sub_dicts"],
+            excluded_llm_metadata_keys=["sub_dicts"],
+        )
+        vector_memory.vector_index.insert_nodes([node])
+
+
+    @staticmethod
+    def _validate_turn_id(turn_id: UUID | str) -> str:
+        try:
+            parsed = turn_id if isinstance(turn_id, UUID) else UUID(turn_id)
+        except (TypeError, ValueError) as exc:
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                "turn_id must be a valid UUID.",
+            ) from exc
+        return str(parsed)
+
+
+    @staticmethod
+    def _turn_query(
+        messages: Sequence[ChatMessage],
+        user_query: str | None,
+    ) -> str:
+        if isinstance(user_query, str) and user_query.strip():
+            return user_query.strip()
+        for message in messages:
+            if message.role == MessageRole.USER and message.content:
+                return str(message.content).strip()
+        raise RavenError(
+            ErrorCode.INVALID_METADATA,
+            "A committed conversation turn requires a user query.",
+        )
 
 
     def get_preferences(self) -> list[dict[str, str]]:
@@ -663,24 +963,19 @@ class Conversation:
         self.dir_path.mkdir(parents=True, exist_ok=True)
         self.qdrant_dir.mkdir(parents=True, exist_ok=True)
         self._preferences = self._load_preferences()
-        self._qdrant = QdrantClient(path=str(self.qdrant_dir))
+        self._message_store.open()
+        try:
+            self._qdrant = QdrantClient(path=str(self.qdrant_dir))
+        except Exception:
+            self._message_store.close()
+            raise
 
 
     def _load_chat_store(self) -> SimpleChatStore:
-        if self.messages_path.exists():
-            return SimpleChatStore.from_persist_path(str(self.messages_path))
-        return SimpleChatStore()
-
-
-    def _persist_chat_store(self, chat_store: SimpleChatStore) -> None:
-        temporary_path = self.messages_path.with_suffix(".json.tmp")
-        serialized = json.dumps(
-            chat_store.model_dump(mode="json"),
-            indent=2,
-            ensure_ascii=False,
+        messages = self._message_store.get_context_messages()
+        return SimpleChatStore(
+            store={"messages": messages} if messages else {}
         )
-        temporary_path.write_text(serialized + "\n", encoding="utf-8")
-        os.replace(temporary_path, self.messages_path)
 
 
     def _load_preferences(self) -> list[dict[str, str]]:

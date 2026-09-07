@@ -36,7 +36,7 @@ from ..pipelines.retrieval import (
     VectorConditionedRetrievalPipeline,
 )
 from ..providers import ModelRole, ModelSpec, Provider
-from ..session.session import Session
+from ..session.session import Session, SessionRetryInput
 
 
 class Raven:
@@ -208,6 +208,34 @@ class Raven:
                 sections,
                 retry_of=failed_task,
             )
+
+        if failed_task.name == OperationType.SESSION_GENERATE_RESPONSE.value:
+            self._ensure_models_loaded()
+            try:
+                retry_input = SessionRetryInput.model_validate(
+                    failed_task.retry_input
+                )
+            except ValidationError as exc:
+                raise RavenError(
+                    ErrorCode.INVALID_RETRY_INPUT,
+                    "The session retry input is invalid.",
+                ) from exc
+
+            conversation = self.get_conversation(retry_input.conversation_id)
+            session = self.session(
+                conversation,
+                max_iterations=retry_input.max_iterations,
+                top_k=retry_input.top_k,
+                memory_token_limit=retry_input.memory_token_limit,
+                memory_top_k=retry_input.memory_top_k,
+            )
+            await session.start()
+            run = await session.generate_response(
+                retry_input.user_query,
+                retrieval_mode=retry_input.retrieval_mode,
+                retry_of=failed_task,
+            )
+            return run.task
 
         raise RavenError(
             ErrorCode.OPERATION_TASK_NOT_RETRYABLE,

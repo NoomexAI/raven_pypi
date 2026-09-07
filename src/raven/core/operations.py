@@ -71,6 +71,8 @@ class OperationType(StrEnum):
     CONVERSATION_UPDATE = "conversation.update"
     CONVERSATION_GENERATE_TITLE = "conversation.generate_title"
     CONVERSATION_GET_CONTEXT = "conversation.get_context"
+    CONVERSATION_APPEND_TURN = "conversation.append_turn"
+    CONVERSATION_RECONCILE_TURN = "conversation.reconcile_turn"
     CONVERSATION_CREATE = "conversation.create"
     CONVERSATION_UPDATE_METADATA = "conversation.update_metadata"
     CONVERSATION_DELETE = "conversation.delete"
@@ -137,6 +139,14 @@ _RETRY_RULES = {
             ErrorCode.KNOWLEDGE_NOT_FOUND.value,
             ErrorCode.FILE_NOT_FOUND.value,
             ErrorCode.SECTION_NOT_FOUND.value,
+        },
+    ),
+    OperationType.SESSION_GENERATE_RESPONSE.value: RetryRule(
+        policy=RetryPolicy.USER_CONFIRMED,
+        max_attempts=3,
+        retryable_error_codes=_COMMON_RETRYABLE_ERRORS
+        | {
+            ErrorCode.PERSISTENCE_FAILED.value,
         },
     ),
 }

@@ -72,6 +72,16 @@ class AgentHarness:
         self._prompt_cache: dict[str, list[_CachedPrompt]] = {}
 
 
+    @property
+    def max_iterations(self) -> int:
+        return self._max_iterations
+
+
+    @property
+    def top_k(self) -> int:
+        return self._top_k
+
+
     async def start(
         self,
         conversation: Conversation,

@@ -68,6 +68,13 @@ class EventType(StrEnum):
     CONVERSATION_MEMORY_COMPACTION_STARTED = "conversation.memory_compaction.started"
     CONVERSATION_MEMORY_COMPACTION_COMPLETED = "conversation.memory_compaction.completed"
     CONVERSATION_MEMORY_COMPACTION_FAILED = "conversation.memory_compaction.failed"
+    CONVERSATION_TURN_COMMIT_STARTED = "conversation.turn_commit.started"
+    CONVERSATION_TURN_COMMITTED = "conversation.turn_commit.completed"
+    CONVERSATION_TURN_REUSED = "conversation.turn_commit.reused"
+    CONVERSATION_TURN_COMMIT_FAILED = "conversation.turn_commit.failed"
+    CONVERSATION_MEMORY_INDEX_STARTED = "conversation.memory_index.started"
+    CONVERSATION_MEMORY_INDEX_COMPLETED = "conversation.memory_index.completed"
+    CONVERSATION_MEMORY_INDEX_FAILED = "conversation.memory_index.failed"
 
     RETRIEVAL_EMBEDDED_STARTED = "retrieval.embedded.started"
     RETRIEVAL_EMBEDDED_COMPLETED = "retrieval.embedded.completed"
