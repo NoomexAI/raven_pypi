@@ -1027,7 +1027,7 @@ class OperationManager:
             if operation is not None:
                 return operation
 
-        stored_ids = await asyncio.to_thread(self._store.operation_ids_from_disk)
+        stored_ids = await self._store.operation_ids()
         if key not in stored_ids:
             raise RavenError(
                 ErrorCode.OPERATION_NOT_FOUND,

@@ -385,17 +385,13 @@ class SQLiteOperationStore:
             ) from exc
 
 
-    def operation_ids_from_disk(self) -> list[str]:
-        if not self.path.exists():
-            return []
-        try:
-            with sqlite3.connect(self.path, timeout=30.0) as connection:
-                rows = connection.execute(
-                    "SELECT operation_id FROM operations ORDER BY created_at"
-                ).fetchall()
-        except Exception as exc:
-            raise self._database_error("Operation IDs could not be read.") from exc
-        return [str(row[0]) for row in rows]
+    async def operation_ids(self) -> list[str]:
+        await self.start()
+        async with self._lock:
+            try:
+                return await asyncio.to_thread(self._operation_ids)
+            except Exception as exc:
+                raise self._database_error("Operation IDs could not be read.") from exc
 
 
     async def unfinished_operation_ids(self) -> list[str]:
@@ -936,6 +932,13 @@ class SQLiteOperationStore:
         return [str(row["operation_id"]) for row in rows]
 
 
+    def _operation_ids(self) -> list[str]:
+        rows = self._require_connection().execute(
+            "SELECT operation_id FROM operations ORDER BY created_at"
+        ).fetchall()
+        return [str(row["operation_id"]) for row in rows]
+
+
     def _unfinished_operation_ids(self) -> list[str]:
         rows = self._require_connection().execute(
             """
@@ -1299,10 +1302,10 @@ class EventStreamRegistry:
         return stream
 
 
-    def stored_operation_ids(self) -> list[str]:
+    async def stored_operation_ids(self) -> list[str]:
         """Return operation UUIDs persisted in this user's operation database."""
         self._ensure_open()
-        return self._store.operation_ids_from_disk()
+        return await self._store.operation_ids()
 
 
     async def unfinished_operation_ids(self) -> list[str]:
