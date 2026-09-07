@@ -14,7 +14,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .config import EVENT_SYNC_INTERVAL_SECONDS, PathConfig
+from .config import OPERATION_SYNC_INTERVAL_SECONDS, PathConfig
 from .errors import ErrorCode, RavenError
 
 
@@ -185,8 +185,8 @@ class Event(BaseModel):
 
 
 
-class SQLiteEventStore:
-    """Persist one user's operation events in a SQLite database."""
+class SQLiteOperationStore:
+    """Persist one user's operations, tasks, and events in SQLite."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -212,7 +212,7 @@ class SQLiteEventStore:
         if self._closed:
             raise RavenError(
                 ErrorCode.EVENT_STREAM_CLOSED,
-                "Event database is closed.",
+                "Operation database is closed.",
             )
         if self._connection is not None:
             return
@@ -226,8 +226,8 @@ class SQLiteEventStore:
                 raise
             except Exception as exc:
                 raise RavenError(
-                    ErrorCode.EVENT_DATABASE_FAILED,
-                    "The event database could not be opened.",
+                    ErrorCode.OPERATION_DATABASE_FAILED,
+                    "The operation database could not be opened.",
                 ) from exc
 
 
@@ -240,7 +240,7 @@ class SQLiteEventStore:
                 raise
             except Exception as exc:
                 raise RavenError(
-                    ErrorCode.EVENT_DATABASE_FAILED,
+                    ErrorCode.OPERATION_DATABASE_FAILED,
                     "The event could not be persisted.",
                     details={"operation_id": str(event.operation_id)},
                 ) from exc
@@ -299,8 +299,8 @@ class SQLiteEventStore:
             return self._task_from_row(row)
         except Exception as exc:
             raise RavenError(
-                ErrorCode.EVENT_DATABASE_CORRUPTED,
-                "The event database contains an invalid operation task record.",
+                ErrorCode.OPERATION_DATABASE_CORRUPTED,
+                "The operation database contains an invalid task record.",
                 details={"task_id": task_id},
             ) from exc
 
@@ -319,8 +319,8 @@ class SQLiteEventStore:
             return self._task_from_row(row)
         except Exception as exc:
             raise RavenError(
-                ErrorCode.EVENT_DATABASE_CORRUPTED,
-                "The event database contains an invalid retry task record.",
+                ErrorCode.OPERATION_DATABASE_CORRUPTED,
+                "The operation database contains an invalid retry task record.",
                 details={"retry_of_task_id": task_id},
             ) from exc
 
@@ -336,8 +336,8 @@ class SQLiteEventStore:
             return [self._task_from_row(row) for row in rows]
         except Exception as exc:
             raise RavenError(
-                ErrorCode.EVENT_DATABASE_CORRUPTED,
-                "The event database contains an invalid operation task record.",
+                ErrorCode.OPERATION_DATABASE_CORRUPTED,
+                "The operation database contains an invalid task record.",
                 details={"operation_id": operation_id},
             ) from exc
 
@@ -379,8 +379,8 @@ class SQLiteEventStore:
             return [self._event_from_row(row) for row in rows]
         except Exception as exc:
             raise RavenError(
-                ErrorCode.EVENT_DATABASE_CORRUPTED,
-                "The event database contains an invalid event record.",
+                ErrorCode.OPERATION_DATABASE_CORRUPTED,
+                "The operation database contains an invalid event record.",
                 details={"operation_id": operation_id},
             ) from exc
 
@@ -441,8 +441,8 @@ class SQLiteEventStore:
                 await asyncio.to_thread(self._checkpoint)
             except Exception as exc:
                 raise RavenError(
-                    ErrorCode.EVENT_SYNC_FAILED,
-                    "The event database could not be synchronized to durable storage.",
+                    ErrorCode.OPERATION_SYNC_FAILED,
+                    "The operation database could not be synchronized to durable storage.",
                 ) from exc
             self._synced_generation = self._write_generation
             return True
@@ -630,7 +630,7 @@ class SQLiteEventStore:
     def _append(self, event: Event) -> None:
         if event.operation_id is None or event.event_id is None:
             raise RavenError(
-                ErrorCode.EVENT_DATABASE_CORRUPTED,
+                ErrorCode.OPERATION_DATABASE_CORRUPTED,
                 "A persisted event requires operation_id and event_id.",
             )
 
@@ -662,7 +662,7 @@ class SQLiteEventStore:
             if existing is None:
                 if event.event_id != 1:
                     raise RavenError(
-                        ErrorCode.EVENT_DATABASE_CORRUPTED,
+                        ErrorCode.OPERATION_DATABASE_CORRUPTED,
                         "The first persisted event must have event_id 1.",
                         details={"operation_id": operation_id},
                     )
@@ -699,7 +699,7 @@ class SQLiteEventStore:
                 expected_event_id = int(existing["last_event_id"]) + 1
                 if event.event_id != expected_event_id:
                     raise RavenError(
-                        ErrorCode.EVENT_DATABASE_CORRUPTED,
+                        ErrorCode.OPERATION_DATABASE_CORRUPTED,
                         "Event IDs must be contiguous within an operation.",
                         details={
                             "operation_id": operation_id,
@@ -766,7 +766,7 @@ class SQLiteEventStore:
                 )
                 if cursor.rowcount != 1:
                     raise RavenError(
-                        ErrorCode.EVENT_DATABASE_CORRUPTED,
+                        ErrorCode.OPERATION_DATABASE_CORRUPTED,
                         "A task lifecycle event references an unknown operation task.",
                         details={
                             "operation_id": operation_id,
@@ -967,7 +967,7 @@ class SQLiteEventStore:
 
     def _require_connection(self) -> sqlite3.Connection:
         if self._connection is None:
-            raise RuntimeError("Event database is not open.")
+            raise RuntimeError("Operation database is not open.")
         return self._connection
 
 
@@ -1017,7 +1017,7 @@ class SQLiteEventStore:
 
     @staticmethod
     def _database_error(message: str) -> RavenError:
-        return RavenError(ErrorCode.EVENT_DATABASE_FAILED, message)
+        return RavenError(ErrorCode.OPERATION_DATABASE_FAILED, message)
 
 
 
@@ -1027,7 +1027,7 @@ class EventStream:
     def __init__(
         self,
         operation_id: str,
-        store: SQLiteEventStore,
+        store: SQLiteOperationStore,
         health_check: Callable[[], None] | None = None,
         sync_failure: Callable[[RavenError, str | None], Awaitable[None]] | None = None,
     ) -> None:
@@ -1048,46 +1048,6 @@ class EventStream:
     @property
     def is_dirty(self) -> bool:
         return self._last_write_generation > self._store.synced_generation
-
-
-    async def register_task(
-        self,
-        *,
-        task_id: UUID,
-        name: str,
-        is_root: bool,
-        retry_policy: str,
-        retry_input: dict[str, Any] | None,
-        attempt: int,
-        retry_of_operation_id: UUID | None,
-        retry_of_task_id: UUID | None,
-        created_at: datetime,
-    ) -> None:
-        """Persist a task descriptor before its worker starts."""
-        self._ensure_open()
-        self._raise_if_unhealthy()
-        async with self._condition:
-            await self._load()
-            self._last_write_generation = await self._store.register_task(
-                task_id=str(task_id),
-                operation_id=self.operation_id,
-                name=name,
-                is_root=is_root,
-                retry_policy=retry_policy,
-                retry_input=retry_input,
-                attempt=attempt,
-                retry_of_operation_id=(
-                    str(retry_of_operation_id)
-                    if retry_of_operation_id is not None
-                    else None
-                ),
-                retry_of_task_id=(
-                    str(retry_of_task_id)
-                    if retry_of_task_id is not None
-                    else None
-                ),
-                created_at=created_at,
-            )
 
 
     async def publish(self, event: Event) -> Event:
@@ -1266,10 +1226,11 @@ class EventStream:
         except Exception as exc:
             error = (
                 exc
-                if isinstance(exc, RavenError) and exc.code == ErrorCode.EVENT_SYNC_FAILED
+                if isinstance(exc, RavenError)
+                and exc.code == ErrorCode.OPERATION_SYNC_FAILED
                 else RavenError(
-                    ErrorCode.EVENT_SYNC_FAILED,
-                    "The event database could not be synchronized to durable storage.",
+                    ErrorCode.OPERATION_SYNC_FAILED,
+                    "The operation database could not be synchronized to durable storage.",
                 )
             )
             self._sync_error = error
@@ -1281,25 +1242,25 @@ class EventStream:
 
 
 class EventStreamRegistry:
-    """Own one user's SQLite event store and operation streams."""
+    """Own one user's event streams over a shared operation store."""
 
     def __init__(
         self,
         paths: PathConfig,
         *,
-        sync_interval: float = EVENT_SYNC_INTERVAL_SECONDS,
+        sync_interval: float = OPERATION_SYNC_INTERVAL_SECONDS,
     ) -> None:
         if sync_interval <= 0:
             raise RavenError(
-                ErrorCode.INVALID_EVENT_SYNC_INTERVAL,
-                "Event synchronization interval must be greater than zero.",
+                ErrorCode.INVALID_OPERATION_SYNC_INTERVAL,
+                "Operation synchronization interval must be greater than zero.",
             )
-        self.storage_dir = paths.event_storage_dir
-        self.database_path = paths.event_database_path
+        self.storage_dir = paths.operation_storage_dir
+        self.database_path = paths.operation_database_path
         self.sync_interval = sync_interval
-        self._store = SQLiteEventStore(self.database_path)
+        self._store = SQLiteOperationStore(self.database_path)
         self._streams: dict[str, EventStream] = {}
-        self._sync_service = EventSyncService(self, sync_interval)
+        self._sync_service = OperationSyncService(self, sync_interval)
         self._sync_error: RavenError | None = None
         self._closed = False
 
@@ -1309,8 +1270,13 @@ class EventStreamRegistry:
         return self._sync_error is None
 
 
+    @property
+    def operation_store(self) -> SQLiteOperationStore:
+        return self._store
+
+
     async def start(self) -> None:
-        """Open the event database and start periodic checkpoints."""
+        """Open the operation database and start periodic checkpoints."""
         self._ensure_open()
         self._ensure_sync_healthy()
         await self._store.start()
@@ -1334,7 +1300,7 @@ class EventStreamRegistry:
 
 
     def stored_operation_ids(self) -> list[str]:
-        """Return operation UUIDs persisted in this user's event database."""
+        """Return operation UUIDs persisted in this user's operation database."""
         self._ensure_open()
         return self._store.operation_ids_from_disk()
 
@@ -1343,24 +1309,6 @@ class EventStreamRegistry:
         """Return operation UUIDs that do not have a terminal event."""
         self._ensure_open()
         return await self._store.unfinished_operation_ids()
-
-
-    async def task_record(self, task_id: str) -> dict[str, Any] | None:
-        """Return one persisted task descriptor and its current state."""
-        self._ensure_open()
-        return await self._store.read_task(task_id)
-
-
-    async def retry_record(self, task_id: str) -> dict[str, Any] | None:
-        """Return the direct retry of a persisted task, if one exists."""
-        self._ensure_open()
-        return await self._store.read_retry(task_id)
-
-
-    async def unfinished_tasks(self, operation_id: str) -> list[dict[str, Any]]:
-        """Return non-terminal tasks belonging to an operation."""
-        self._ensure_open()
-        return await self._store.unfinished_tasks(operation_id)
 
 
     async def expired_operation_ids(self, cutoff: datetime) -> list[str]:
@@ -1376,7 +1324,7 @@ class EventStreamRegistry:
 
 
     async def sync_dirty(self) -> list[str]:
-        """Checkpoint dirty event data and return affected active operation IDs."""
+        """Checkpoint dirty operation data and return affected operation IDs."""
         self._ensure_open()
         self._ensure_sync_healthy()
         dirty_operation_ids = [
@@ -1396,7 +1344,7 @@ class EventStreamRegistry:
 
 
     async def close(self) -> None:
-        """Checkpoint and close this user's event database and active streams."""
+        """Checkpoint and close this user's operation database and event streams."""
         if self._closed:
             return
 
@@ -1464,8 +1412,8 @@ class EventStreamRegistry:
 
 
 
-class EventSyncService:
-    """Periodically checkpoint one user's dirty SQLite event store."""
+class OperationSyncService:
+    """Periodically checkpoint one user's dirty operation database."""
 
     def __init__(self, registry: EventStreamRegistry, interval: float) -> None:
         self._registry = registry
@@ -1485,7 +1433,7 @@ class EventSyncService:
             return
         self._task = asyncio.create_task(
             self._run(),
-            name="raven-event-sync",
+            name="raven-operation-sync",
         )
 
 
@@ -1515,8 +1463,8 @@ class EventSyncService:
 
 
 
-class EventCleanupService:
-    """Delete finished operation events after a configured retention period."""
+class OperationCleanupService:
+    """Delete finished operations after a configured retention period."""
 
     def __init__(self, registry: EventStreamRegistry, retention: timedelta) -> None:
         if retention < timedelta(0):

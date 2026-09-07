@@ -16,7 +16,13 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, ConfigDict
 
 from .errors import ErrorCode, RavenError, error_payload
-from .events import Event, EventStream, EventStreamRegistry, EventType
+from .events import (
+    Event,
+    EventStream,
+    EventStreamRegistry,
+    EventType,
+    SQLiteOperationStore,
+)
 
 
 
@@ -105,8 +111,8 @@ _COMMON_RETRYABLE_ERRORS = frozenset(
     {
         ErrorCode.OPERATION_INTERRUPTED.value,
         ErrorCode.INTERNAL_ERROR.value,
-        ErrorCode.EVENT_SYNC_FAILED.value,
-        ErrorCode.EVENT_DATABASE_FAILED.value,
+        ErrorCode.OPERATION_SYNC_FAILED.value,
+        ErrorCode.OPERATION_DATABASE_FAILED.value,
         ErrorCode.MODEL_PROVIDER_FAILED.value,
         ErrorCode.OLLAMA_UNAVAILABLE.value,
         ErrorCode.OLLAMA_OPERATION_FAILED.value,
@@ -232,12 +238,14 @@ class Operation:
         operation_id: UUID,
         name: str,
         stream: EventStream,
+        store: SQLiteOperationStore,
         *,
         created_at: datetime | None = None,
     ) -> None:
         self.operation_id = operation_id
         self.name = name
         self._stream = stream
+        self._store = store
         self._created_at = created_at or datetime.now(timezone.utc)
         self._started_at: datetime | None = None
         self._finished_at: datetime | None = None
@@ -293,6 +301,31 @@ class Operation:
     @property
     def tasks(self) -> tuple["OperationTask", ...]:
         return tuple(self._child_tasks.values())
+
+
+    async def get_task(self, task_id: UUID | str) -> OperationTaskRecord:
+        """Load one durable task record owned by this operation."""
+        parsed_id = self._parse_task_id(task_id)
+        record = await self._store.read_task(str(parsed_id))
+        if record is None or str(record.get("operation_id")) != str(self.operation_id):
+            raise RavenError(
+                ErrorCode.OPERATION_TASK_NOT_FOUND,
+                f"Operation task '{parsed_id}' was not found in operation "
+                f"'{self.operation_id}'.",
+            )
+        return OperationTaskRecord.model_validate(record)
+
+
+    async def get_retry(
+        self,
+        task_id: UUID | str,
+    ) -> OperationTaskRecord | None:
+        """Return the direct retry of one task owned by this operation."""
+        task = await self.get_task(task_id)
+        record = await self._store.read_retry(str(task.task_id))
+        if record is None:
+            return None
+        return OperationTaskRecord.model_validate(record)
 
 
     async def run(
@@ -557,6 +590,29 @@ class Operation:
         return True
 
 
+    async def _recover_interrupted_tasks(self) -> None:
+        """Finalize persisted non-terminal tasks owned by this operation."""
+        records = await self._store.unfinished_tasks(str(self.operation_id))
+        interruption = RavenError(
+            ErrorCode.OPERATION_INTERRUPTED,
+            "The operation task was interrupted by a previous process termination.",
+        )
+        for record in records:
+            await self.publish(
+                Event(
+                    type=EventType.OPERATION_TASK_FAILED,
+                    task_id=UUID(str(record["task_id"])),
+                    task_name=str(record["name"]),
+                    data={
+                        "name": str(record["name"]),
+                        "error": interruption.as_payload(),
+                        "previous_status": str(record["status"]),
+                        "recovered_after_restart": True,
+                    },
+                )
+            )
+
+
     async def _finish(
         self,
         *,
@@ -591,6 +647,7 @@ class Operation:
         cls,
         operation_id: UUID,
         stream: EventStream,
+        store: SQLiteOperationStore,
         events: list[Event],
     ) -> "Operation":
         """Reconstruct a root operation from its persisted event history."""
@@ -612,6 +669,7 @@ class Operation:
             operation_id=operation_id,
             name=name,
             stream=stream,
+            store=store,
             created_at=events[0].timestamp,
         )
         operation._restore(events)
@@ -620,6 +678,43 @@ class Operation:
 
     def _register_task(self, task: "OperationTask") -> None:
         self._child_tasks[task.task_id] = task
+
+
+    async def _persist_task(self, task: "OperationTask") -> None:
+        """Persist one owned task before its worker starts."""
+        await self._store.register_task(
+            task_id=str(task.task_id),
+            operation_id=str(self.operation_id),
+            name=task.name,
+            is_root=task.is_root,
+            retry_policy=task.retry_policy.value,
+            retry_input=task.retry_input,
+            attempt=task.attempt,
+            retry_of_operation_id=(
+                str(task.retry_of_operation_id)
+                if task.retry_of_operation_id is not None
+                else None
+            ),
+            retry_of_task_id=(
+                str(task.retry_of_task_id)
+                if task.retry_of_task_id is not None
+                else None
+            ),
+            created_at=task._created_at,
+        )
+        if task.retry_policy != RetryPolicy.NEVER and task.retry_input is not None:
+            await self._stream.sync()
+
+
+    @staticmethod
+    def _parse_task_id(task_id: UUID | str) -> UUID:
+        try:
+            return task_id if isinstance(task_id, UUID) else UUID(task_id)
+        except (TypeError, ValueError) as exc:
+            raise RavenError(
+                ErrorCode.OPERATION_TASK_NOT_FOUND,
+                "task_id must be a valid UUID.",
+            ) from exc
 
 
     def _restore(self, events: list[Event]) -> None:
@@ -737,19 +832,7 @@ class OperationTask:
 
 
     async def _persist(self) -> None:
-        await self.operation._stream.register_task(
-            task_id=self.task_id,
-            name=self.name,
-            is_root=self._root,
-            retry_policy=self._retry_policy.value,
-            retry_input=self._retry_input,
-            attempt=self._attempt,
-            retry_of_operation_id=self._retry_of_operation_id,
-            retry_of_task_id=self._retry_of_task_id,
-            created_at=self._created_at,
-        )
-        if self._retry_policy != RetryPolicy.NEVER and self._retry_input is not None:
-            await self.operation._stream.sync()
+        await self.operation._persist_task(self)
 
 
     async def start(self) -> None:
@@ -855,10 +938,11 @@ class OperationTask:
 
 
 class OperationManager:
-    """Create root operations and execute correlated child tasks."""
+    """Create, recover, load, and manage root operations."""
 
     def __init__(self, registry: EventStreamRegistry) -> None:
         self._registry = registry
+        self._store = registry.operation_store
         self._operations: dict[str, Operation] = {}
         self._lock = asyncio.Lock()
         self._recovery_lock = asyncio.Lock()
@@ -870,7 +954,7 @@ class OperationManager:
         async with self._recovery_lock:
             self._ensure_open()
             await self._registry.start()
-            unfinished_ids = await self._registry.unfinished_operation_ids()
+            unfinished_ids = await self._store.unfinished_operation_ids()
             recovered: list[Operation] = []
 
             for stored_id in unfinished_ids:
@@ -888,46 +972,19 @@ class OperationManager:
                 operation = Operation.from_events(
                     operation_id=operation_id,
                     stream=stream,
+                    store=self._store,
                     events=events,
                 )
                 if operation.is_finished:
                     continue
 
-                await self._recover_interrupted_tasks(operation)
+                await operation._recover_interrupted_tasks()
                 await operation._recover_interrupted()
                 async with self._lock:
                     self._operations.setdefault(key, operation)
                 recovered.append(operation)
 
             return recovered
-
-
-    async def get_task(self, task_id: UUID | str) -> OperationTaskRecord:
-        """Load the durable record for one operation task."""
-        self._ensure_open()
-        await self._registry.start()
-        parsed_id = self._parse_task_id(task_id)
-        record = await self._registry.task_record(str(parsed_id))
-        if record is None:
-            raise RavenError(
-                ErrorCode.OPERATION_TASK_NOT_FOUND,
-                f"Operation task '{parsed_id}' was not found.",
-            )
-        return OperationTaskRecord.model_validate(record)
-
-
-    async def get_retry(
-        self,
-        task_id: UUID | str,
-    ) -> OperationTaskRecord | None:
-        """Return the direct retry created from a task, if one exists."""
-        self._ensure_open()
-        await self._registry.start()
-        parsed_id = self._parse_task_id(task_id)
-        record = await self._registry.retry_record(str(parsed_id))
-        if record is None:
-            return None
-        return OperationTaskRecord.model_validate(record)
 
 
     async def create(self, name: str) -> Operation:
@@ -947,6 +1004,7 @@ class OperationManager:
                 operation_id=operation_id,
                 name=name,
                 stream=self._registry.get(key),
+                store=self._store,
             )
             self._operations[key] = operation
 
@@ -959,28 +1017,6 @@ class OperationManager:
         return operation
 
 
-    async def _recover_interrupted_tasks(self, operation: Operation) -> None:
-        records = await self._registry.unfinished_tasks(str(operation.operation_id))
-        interruption = RavenError(
-            ErrorCode.OPERATION_INTERRUPTED,
-            "The operation task was interrupted by a previous process termination.",
-        )
-        for record in records:
-            await operation.publish(
-                Event(
-                    type=EventType.OPERATION_TASK_FAILED,
-                    task_id=UUID(str(record["task_id"])),
-                    task_name=str(record["name"]),
-                    data={
-                        "name": str(record["name"]),
-                        "error": interruption.as_payload(),
-                        "previous_status": str(record["status"]),
-                        "recovered_after_restart": True,
-                    },
-                )
-            )
-
-
     async def get(self, operation_id: UUID | str) -> Operation:
         self._ensure_open()
         await self._registry.start()
@@ -991,7 +1027,7 @@ class OperationManager:
             if operation is not None:
                 return operation
 
-        stored_ids = await asyncio.to_thread(self._registry.stored_operation_ids)
+        stored_ids = await asyncio.to_thread(self._store.operation_ids_from_disk)
         if key not in stored_ids:
             raise RavenError(
                 ErrorCode.OPERATION_NOT_FOUND,
@@ -1001,6 +1037,7 @@ class OperationManager:
         operation = Operation.from_events(
             operation_id=parsed_id,
             stream=stream,
+            store=self._store,
             events=await stream.read(),
         )
         async with self._lock:
@@ -1065,17 +1102,6 @@ class OperationManager:
             raise RavenError(
                 ErrorCode.INVALID_OPERATION_ID,
                 "operation_id must be a valid UUID.",
-            ) from exc
-
-
-    @staticmethod
-    def _parse_task_id(task_id: UUID | str) -> UUID:
-        try:
-            return task_id if isinstance(task_id, UUID) else UUID(task_id)
-        except (TypeError, ValueError) as exc:
-            raise RavenError(
-                ErrorCode.OPERATION_TASK_NOT_FOUND,
-                "task_id must be a valid UUID.",
             ) from exc
 
 

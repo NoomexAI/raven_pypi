@@ -8,7 +8,7 @@ from uuid import UUID
 
 
 DEFAULT_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
-EVENT_SYNC_INTERVAL_SECONDS = 1.0
+OPERATION_SYNC_INTERVAL_SECONDS = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,13 +43,13 @@ class PathConfig:
 
 
     @property
-    def event_storage_dir(self) -> Path:
-        return self.user_root / "events"
+    def operation_storage_dir(self) -> Path:
+        return self.user_root / "operations"
 
 
     @property
-    def event_database_path(self) -> Path:
-        return self.event_storage_dir / "events.sqlite3"
+    def operation_database_path(self) -> Path:
+        return self.operation_storage_dir / "operations.sqlite3"
 
 
     @property

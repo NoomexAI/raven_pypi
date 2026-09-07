@@ -20,7 +20,6 @@ from ..core.operations import (
     Operation,
     OperationManager,
     OperationTask,
-    OperationTaskRecord,
     OperationType,
     OperationWorker,
     TaskWorker,
@@ -124,19 +123,24 @@ class Raven:
         return await self.operation_manager.get(operation_id)
 
 
-    async def get_operation_task(self, task_id: UUID | str) -> OperationTaskRecord:
-        return await self.operation_manager.get_task(task_id)
-
-
-    async def retry_task(self, task_id: UUID | str) -> OperationTask:
+    async def retry_task(
+        self,
+        operation_id: UUID | str,
+        task_id: UUID | str,
+    ) -> OperationTask:
         """Start a user-confirmed retry as a new linked operation."""
         async with self._retry_lock:
-            return await self._retry_task(task_id)
+            return await self._retry_task(operation_id, task_id)
 
 
-    async def _retry_task(self, task_id: UUID | str) -> OperationTask:
-        failed_task = await self.operation_manager.get_task(task_id)
-        existing_retry = await self.operation_manager.get_retry(task_id)
+    async def _retry_task(
+        self,
+        operation_id: UUID | str,
+        task_id: UUID | str,
+    ) -> OperationTask:
+        operation = await self.operation_manager.get(operation_id)
+        failed_task = await operation.get_task(task_id)
+        existing_retry = await operation.get_retry(task_id)
         if existing_retry is not None:
             raise RavenError(
                 ErrorCode.OPERATION_TASK_ALREADY_RETRIED,
