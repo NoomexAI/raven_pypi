@@ -15,7 +15,7 @@ from ..agent.harness import AgentHarness
 from ..agent.policy import GLOBAL_RETRIEVAL_MODES, LOCAL_RETRIEVAL_MODES, RetrievalMode
 from ..core.config import PathConfig
 from ..core.errors import ErrorCode, RavenError
-from ..core.events import Event, EventStreamRegistry
+from ..core.events import Event
 from ..core.operations import (
     Operation,
     OperationManager,
@@ -53,8 +53,7 @@ class Raven:
         self.llm: Any | None = None
         self.embed_model: Any | None = None
 
-        self.event_streams = EventStreamRegistry(self.paths)
-        self.operation_manager = OperationManager(self.event_streams)
+        self.operation_manager = OperationManager(self.paths)
         self.provider = Provider(operation_manager=self.operation_manager)
         self.knowledge_base = KnowledgeBase(self.paths, self.operation_manager)
         self.conversation_manager = ConversationManager(

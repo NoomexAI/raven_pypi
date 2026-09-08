@@ -8,21 +8,21 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict
 
+from .config import OPERATION_SYNC_INTERVAL_SECONDS, PathConfig
 from .errors import ErrorCode, RavenError, error_payload
 from .events import (
     Event,
     EventStream,
-    EventStreamRegistry,
     EventType,
-    SQLiteOperationStore,
 )
+from .operation_store import SQLiteOperationStore
 
 
 
@@ -938,22 +938,55 @@ class OperationTask:
 
 
 class OperationManager:
-    """Create, recover, load, and manage root operations."""
+    """Own operation persistence, streams, lifecycle, and recovery."""
 
-    def __init__(self, registry: EventStreamRegistry) -> None:
-        self._registry = registry
-        self._store = registry.operation_store
+    def __init__(
+        self,
+        paths: PathConfig,
+        *,
+        sync_interval: float = OPERATION_SYNC_INTERVAL_SECONDS,
+    ) -> None:
+        if sync_interval <= 0:
+            raise RavenError(
+                ErrorCode.INVALID_OPERATION_SYNC_INTERVAL,
+                "Operation synchronization interval must be greater than zero.",
+            )
+        self.storage_dir = paths.operation_storage_dir
+        self.database_path = paths.operation_database_path
+        self.sync_interval = sync_interval
+        self._store = SQLiteOperationStore(self.database_path)
         self._operations: dict[str, Operation] = {}
+        self._sync_service = OperationSyncService(self, sync_interval)
+        self._sync_error: RavenError | None = None
         self._lock = asyncio.Lock()
         self._recovery_lock = asyncio.Lock()
+        self._lifecycle_lock = asyncio.Lock()
+        self._started = False
         self._closed = False
+
+
+    @property
+    def is_healthy(self) -> bool:
+        return self._sync_error is None
+
+
+    async def start(self) -> None:
+        """Open operation storage and start periodic durable checkpoints."""
+        async with self._lifecycle_lock:
+            self._ensure_open()
+            self._ensure_sync_healthy()
+            if self._started:
+                return
+            await self._store.start()
+            await self._sync_service.start()
+            self._started = True
 
 
     async def recover(self) -> list[Operation]:
         """Finalize persisted non-terminal operations left by an earlier process."""
         async with self._recovery_lock:
             self._ensure_open()
-            await self._registry.start()
+            await self.start()
             unfinished_ids = await self._store.unfinished_operation_ids()
             recovered: list[Operation] = []
 
@@ -964,7 +997,7 @@ class OperationManager:
                     if key in self._operations:
                         continue
 
-                stream = self._registry.get(stored_id)
+                stream = self._create_stream(stored_id)
                 events = await stream.read()
                 if not events:
                     continue
@@ -995,7 +1028,7 @@ class OperationManager:
                 "Operation name cannot be empty.",
             )
         self._ensure_open()
-        await self._registry.start()
+        await self.start()
         operation_id = uuid4()
         key = str(operation_id)
         async with self._lock:
@@ -1003,7 +1036,7 @@ class OperationManager:
             operation = Operation(
                 operation_id=operation_id,
                 name=name,
-                stream=self._registry.get(key),
+                stream=self._create_stream(key),
                 store=self._store,
             )
             self._operations[key] = operation
@@ -1019,7 +1052,7 @@ class OperationManager:
 
     async def get(self, operation_id: UUID | str) -> Operation:
         self._ensure_open()
-        await self._registry.start()
+        await self.start()
         parsed_id = self._parse_operation_id(operation_id)
         key = str(parsed_id)
         async with self._lock:
@@ -1033,7 +1066,7 @@ class OperationManager:
                 ErrorCode.OPERATION_NOT_FOUND,
                 f"Operation '{key}' was not found.",
             )
-        stream = self._registry.get(key)
+        stream = self._create_stream(key)
         operation = Operation.from_events(
             operation_id=parsed_id,
             stream=stream,
@@ -1065,6 +1098,41 @@ class OperationManager:
             yield event
 
 
+    async def stored_operation_ids(self) -> list[str]:
+        """Return every operation ID persisted for this user."""
+        self._ensure_open()
+        await self.start()
+        return await self._store.operation_ids()
+
+
+    async def unfinished_operation_ids(self) -> list[str]:
+        """Return persisted operations without a terminal event."""
+        self._ensure_open()
+        await self.start()
+        return await self._store.unfinished_operation_ids()
+
+
+    async def sync_dirty(self) -> list[str]:
+        """Checkpoint dirty operation data and return affected loaded IDs."""
+        self._ensure_open()
+        self._ensure_sync_healthy()
+        async with self._lock:
+            dirty_operation_ids = [
+                operation_id
+                for operation_id, operation in self._operations.items()
+                if operation._stream.is_dirty
+            ]
+        if not self._store.is_dirty:
+            return []
+
+        try:
+            await self._store.checkpoint()
+        except RavenError as exc:
+            await self._record_sync_failure(exc)
+            raise
+        return dirty_operation_ids
+
+
     async def cancel_active(self) -> None:
         """Cancel and await active operations without closing event storage."""
         async with self._lock:
@@ -1085,13 +1153,91 @@ class OperationManager:
 
 
     async def close(self) -> None:
-        async with self._lock:
+        async with self._lifecycle_lock:
             if self._closed:
                 return
             self._closed = True
 
         await self.cancel_active()
-        await self._registry.close()
+        await self._sync_service.close()
+
+        close_error: BaseException | None = None
+        if self._store.is_dirty:
+            try:
+                await self._store.checkpoint()
+            except BaseException as exc:
+                close_error = exc
+
+        async with self._lock:
+            streams = [operation._stream for operation in self._operations.values()]
+        stream_results = await asyncio.gather(
+            *(stream.close() for stream in streams),
+            return_exceptions=True,
+        )
+        await self._store.close()
+
+        if close_error is not None:
+            raise close_error
+        for result in stream_results:
+            if isinstance(result, BaseException):
+                raise result
+
+
+    def _create_stream(self, operation_id: str) -> EventStream:
+        return EventStream(
+            operation_id=operation_id,
+            store=self._store,
+            health_check=self._ensure_sync_healthy,
+            sync_failure=self._record_sync_failure,
+        )
+
+
+    async def _delete_finished(self, operation_id: str) -> None:
+        async with self._lock:
+            operation = self._operations.get(operation_id)
+
+        if operation is None:
+            await self._store.delete(operation_id)
+        else:
+            if not operation.is_finished:
+                raise RuntimeError(
+                    f"operation '{operation_id}' cannot be deleted before it finishes"
+                )
+            await operation._stream.close()
+            await self._store.delete(operation_id)
+            async with self._lock:
+                if self._operations.get(operation_id) is operation:
+                    self._operations.pop(operation_id, None)
+
+
+    async def _expired_operation_ids(self, cutoff: datetime) -> list[str]:
+        self._ensure_open()
+        await self.start()
+        return await self._store.expired_operation_ids(cutoff)
+
+
+    async def _record_sync_failure(
+        self,
+        error: RavenError,
+        source_operation_id: str | None = None,
+    ) -> None:
+        if self._sync_error is None:
+            self._sync_error = error
+        active_error = self._sync_error or error
+        async with self._lock:
+            streams = [
+                operation._stream
+                for operation in self._operations.values()
+                if str(operation.operation_id) != source_operation_id
+            ]
+        await asyncio.gather(
+            *(stream.mark_sync_failed(active_error) for stream in streams)
+        )
+
+
+    def _ensure_sync_healthy(self) -> None:
+        if self._sync_error is not None:
+            raise self._sync_error
 
 
     @staticmethod
@@ -1111,3 +1257,81 @@ class OperationManager:
                 ErrorCode.OPERATION_MANAGER_CLOSED,
                 "Operation manager is closed.",
             )
+
+
+
+class OperationSyncService:
+    """Periodically checkpoint one manager's dirty operation database."""
+
+    def __init__(self, manager: OperationManager, interval: float) -> None:
+        self._manager = manager
+        self.interval = interval
+        self._stop = asyncio.Event()
+        self._task: asyncio.Task[None] | None = None
+        self._closed = False
+
+
+    async def start(self) -> None:
+        if self._closed:
+            raise RavenError(
+                ErrorCode.OPERATION_MANAGER_CLOSED,
+                "Operation synchronization service is closed.",
+            )
+        if self._task is not None:
+            return
+        self._task = asyncio.create_task(
+            self._run(),
+            name="raven-operation-sync",
+        )
+
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._stop.set()
+        if self._task is not None:
+            await asyncio.gather(self._task, return_exceptions=True)
+
+
+    async def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self.interval)
+            except TimeoutError:
+                pass
+
+            if self._stop.is_set():
+                return
+
+            try:
+                await self._manager.sync_dirty()
+            except RavenError:
+                return
+
+
+
+class OperationCleanupService:
+    """Delete finished operations after a configured retention period."""
+
+    def __init__(self, manager: OperationManager, retention: timedelta) -> None:
+        if retention < timedelta(0):
+            raise RavenError(
+                ErrorCode.INVALID_RETENTION,
+                "retention cannot be negative.",
+            )
+        self._manager = manager
+        self.retention = retention
+
+
+    async def run_once(self, now: datetime | None = None) -> list[str]:
+        """Delete expired operations and return their IDs."""
+        current_time = now or datetime.now(timezone.utc)
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=timezone.utc)
+        cutoff = current_time.astimezone(timezone.utc) - self.retention
+        operation_ids = await self._manager._expired_operation_ids(cutoff)
+
+        for operation_id in operation_ids:
+            await self._manager._delete_finished(operation_id)
+        return operation_ids

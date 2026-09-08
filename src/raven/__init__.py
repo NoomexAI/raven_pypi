@@ -1,9 +1,10 @@
 """RAVEN's public library API."""
 
 from .agent import AgentHarness, AgentPolicy
-from .core.events import Event, EventStream, EventStreamRegistry, EventType
+from .core.events import Event, EventStream, EventType
 from .core.operations import (
     Operation,
+    OperationCleanupService,
     OperationManager,
     OperationStatus,
     OperationTask,
@@ -49,7 +50,6 @@ __all__ = [
     "EmbeddedRetrievalPipeline",
     "Event",
     "EventStream",
-    "EventStreamRegistry",
     "EventType",
     "HierarchicalRetrievalPipeline",
     "IngestionPipeline",
@@ -61,6 +61,7 @@ __all__ = [
     "NavigationType",
     "OllamaManager",
     "Operation",
+    "OperationCleanupService",
     "OperationManager",
     "OperationStatus",
     "OperationTask",
