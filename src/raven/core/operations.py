@@ -71,6 +71,7 @@ class OperationType(StrEnum):
     RETRIEVAL_VECTOR_CONDITIONED_GLOBAL = "retrieval.vector_conditioned.global"
 
     RECONSTRUCTION_RECONSTRUCT = "reconstruction.reconstruct"
+    RECONSTRUCTION_FROM_TURN = "reconstruction.from_turn"
 
     CONVERSATION_SAVE_PREFERENCE = "conversation.save_preference"
     CONVERSATION_REMOVE_PREFERENCE = "conversation.remove_preference"

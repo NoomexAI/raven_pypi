@@ -174,6 +174,7 @@ class _ConversationMessageStore:
 
 
     def get_turn_messages(self, turn_id: str) -> list[ChatMessage]:
+        """Return the canonical messages belonging to one committed turn."""
         with self._lock:
             rows = self._require_connection().execute(
                 """
@@ -741,6 +742,28 @@ class Conversation:
         """Return the complete stored chat history without applying a window."""
         self._ensure_started()
         return await asyncio.to_thread(self._message_store.list_messages)
+
+
+    async def get_turn_messages(
+        self,
+        turn_id: UUID | str,
+    ) -> list[ChatMessage]:
+        """Return only the canonical messages committed under ``turn_id``."""
+        self._ensure_started()
+        normalized_turn_id = self._validate_turn_id(turn_id)
+        turn = await asyncio.to_thread(
+            self._message_store.get_turn,
+            normalized_turn_id,
+        )
+        if turn is None:
+            raise RavenError(
+                ErrorCode.CONVERSATION_TURN_NOT_FOUND,
+                f"Turn '{normalized_turn_id}' does not exist.",
+            )
+        return await asyncio.to_thread(
+            self._message_store.get_turn_messages,
+            normalized_turn_id,
+        )
 
 
     async def search_memory(self, query: str) -> list[ChatMessage]:

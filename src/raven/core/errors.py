@@ -23,6 +23,7 @@ class ErrorCode(StrEnum):
     CONVERSATION_TURN_CONFLICT = "conversation_turn_conflict"
     CONVERSATION_TURN_NOT_FOUND = "conversation_turn_not_found"
     CONVERSATION_TURN_RESULT_MISSING = "conversation_turn_result_missing"
+    RECONSTRUCTION_EVIDENCE_NOT_FOUND = "reconstruction_evidence_not_found"
     CONVERSATION_SESSION_ACTIVE = "conversation_session_active"
     CONVERSATION_SESSION_CONFIGURATION_CONFLICT = (
         "conversation_session_configuration_conflict"

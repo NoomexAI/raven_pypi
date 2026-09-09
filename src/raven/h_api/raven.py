@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -10,6 +11,8 @@ from typing import Any
 from uuid import UUID
 
 from pydantic import ValidationError
+from llama_index.core.base.llms.types import MessageRole
+from llama_index.core.llms import ChatMessage
 
 from ..agent.contracts import RetrievalPipelines
 from ..agent.harness import AgentHarness
@@ -683,6 +686,101 @@ class Raven:
             retrieval_result,
             operation=operation,
         )
+
+
+    async def reconstruct_from_turn(
+        self,
+        conversation_id: str,
+        turn_id: UUID | str,
+        *,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        """Reconstruct sources from evidence persisted in one conversation turn."""
+        active_operation = operation or await self.operation_manager.create(
+            OperationType.RECONSTRUCTION_FROM_TURN
+        )
+        return await active_operation.run(
+            OperationType.RECONSTRUCTION_FROM_TURN,
+            lambda active_operation: self._reconstruct_from_turn(
+                conversation_id,
+                turn_id,
+                operation=active_operation,
+            ),
+        )
+
+
+    async def _reconstruct_from_turn(
+        self,
+        conversation_id: str,
+        turn_id: UUID | str,
+        *,
+        operation: Operation,
+    ) -> list[dict[str, Any]]:
+        conversation = self.get_conversation(conversation_id)
+        messages = await conversation.get_turn_messages(turn_id)
+        evidence = self._reconstruction_evidence(messages)
+        if not evidence:
+            raise RavenError(
+                ErrorCode.RECONSTRUCTION_EVIDENCE_NOT_FOUND,
+                f"Turn '{turn_id}' contains no reconstructable source evidence.",
+                details={
+                    "conversation_id": conversation_id,
+                    "turn_id": str(turn_id),
+                },
+            )
+
+        reconstruction_task = await self.reconstructor.reconstruct(
+            evidence,
+            operation=operation,
+        )
+        return await reconstruction_task.result()
+
+
+    @staticmethod
+    def _reconstruction_evidence(
+        messages: list[ChatMessage],
+    ) -> list[dict[str, str]]:
+        evidence: list[dict[str, str]] = []
+        seen: set[tuple[str, str, str]] = set()
+
+        for message in messages:
+            if message.role != MessageRole.TOOL or not isinstance(message.content, str):
+                continue
+            try:
+                payload = json.loads(message.content)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict) or payload.get("ok") is not True:
+                continue
+            references = payload.get("evidence")
+            if not isinstance(references, list):
+                continue
+
+            for reference in references:
+                if not isinstance(reference, dict):
+                    continue
+                knowledge_name = reference.get("knowledge_name")
+                file_name = reference.get("file_name")
+                section_id = reference.get("section_id")
+                if not isinstance(knowledge_name, str) or not knowledge_name:
+                    continue
+                if not isinstance(file_name, str) or not file_name:
+                    continue
+                if not isinstance(section_id, str) or not section_id:
+                    continue
+                key = (knowledge_name, file_name, section_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                evidence.append(
+                    {
+                        "knowledge_name": knowledge_name,
+                        "file_name": file_name,
+                        "section_id": section_id,
+                    }
+                )
+
+        return evidence
 
 
     async def create_conversation(
