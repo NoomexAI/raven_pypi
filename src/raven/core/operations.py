@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
@@ -15,7 +16,12 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict
 
-from .config import OPERATION_SYNC_INTERVAL_SECONDS, PathConfig
+from .config import (
+    DEFAULT_FINISHED_OPERATION_CACHE_SIZE,
+    DEFAULT_OPERATION_PAGE_SIZE,
+    OPERATION_SYNC_INTERVAL_SECONDS,
+    PathConfig,
+)
 from .errors import ErrorCode, RavenError, error_payload
 from .events import (
     Event,
@@ -215,6 +221,27 @@ class OperationTaskRecord(BaseModel):
         )
 
 
+
+class OperationRecord(BaseModel):
+    """Durable operation state suitable for history and status discovery."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    operation_id: UUID
+    name: str
+    status: OperationStatus
+    last_event_id: int
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    error: dict[str, Any] | None
+
+
+    @property
+    def is_finished(self) -> bool:
+        return self.status in _TERMINAL_STATUSES
+
+
 OperationWorker = Callable[["Operation"], Awaitable[Any]]
 TaskWorker = Callable[["Operation"], Awaitable[Any]]
 _TERMINAL_STATUSES = frozenset(
@@ -242,6 +269,7 @@ class Operation:
         store: SQLiteOperationStore,
         *,
         created_at: datetime | None = None,
+        on_finished: Callable[["Operation"], None] | None = None,
     ) -> None:
         self.operation_id = operation_id
         self.name = name
@@ -258,6 +286,7 @@ class Operation:
         self._child_tasks: dict[UUID, OperationTask] = {}
         self._terminal_exception: BaseException | None = None
         self._restored = False
+        self._on_finished = on_finished
         self._lock = asyncio.Lock()
 
 
@@ -329,6 +358,38 @@ class Operation:
         if record is None:
             return None
         return OperationTaskRecord.model_validate(record)
+
+
+    async def list_tasks(
+        self,
+        *,
+        status: OperationStatus | str | None = None,
+        limit: int = DEFAULT_OPERATION_PAGE_SIZE,
+        after_task_id: UUID | str | None = None,
+    ) -> list[OperationTaskRecord]:
+        """List this operation's durable tasks in newest-first order."""
+        parsed_status = self._parse_status(status)
+        parsed_cursor: UUID | None = None
+        if after_task_id is not None:
+            parsed_cursor = self._parse_task_id(after_task_id)
+            cursor = await self._store.read_task(str(parsed_cursor))
+            if (
+                cursor is None
+                or str(cursor.get("operation_id")) != str(self.operation_id)
+            ):
+                raise RavenError(
+                    ErrorCode.OPERATION_TASK_NOT_FOUND,
+                    f"Operation task '{parsed_cursor}' was not found in operation "
+                    f"'{self.operation_id}'.",
+                )
+        self._validate_page_size(limit)
+        records = await self._store.list_tasks(
+            operation_id=str(self.operation_id),
+            status=parsed_status.value if parsed_status is not None else None,
+            after_task_id=str(parsed_cursor) if parsed_cursor is not None else None,
+            limit=limit,
+        )
+        return [OperationTaskRecord.model_validate(record) for record in records]
 
 
     async def run(
@@ -735,6 +796,8 @@ class Operation:
             self._finished_at = persisted.timestamp
             self._result = result
             self._error = error
+        if self._on_finished is not None:
+            self._on_finished(self)
 
 
     @classmethod
@@ -768,6 +831,32 @@ class Operation:
             created_at=events[0].timestamp,
         )
         operation._restore(events)
+        operation._restored = True
+        return operation
+
+
+    @classmethod
+    def from_record(
+        cls,
+        record: OperationRecord,
+        stream: EventStream,
+        store: SQLiteOperationStore,
+        *,
+        on_finished: Callable[["Operation"], None] | None = None,
+    ) -> "Operation":
+        """Reconstruct operation status without replaying its domain events."""
+        operation = cls(
+            operation_id=record.operation_id,
+            name=record.name,
+            stream=stream,
+            store=store,
+            created_at=record.created_at,
+            on_finished=on_finished,
+        )
+        operation._status = record.status
+        operation._started_at = record.started_at
+        operation._finished_at = record.finished_at
+        operation._error = record.error
         operation._restored = True
         return operation
 
@@ -823,6 +912,30 @@ class Operation:
                 ErrorCode.OPERATION_TASK_NOT_FOUND,
                 "task_id must be a valid UUID.",
             ) from exc
+
+
+    @staticmethod
+    def _parse_status(
+        status: OperationStatus | str | None,
+    ) -> OperationStatus | None:
+        if status is None or isinstance(status, OperationStatus):
+            return status
+        try:
+            return OperationStatus(status)
+        except (TypeError, ValueError) as exc:
+            raise RavenError(
+                ErrorCode.INVALID_OPERATION_STATUS,
+                f"Unknown operation status '{status}'.",
+            ) from exc
+
+
+    @staticmethod
+    def _validate_page_size(limit: int) -> None:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise RavenError(
+                ErrorCode.INVALID_OPERATION_PAGE_SIZE,
+                "Operation page size must be a positive integer.",
+            )
 
 
     def _restore(self, events: list[Event]) -> None:
@@ -1108,17 +1221,30 @@ class OperationManager:
         paths: PathConfig,
         *,
         sync_interval: float = OPERATION_SYNC_INTERVAL_SECONDS,
+        max_cached_finished_operations: int = (
+            DEFAULT_FINISHED_OPERATION_CACHE_SIZE
+        ),
     ) -> None:
         if sync_interval <= 0:
             raise RavenError(
                 ErrorCode.INVALID_OPERATION_SYNC_INTERVAL,
                 "Operation synchronization interval must be greater than zero.",
             )
+        if (
+            isinstance(max_cached_finished_operations, bool)
+            or not isinstance(max_cached_finished_operations, int)
+            or max_cached_finished_operations < 0
+        ):
+            raise RavenError(
+                ErrorCode.INVALID_OPERATION_CACHE_SIZE,
+                "Finished operation cache size must be a non-negative integer.",
+            )
         self.storage_dir = paths.operation_storage_dir
         self.database_path = paths.operation_database_path
         self.sync_interval = sync_interval
+        self.max_cached_finished_operations = max_cached_finished_operations
         self._store = SQLiteOperationStore(self.database_path)
-        self._operations: dict[str, Operation] = {}
+        self._operations: OrderedDict[str, Operation] = OrderedDict()
         self._sync_service = OperationSyncService(self, sync_interval)
         self._sync_error: RavenError | None = None
         self._lock = asyncio.Lock()
@@ -1160,16 +1286,14 @@ class OperationManager:
                     operation = self._operations.get(key)
 
                 if operation is None:
-                    stream = self._create_stream(stored_id)
-                    events = await stream.read()
-                    if not events:
+                    stored = await self._store.read_operation(stored_id)
+                    if stored is None:
                         continue
-
-                    operation = Operation.from_events(
-                        operation_id=operation_id,
-                        stream=stream,
+                    operation = Operation.from_record(
+                        OperationRecord.model_validate(stored),
+                        stream=self._create_stream(stored_id),
                         store=self._store,
-                        events=events,
+                        on_finished=self._operation_finished,
                     )
                 elif not operation._restored or operation._task is not None:
                     continue
@@ -1179,8 +1303,7 @@ class OperationManager:
 
                 await operation._recover_interrupted_tasks()
                 await operation._recover_interrupted()
-                async with self._lock:
-                    self._operations.setdefault(key, operation)
+                await self._remember_operation(operation)
                 recovered.append(operation)
 
             return recovered
@@ -1204,6 +1327,7 @@ class OperationManager:
                 name=name,
                 stream=self._create_stream(key),
                 store=self._store,
+                on_finished=self._operation_finished,
             )
             self._operations[key] = operation
 
@@ -1224,23 +1348,22 @@ class OperationManager:
         async with self._lock:
             operation = self._operations.get(key)
             if operation is not None:
+                self._operations.move_to_end(key)
                 return operation
 
-        stored_ids = await self._store.operation_ids()
-        if key not in stored_ids:
+        stored = await self._store.read_operation(key)
+        if stored is None:
             raise RavenError(
                 ErrorCode.OPERATION_NOT_FOUND,
                 f"Operation '{key}' was not found.",
             )
-        stream = self._create_stream(key)
-        operation = Operation.from_events(
-            operation_id=parsed_id,
-            stream=stream,
+        operation = Operation.from_record(
+            OperationRecord.model_validate(stored),
+            stream=self._create_stream(key),
             store=self._store,
-            events=await stream.read(),
+            on_finished=self._operation_finished,
         )
-        async with self._lock:
-            return self._operations.setdefault(key, operation)
+        return await self._remember_operation(operation)
 
 
     async def wait(self, operation_id: UUID | str) -> Operation:
@@ -1262,6 +1385,81 @@ class OperationManager:
         operation = await self.get(operation_id)
         async for event in operation.events(after_event_id=after_event_id):
             yield event
+
+
+    async def list_operations(
+        self,
+        *,
+        status: OperationStatus | str | None = None,
+        limit: int = DEFAULT_OPERATION_PAGE_SIZE,
+        after_operation_id: UUID | str | None = None,
+    ) -> list[OperationRecord]:
+        """List durable operations newest first without replaying their events."""
+        self._ensure_open()
+        await self.start()
+        parsed_status = self._parse_status(status)
+        parsed_cursor: UUID | None = None
+        if after_operation_id is not None:
+            parsed_cursor = self._parse_operation_id(after_operation_id)
+            if await self._store.read_operation(str(parsed_cursor)) is None:
+                raise RavenError(
+                    ErrorCode.OPERATION_NOT_FOUND,
+                    f"Operation '{parsed_cursor}' was not found.",
+                )
+        self._validate_page_size(limit)
+        records = await self._store.list_operations(
+            status=parsed_status.value if parsed_status is not None else None,
+            after_operation_id=(
+                str(parsed_cursor) if parsed_cursor is not None else None
+            ),
+            limit=limit,
+        )
+        return [OperationRecord.model_validate(record) for record in records]
+
+
+    async def list_retryable_tasks(
+        self,
+        *,
+        limit: int = DEFAULT_OPERATION_PAGE_SIZE,
+        after_task_id: UUID | str | None = None,
+    ) -> list[OperationTaskRecord]:
+        """List failed tasks currently eligible for user-confirmed retry."""
+        self._ensure_open()
+        await self.start()
+        self._validate_page_size(limit)
+        parsed_cursor: UUID | None = None
+        if after_task_id is not None:
+            parsed_cursor = Operation._parse_task_id(after_task_id)
+            if await self._store.read_task(str(parsed_cursor)) is None:
+                raise RavenError(
+                    ErrorCode.OPERATION_TASK_NOT_FOUND,
+                    f"Operation task '{parsed_cursor}' was not found.",
+                )
+
+        results: list[OperationTaskRecord] = []
+        cursor = str(parsed_cursor) if parsed_cursor is not None else None
+        while len(results) < limit:
+            records = await self._store.list_tasks(
+                operation_id=None,
+                status=OperationStatus.FAILED.value,
+                after_task_id=cursor,
+                limit=limit,
+                retryable_candidates_only=True,
+            )
+            if not records:
+                break
+            validated = [
+                OperationTaskRecord.model_validate(record) for record in records
+            ]
+            for record in validated:
+                if record.can_retry:
+                    results.append(record)
+                    if len(results) == limit:
+                        break
+            cursor = str(validated[-1].task_id)
+            if len(records) < limit:
+                break
+        return results
 
 
     async def stored_operation_ids(self) -> list[str]:
@@ -1358,6 +1556,38 @@ class OperationManager:
         )
 
 
+    async def _remember_operation(self, operation: Operation) -> Operation:
+        key = str(operation.operation_id)
+        async with self._lock:
+            current = self._operations.get(key)
+            if current is not None:
+                self._operations.move_to_end(key)
+                return current
+            self._operations[key] = operation
+            self._operations.move_to_end(key)
+            self._evict_finished_operations()
+            return operation
+
+
+    def _operation_finished(self, operation: Operation) -> None:
+        key = str(operation.operation_id)
+        if self._operations.get(key) is not operation:
+            return
+        self._operations.move_to_end(key)
+        self._evict_finished_operations()
+
+
+    def _evict_finished_operations(self) -> None:
+        finished = [
+            operation_id
+            for operation_id, operation in self._operations.items()
+            if operation.is_finished
+        ]
+        excess = len(finished) - self.max_cached_finished_operations
+        for operation_id in finished[:max(excess, 0)]:
+            self._operations.pop(operation_id, None)
+
+
     async def _delete_finished(self, operation_id: str) -> None:
         async with self._lock:
             operation = self._operations.get(operation_id)
@@ -1415,6 +1645,18 @@ class OperationManager:
                 ErrorCode.INVALID_OPERATION_ID,
                 "operation_id must be a valid UUID.",
             ) from exc
+
+
+    @staticmethod
+    def _parse_status(
+        status: OperationStatus | str | None,
+    ) -> OperationStatus | None:
+        return Operation._parse_status(status)
+
+
+    @staticmethod
+    def _validate_page_size(limit: int) -> None:
+        Operation._validate_page_size(limit)
 
 
     def _ensure_open(self) -> None:

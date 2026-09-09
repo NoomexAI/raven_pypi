@@ -3,6 +3,7 @@
 from .operations import (
     Operation,
     OperationManager,
+    OperationRecord,
     OperationStatus,
     OperationTask,
     OperationTaskRecord,
@@ -13,6 +14,7 @@ from .operations import (
 __all__ = [
     "Operation",
     "OperationManager",
+    "OperationRecord",
     "OperationStatus",
     "OperationTask",
     "OperationTaskRecord",

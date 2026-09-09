@@ -17,13 +17,16 @@ from llama_index.core.llms import ChatMessage
 from ..agent.contracts import RetrievalPipelines
 from ..agent.harness import AgentHarness
 from ..agent.policy import GLOBAL_RETRIEVAL_MODES, LOCAL_RETRIEVAL_MODES, RetrievalMode
-from ..core.config import PathConfig
+from ..core.config import DEFAULT_OPERATION_PAGE_SIZE, PathConfig
 from ..core.errors import ErrorCode, RavenError
 from ..core.events import Event
 from ..core.operations import (
     Operation,
     OperationManager,
+    OperationRecord,
+    OperationStatus,
     OperationTask,
+    OperationTaskRecord,
     OperationType,
     OperationWorker,
     TaskWorker,
@@ -132,6 +135,48 @@ class Raven:
 
     async def get_operation(self, operation_id: UUID | str) -> Operation:
         return await self.operation_manager.get(operation_id)
+
+
+    async def list_operations(
+        self,
+        *,
+        status: OperationStatus | str | None = None,
+        limit: int = DEFAULT_OPERATION_PAGE_SIZE,
+        after_operation_id: UUID | str | None = None,
+    ) -> list[OperationRecord]:
+        return await self.operation_manager.list_operations(
+            status=status,
+            limit=limit,
+            after_operation_id=after_operation_id,
+        )
+
+
+    async def list_operation_tasks(
+        self,
+        operation_id: UUID | str,
+        *,
+        status: OperationStatus | str | None = None,
+        limit: int = DEFAULT_OPERATION_PAGE_SIZE,
+        after_task_id: UUID | str | None = None,
+    ) -> list[OperationTaskRecord]:
+        operation = await self.operation_manager.get(operation_id)
+        return await operation.list_tasks(
+            status=status,
+            limit=limit,
+            after_task_id=after_task_id,
+        )
+
+
+    async def list_retryable_tasks(
+        self,
+        *,
+        limit: int = DEFAULT_OPERATION_PAGE_SIZE,
+        after_task_id: UUID | str | None = None,
+    ) -> list[OperationTaskRecord]:
+        return await self.operation_manager.list_retryable_tasks(
+            limit=limit,
+            after_task_id=after_task_id,
+        )
 
 
     async def retry_task(

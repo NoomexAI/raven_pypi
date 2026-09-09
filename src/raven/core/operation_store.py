@@ -147,6 +147,55 @@ class SQLiteOperationStore:
             return self._write_generation
 
 
+    async def read_operation(self, operation_id: str) -> dict[str, Any] | None:
+        await self.start()
+        async with self._lock:
+            try:
+                row = await self._run_in_store_thread(
+                    self._read_operation,
+                    operation_id,
+                )
+            except Exception as exc:
+                raise self._database_error("The operation could not be read.") from exc
+        if row is None:
+            return None
+        try:
+            return self._operation_from_row(row)
+        except Exception as exc:
+            raise RavenError(
+                ErrorCode.OPERATION_DATABASE_CORRUPTED,
+                "The operation database contains an invalid operation record.",
+                details={"operation_id": operation_id},
+            ) from exc
+
+
+    async def list_operations(
+        self,
+        *,
+        status: str | None,
+        after_operation_id: str | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        await self.start()
+        async with self._lock:
+            try:
+                rows = await self._run_in_store_thread(
+                    self._list_operations,
+                    status,
+                    after_operation_id,
+                    limit,
+                )
+            except Exception as exc:
+                raise self._database_error("Operations could not be listed.") from exc
+        try:
+            return [self._operation_from_row(row) for row in rows]
+        except Exception as exc:
+            raise RavenError(
+                ErrorCode.OPERATION_DATABASE_CORRUPTED,
+                "The operation database contains an invalid operation record.",
+            ) from exc
+
+
     async def read_task(self, task_id: str) -> dict[str, Any] | None:
         await self.start()
         async with self._lock:
@@ -163,6 +212,37 @@ class SQLiteOperationStore:
                 ErrorCode.OPERATION_DATABASE_CORRUPTED,
                 "The operation database contains an invalid task record.",
                 details={"task_id": task_id},
+            ) from exc
+
+
+    async def list_tasks(
+        self,
+        *,
+        operation_id: str | None,
+        status: str | None,
+        after_task_id: str | None,
+        limit: int,
+        retryable_candidates_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        await self.start()
+        async with self._lock:
+            try:
+                rows = await self._run_in_store_thread(
+                    self._list_tasks,
+                    operation_id,
+                    status,
+                    after_task_id,
+                    limit,
+                    retryable_candidates_only,
+                )
+            except Exception as exc:
+                raise self._database_error("Operation tasks could not be listed.") from exc
+        try:
+            return [self._task_from_row(row) for row in rows]
+        except Exception as exc:
+            raise RavenError(
+                ErrorCode.OPERATION_DATABASE_CORRUPTED,
+                "The operation database contains an invalid task record.",
             ) from exc
 
 
@@ -823,6 +903,100 @@ class SQLiteOperationStore:
         return self._require_connection().execute(query, parameters).fetchall()
 
 
+    def _read_operation(self, operation_id: str) -> sqlite3.Row | None:
+        return self._require_connection().execute(
+            """
+            SELECT
+                operations.operation_id,
+                operations.name,
+                operations.status,
+                operations.last_event_id,
+                operations.created_at,
+                operations.started_at,
+                operations.finished_at,
+                initial_event.type AS initial_event_type,
+                initial_event.data_json AS initial_data_json,
+                final_event.data_json AS final_data_json
+            FROM operations
+            LEFT JOIN events AS initial_event
+              ON initial_event.operation_id = operations.operation_id
+             AND initial_event.event_id = 1
+            LEFT JOIN events AS final_event
+              ON final_event.operation_id = operations.operation_id
+             AND final_event.event_id = operations.last_event_id
+             AND final_event.is_final = 1
+            WHERE operations.operation_id = ?
+            """,
+            (operation_id,),
+        ).fetchone()
+
+
+    def _list_operations(
+        self,
+        status: str | None,
+        after_operation_id: str | None,
+        limit: int,
+    ) -> list[sqlite3.Row]:
+        connection = self._require_connection()
+        conditions: list[str] = []
+        parameters: list[Any] = []
+        if status is not None:
+            conditions.append("operations.status = ?")
+            parameters.append(status)
+        if after_operation_id is not None:
+            cursor = connection.execute(
+                """
+                SELECT created_at, operation_id
+                FROM operations
+                WHERE operation_id = ?
+                """,
+                (after_operation_id,),
+            ).fetchone()
+            if cursor is None:
+                return []
+            conditions.append(
+                "(operations.created_at < ? OR "
+                "(operations.created_at = ? AND operations.operation_id < ?))"
+            )
+            parameters.extend(
+                [
+                    cursor["created_at"],
+                    cursor["created_at"],
+                    cursor["operation_id"],
+                ]
+            )
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        parameters.append(limit)
+        return connection.execute(
+            f"""
+            SELECT
+                operations.operation_id,
+                operations.name,
+                operations.status,
+                operations.last_event_id,
+                operations.created_at,
+                operations.started_at,
+                operations.finished_at,
+                initial_event.type AS initial_event_type,
+                initial_event.data_json AS initial_data_json,
+                final_event.data_json AS final_data_json
+            FROM operations
+            LEFT JOIN events AS initial_event
+              ON initial_event.operation_id = operations.operation_id
+             AND initial_event.event_id = 1
+            LEFT JOIN events AS final_event
+              ON final_event.operation_id = operations.operation_id
+             AND final_event.event_id = operations.last_event_id
+             AND final_event.is_final = 1
+            {where}
+            ORDER BY operations.created_at DESC, operations.operation_id DESC
+            LIMIT ?
+            """,
+            parameters,
+        ).fetchall()
+
+
     def _read_task(self, task_id: str) -> sqlite3.Row | None:
         return self._require_connection().execute(
             """
@@ -846,6 +1020,84 @@ class SQLiteOperationStore:
             """,
             (task_id,),
         ).fetchone()
+
+
+    def _list_tasks(
+        self,
+        operation_id: str | None,
+        status: str | None,
+        after_task_id: str | None,
+        limit: int,
+        retryable_candidates_only: bool,
+    ) -> list[sqlite3.Row]:
+        connection = self._require_connection()
+        conditions: list[str] = []
+        parameters: list[Any] = []
+        if operation_id is not None:
+            conditions.append("tasks.operation_id = ?")
+            parameters.append(operation_id)
+        if status is not None:
+            conditions.append("tasks.status = ?")
+            parameters.append(status)
+        if retryable_candidates_only:
+            conditions.extend(
+                [
+                    "tasks.retry_policy = 'user_confirmed'",
+                    "tasks.retry_input_json IS NOT NULL",
+                    "NOT EXISTS ("
+                    "SELECT 1 FROM tasks AS retry "
+                    "WHERE retry.retry_of_task_id = tasks.task_id)",
+                ]
+            )
+        if after_task_id is not None:
+            cursor = connection.execute(
+                """
+                SELECT created_at, task_id
+                FROM tasks
+                WHERE task_id = ?
+                """,
+                (after_task_id,),
+            ).fetchone()
+            if cursor is None:
+                return []
+            conditions.append(
+                "(tasks.created_at < ? OR "
+                "(tasks.created_at = ? AND tasks.task_id < ?))"
+            )
+            parameters.extend(
+                [
+                    cursor["created_at"],
+                    cursor["created_at"],
+                    cursor["task_id"],
+                ]
+            )
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        parameters.append(limit)
+        return connection.execute(
+            f"""
+            SELECT
+                tasks.task_id,
+                tasks.operation_id,
+                tasks.name,
+                tasks.is_root,
+                tasks.status,
+                tasks.retry_policy,
+                tasks.retry_input_json,
+                tasks.attempt,
+                tasks.retry_of_operation_id,
+                tasks.retry_of_task_id,
+                tasks.created_at,
+                tasks.started_at,
+                tasks.finished_at,
+                tasks.error_json
+            FROM tasks
+            {where}
+            ORDER BY tasks.created_at DESC, tasks.task_id DESC
+            LIMIT ?
+            """,
+            parameters,
+        ).fetchall()
 
 
     def _read_retry(self, task_id: str) -> sqlite3.Row | None:
@@ -969,6 +1221,31 @@ class SQLiteOperationStore:
                 "data": json.loads(row["data_json"]),
             }
         )
+
+
+    @staticmethod
+    def _operation_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        if row["initial_event_type"] != EventType.OPERATION_QUEUED.value:
+            raise ValueError("operation history does not start with operation.queued")
+        initial_data = json.loads(row["initial_data_json"])
+        if initial_data.get("name") != row["name"]:
+            raise ValueError("operation name does not match its queued event")
+        final_data = (
+            json.loads(row["final_data_json"])
+            if row["final_data_json"] is not None
+            else {}
+        )
+        error = final_data.get("error")
+        return {
+            "operation_id": row["operation_id"],
+            "name": row["name"],
+            "status": row["status"],
+            "last_event_id": row["last_event_id"],
+            "created_at": row["created_at"],
+            "started_at": row["started_at"],
+            "finished_at": row["finished_at"],
+            "error": error if isinstance(error, dict) else None,
+        }
 
 
     @staticmethod
