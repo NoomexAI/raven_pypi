@@ -129,6 +129,24 @@ class Reconstructor:
                 f"File '{file_name}' does not exist in knowledge '{knowledge_name}'.",
             )
 
+        stored_sections = knowledge.list_sections(file_name)
+        available_ids = {
+            section["section_id"]
+            for section in stored_sections
+            if isinstance(section.get("section_id"), str)
+        }
+        missing_ids = sorted(highlighted_ids.difference(available_ids))
+        if missing_ids:
+            raise RavenError(
+                ErrorCode.SECTION_NOT_FOUND,
+                "One or more retrieved sections do not belong to the requested file.",
+                details={
+                    "knowledge_name": knowledge_name,
+                    "file_name": file_name,
+                    "section_ids": missing_ids,
+                },
+            )
+
         sections = [
             {
                 "section_id": section["section_id"],
@@ -136,7 +154,7 @@ class Reconstructor:
                 "raw_content": section.get("raw_content", ""),
                 "source_range": section.get("source_range"),
             }
-            for section in knowledge.list_sections(file_name)
+            for section in stored_sections
         ]
         return {
             "knowledge_name": knowledge_name,
@@ -158,14 +176,27 @@ class Reconstructor:
             return cls._deduplicate(retrieval_result)
 
         if not isinstance(retrieval_result, dict):
-            return []
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                "Retrieval results must be a section list or agreement result object.",
+            )
 
         retrieved_content = retrieval_result.get("retrieved_content")
         if isinstance(retrieved_content, list):
             return cls._deduplicate(retrieved_content)
 
         if not isinstance(retrieved_content, dict):
-            return []
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                "Agreement retrieval results must contain retrieved_content.",
+            )
+
+        allowed = {"embedded_retrieval", "hierarchical_retrieval"}
+        if not set(retrieved_content).issubset(allowed):
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                "Agreement retrieval content contains unsupported result groups.",
+            )
 
         combined = [
             *cls._as_section_list(retrieved_content.get("embedded_retrieval")),
@@ -176,7 +207,14 @@ class Reconstructor:
 
     @staticmethod
     def _as_section_list(value: Any) -> list[dict[str, Any]]:
-        return value if isinstance(value, list) else []
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                "Agreement retrieval groups must contain section lists.",
+            )
+        return value
 
 
     @classmethod

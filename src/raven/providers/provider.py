@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 from ..core.errors import ErrorCode, RavenError
@@ -47,7 +48,14 @@ class Provider:
         *,
         operation: Operation | None = None,
     ) -> OperationTask:
+        self._reject_secret_options(spec)
+        if spec.role != ModelRole.LLM:
+            raise RavenError(
+                ErrorCode.INVALID_MODEL_SPEC,
+                "load_llm requires a model specification with role='llm'.",
+            )
         if spec.provider == "ollama":
+            self._reject_ollama_options(spec)
             return await self.ollama.load_llm(
                 spec.model,
                 operation=operation,
@@ -67,17 +75,67 @@ class Provider:
         *,
         operation: Operation | None = None,
     ) -> OperationTask:
+        self._reject_secret_options(spec)
+        if spec.role != ModelRole.EMBEDDING:
+            raise RavenError(
+                ErrorCode.INVALID_MODEL_SPEC,
+                "load_embedding requires a model specification with role='embedding'.",
+            )
         if spec.provider == "ollama":
+            self._reject_ollama_options(spec)
             return await self.ollama.load_embedding(
                 spec.model,
                 operation=operation,
             )
         return await self.litellm.load_embedding(
             spec.model,
+            provider=spec.provider,
             api_key=self._resolve_api_key(spec),
             options=spec.options,
             operation=operation,
         )
+
+
+    async def close(self) -> None:
+        """Release provider clients and cached adapters owned by Raven."""
+        results = await asyncio.gather(
+            self.ollama.close(),
+            self.litellm.close(),
+            return_exceptions=True,
+        )
+        failures = [result for result in results if isinstance(result, BaseException)]
+        if failures:
+            raise RavenError(
+                ErrorCode.MODEL_PROVIDER_FAILED,
+                "One or more model providers could not be closed cleanly.",
+                details={"failure_count": len(failures)},
+            ) from failures[0]
+
+
+    @staticmethod
+    def _reject_ollama_options(spec: ModelSpec) -> None:
+        if spec.options:
+            raise RavenError(
+                ErrorCode.INVALID_MODEL_SPEC,
+                "Ollama model options are not supported by this provider interface.",
+                details={"fields": sorted(spec.options)},
+            )
+
+
+    @staticmethod
+    def _reject_secret_options(spec: ModelSpec) -> None:
+        secret_markers = ("api_key", "token", "secret", "password", "authorization")
+        fields = sorted(
+            key
+            for key in spec.options
+            if any(marker in key.lower() for marker in secret_markers)
+        )
+        if fields:
+            raise RavenError(
+                ErrorCode.INVALID_MODEL_SPEC,
+                "Credentials must be supplied through api_key_ref, not model options.",
+                details={"fields": fields},
+            )
 
 
     @staticmethod

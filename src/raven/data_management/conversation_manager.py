@@ -29,6 +29,7 @@ from ..core.config import PathConfig
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
 from ..core.operations import Operation, OperationManager, OperationTask, OperationType
+from ..providers.model_identity import embedding_identity
 from .knowledge_base import KnowledgeBase
 
 
@@ -36,6 +37,14 @@ DEFAULT_TITLE = "New Conversation"
 TITLE_SYSTEM_PROMPT = (
     "Create a concise title for this conversation from the user's first message. "
     "Return only the title, without quotation marks, labels, or explanation."
+)
+MEMORY_SUMMARY_PROMPT = (
+    "Compact the conversation into a concise memory for continuing it later. "
+    "Preserve exact user-provided facts, names, identifiers, numbers, decisions, "
+    "constraints, corrections, commitments, and unresolved requests. Preserve "
+    "important facts learned from tool results when they affected the answer. "
+    "Distinguish user statements from assistant claims. Omit routine greetings, "
+    "reasoning traces, and redundant wording. Do not invent or infer missing facts."
 )
 PERSISTENCE_VERSION = 1
 PREFERENCE_SCHEMA_VERSION = 1
@@ -110,6 +119,11 @@ class _ConversationMessageStore:
                         position INTEGER PRIMARY KEY,
                         role TEXT NOT NULL,
                         message_json TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
                     );
                     """
                 )
@@ -323,6 +337,28 @@ class _ConversationMessageStore:
                 )
 
 
+    def get_setting(self, key: str) -> str | None:
+        with self._lock:
+            row = self._require_connection().execute(
+                "SELECT value FROM settings WHERE key = ?",
+                (key,),
+            ).fetchone()
+        return None if row is None else str(row["value"])
+
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self._lock:
+            connection = self._require_connection()
+            with connection:
+                connection.execute(
+                    """
+                    INSERT INTO settings (key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    (key, value),
+                )
+
+
     def _require_connection(self) -> sqlite3.Connection:
         if self._connection is None:
             raise RavenError(
@@ -399,6 +435,9 @@ class Conversation:
         self._lifecycle_lock = asyncio.Lock()
         self._memory_lock = asyncio.Lock()
         self._mutation_lock = asyncio.Lock()
+        self._session_lock = asyncio.Lock()
+        self._title_lock = asyncio.Lock()
+        self._active_session_id: UUID | None = None
         self._started = False
         self._closed = False
         self._operation_manager = operation_manager
@@ -432,6 +471,11 @@ class Conversation:
     @property
     def is_started(self) -> bool:
         return self._started and not self._closed
+
+
+    @property
+    def has_active_session(self) -> bool:
+        return self._active_session_id is not None
 
 
     async def start(self) -> None:
@@ -468,6 +512,27 @@ class Conversation:
                 await asyncio.to_thread(qdrant.close)
 
 
+    async def _claim_session(self, session_id: UUID) -> None:
+        """Reserve this conversation for one active Session instance."""
+        async with self._session_lock:
+            if (
+                self._active_session_id is not None
+                and self._active_session_id != session_id
+            ):
+                raise RavenError(
+                    ErrorCode.CONVERSATION_SESSION_ACTIVE,
+                    f"Conversation '{self.conversation_id}' already has an active session.",
+                )
+            self._active_session_id = session_id
+
+
+    async def _release_session(self, session_id: UUID) -> None:
+        """Release a Session reservation owned by ``session_id``."""
+        async with self._session_lock:
+            if self._active_session_id == session_id:
+                self._active_session_id = None
+
+
     async def initialize_memory(
         self,
         llm: Any,
@@ -497,7 +562,13 @@ class Conversation:
             if self._chat_memory is not None:
                 return
 
+            if self._qdrant is None:
+                await asyncio.to_thread(self._open_qdrant)
             chat_store = await asyncio.to_thread(self._load_chat_store)
+            await asyncio.to_thread(
+                self._ensure_embedding_identity,
+                embed_model,
+            )
             await asyncio.to_thread(self._ensure_memory_collection, embed_model)
             qdrant = self._require_qdrant()
             vector_store = QdrantVectorStore(
@@ -505,26 +576,54 @@ class Conversation:
                 client=qdrant,
                 dense_vector_name=MEMORY_VECTOR_NAME,
             )
-
-            self._chat_store = chat_store
-            self._chat_memory = ChatSummaryMemoryBuffer.from_defaults(
+            chat_memory = ChatSummaryMemoryBuffer.from_defaults(
                 llm=llm,
                 chat_store=chat_store,
                 chat_store_key="messages",
                 token_limit=token_limit,
+                summarize_prompt=MEMORY_SUMMARY_PROMPT,
                 count_initial_tokens=True,
             )
-            self._vector_memory = VectorMemory.from_defaults(
+            vector_memory = VectorMemory.from_defaults(
                 vector_store=vector_store,
                 embed_model=embed_model,
                 retriever_kwargs={"similarity_top_k": memory_top_k},
             )
 
-        pending_turn_ids = await asyncio.to_thread(
-            self._message_store.list_unindexed_turn_ids
-        )
-        for turn_id in pending_turn_ids:
-            await self._ensure_turn_indexed(turn_id)
+            self._chat_store = chat_store
+            self._chat_memory = chat_memory
+            self._vector_memory = vector_memory
+
+        try:
+            pending_turn_ids = await asyncio.to_thread(
+                self._message_store.list_unindexed_turn_ids
+            )
+            for turn_id in pending_turn_ids:
+                await self._ensure_turn_indexed(turn_id)
+        except BaseException:
+            async with self._memory_lock:
+                self._chat_store = None
+                self._chat_memory = None
+                self._vector_memory = None
+            raise
+
+
+    async def release_memory_resources(self) -> None:
+        """Release model-bound memory adapters while keeping storage reopenable."""
+        async with self._memory_lock:
+            qdrant = self._qdrant
+            self._qdrant = None
+            self._chat_store = None
+            self._chat_memory = None
+            self._vector_memory = None
+        if qdrant is not None:
+            await asyncio.to_thread(qdrant.close)
+
+
+    async def validate_embedding_model(self, embed_model: Any) -> None:
+        """Reject an adapter that does not match persisted vector memory."""
+        await self.start()
+        await asyncio.to_thread(self._ensure_embedding_identity, embed_model)
 
 
     async def get_context_messages(
@@ -554,7 +653,16 @@ class Conversation:
     ) -> list[ChatMessage]:
         """Load context-fit messages and compact older history when needed."""
         memory = self._require_chat_memory()
-        async with self._memory_lock:
+        if memory.count_initial_tokens and initial_token_count >= memory.token_limit:
+            raise RavenError(
+                ErrorCode.CONTEXT_TOKEN_LIMIT_TOO_SMALL,
+                "The conversation memory limit cannot fit the system prompt.",
+                details={
+                    "initial_token_count": initial_token_count,
+                    "memory_token_limit": memory.token_limit,
+                },
+            )
+        async with self._mutation_lock, self._memory_lock:
             messages_before = await asyncio.to_thread(memory.get_all)
             message_count_before = len(messages_before)
             compaction_needed = await asyncio.to_thread(
@@ -1049,7 +1157,14 @@ class Conversation:
             preference = {"preference_id": str(uuid4()), "text": value}
             self._preferences.append(preference)
             try:
-                await asyncio.to_thread(self._persist_preferences)
+                write_task = asyncio.create_task(
+                    asyncio.to_thread(self._persist_preferences)
+                )
+                try:
+                    await asyncio.shield(write_task)
+                except asyncio.CancelledError:
+                    await write_task
+                    raise
             except Exception:
                 self._preferences.pop()
                 raise
@@ -1100,7 +1215,14 @@ class Conversation:
 
             removed = self._preferences.pop(index)
             try:
-                await asyncio.to_thread(self._persist_preferences)
+                write_task = asyncio.create_task(
+                    asyncio.to_thread(self._persist_preferences)
+                )
+                try:
+                    await asyncio.shield(write_task)
+                except asyncio.CancelledError:
+                    await write_task
+                    raise
             except Exception:
                 self._preferences.insert(index, removed)
                 raise
@@ -1157,11 +1279,15 @@ class Conversation:
                 self.pinned = pinned
 
             try:
-                await asyncio.to_thread(self.write_metadata)
+                write_task = asyncio.create_task(
+                    asyncio.to_thread(self.write_metadata)
+                )
+                try:
+                    await asyncio.shield(write_task)
+                except asyncio.CancelledError:
+                    await write_task
+                    raise
             except asyncio.CancelledError:
-                self.title = previous_title
-                self.is_titled = previous_is_titled
-                self.pinned = previous_pinned
                 raise
             except Exception as exc:
                 self.title = previous_title
@@ -1213,45 +1339,42 @@ class Conversation:
         operation: Operation,
     ) -> str:
         """Generate and persist a title when this conversation is untitled."""
-        if self.is_titled:
-            return self.title
-        if llm is None:
-            raise RavenError(
-                ErrorCode.LLM_MODEL_REQUIRED,
-                "An LLM is required to generate a conversation title.",
+        async with self._title_lock:
+            if self.is_titled:
+                return self.title
+            if llm is None:
+                raise RavenError(
+                    ErrorCode.LLM_MODEL_REQUIRED,
+                    "An LLM is required to generate a conversation title.",
+                )
+
+            message = (
+                first_user_message.strip()
+                if isinstance(first_user_message, str)
+                else ""
             )
+            if not message:
+                raise RavenError(
+                    ErrorCode.INVALID_METADATA,
+                    "first_user_message must be a non-empty string.",
+                )
 
-        message = (
-            first_user_message.strip()
-            if isinstance(first_user_message, str)
-            else ""
-        )
-        if not message:
-            raise RavenError(
-                ErrorCode.INVALID_METADATA,
-                "first_user_message must be a non-empty string.",
+            response = await llm.achat(
+                [
+                    ChatMessage(
+                        role=MessageRole.SYSTEM,
+                        content=TITLE_SYSTEM_PROMPT,
+                    ),
+                    ChatMessage(
+                        role=MessageRole.USER,
+                        content=message,
+                    ),
+                ]
             )
-
-        response = await llm.achat(
-            [
-                ChatMessage(
-                    role=MessageRole.SYSTEM,
-                    content=TITLE_SYSTEM_PROMPT,
-                ),
-                ChatMessage(
-                    role=MessageRole.USER,
-                    content=message,
-                ),
-            ]
-        )
-        title = self._title_from_response(response)
-
-        if self.is_titled:
+            title = self._title_from_response(response)
+            update_task = await self.update(title=title, operation=operation)
+            await update_task.result()
             return self.title
-
-        update_task = await self.update(title=title, operation=operation)
-        await update_task.result()
-        return self.title
 
 
     def to_dict(self) -> dict[str, Any]:
@@ -1290,10 +1413,15 @@ class Conversation:
         self._preferences = self._load_preferences()
         self._message_store.open()
         try:
-            self._qdrant = QdrantClient(path=str(self.qdrant_dir))
+            self._open_qdrant()
         except Exception:
             self._message_store.close()
             raise
+
+
+    def _open_qdrant(self) -> None:
+        if self._qdrant is None:
+            self._qdrant = QdrantClient(path=str(self.qdrant_dir))
 
 
     def _load_chat_store(self) -> SimpleChatStore:
@@ -1452,6 +1580,20 @@ class Conversation:
                 )
             },
         )
+
+
+    def _ensure_embedding_identity(self, embed_model: Any) -> None:
+        current = embedding_identity(embed_model)
+        stored = self._message_store.get_setting("embedding_identity")
+        if stored is None:
+            self._message_store.set_setting("embedding_identity", current)
+            return
+        if stored != current:
+            raise RavenError(
+                ErrorCode.EMBEDDING_IDENTITY_MISMATCH,
+                f"Embedding model does not match conversation '{self.conversation_id}'.",
+                details={"conversation_id": self.conversation_id},
+            )
 
 
     def _require_qdrant(self) -> QdrantClient:
@@ -1655,6 +1797,7 @@ class ConversationManager:
                 parents=True,
                 exist_ok=True,
             )
+            await asyncio.to_thread(self._cleanup_deletion_tombstones)
             conversation_paths = await asyncio.to_thread(self._scan_existing)
             loaded: dict[str, Conversation] = {}
             for path in conversation_paths:
@@ -1679,7 +1822,17 @@ class ConversationManager:
             conversations = list(self._conversations.values())
             self._conversations.clear()
 
-        await asyncio.gather(*(conversation.close() for conversation in conversations))
+        results = await asyncio.gather(
+            *(conversation.close() for conversation in conversations),
+            return_exceptions=True,
+        )
+        failures = [result for result in results if isinstance(result, BaseException)]
+        if failures:
+            raise RavenError(
+                ErrorCode.INTERNAL_ERROR,
+                "One or more conversations could not be closed.",
+                details={"failure_count": len(failures)},
+            ) from failures[0]
 
 
     async def create(
@@ -1765,6 +1918,12 @@ class ConversationManager:
             ) from exc
 
 
+    def owns(self, conversation: Conversation) -> bool:
+        """Return whether this exact object belongs to this registry."""
+        self._ensure_started()
+        return self._conversations.get(conversation.conversation_id) is conversation
+
+
     def list(self) -> list[dict[str, Any]]:
         """Return metadata for all opened conversations."""
         self._ensure_started()
@@ -1840,6 +1999,11 @@ class ConversationManager:
     ) -> None:
         """Remove a conversation from the registry and disk."""
         conversation = self.get(conversation_id)
+        if conversation.has_active_session:
+            raise RavenError(
+                ErrorCode.CONVERSATION_SESSION_ACTIVE,
+                f"Conversation '{conversation_id}' has an active session.",
+            )
         await self._emit(
             operation,
             EventType.CONVERSATION_DELETE_STARTED,
@@ -1849,11 +2013,16 @@ class ConversationManager:
         try:
             async with self._mutation_lock:
                 await conversation.close()
+                tombstone = self.conversation_dir / (
+                    f".deleting-{conversation.conversation_id}"
+                )
                 await asyncio.to_thread(
-                    shutil.rmtree,
+                    os.replace,
                     conversation.dir_path,
+                    tombstone,
                 )
                 self._conversations.pop(conversation.conversation_id, None)
+                await asyncio.to_thread(shutil.rmtree, tombstone)
 
             await self._emit(
                 operation,
@@ -1882,6 +2051,14 @@ class ConversationManager:
             for entry in self.conversation_dir.iterdir()
             if entry.is_dir() and (entry / "metadata.json").is_file()
         ]
+
+
+    def _cleanup_deletion_tombstones(self) -> None:
+        if not self.conversation_dir.is_dir():
+            return
+        for entry in self.conversation_dir.iterdir():
+            if entry.is_dir() and entry.name.startswith(".deleting-"):
+                shutil.rmtree(entry)
 
 
     def _validate_knowledge(self, knowledge_name: str) -> None:

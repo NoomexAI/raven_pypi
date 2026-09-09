@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import shutil
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -13,6 +14,7 @@ from llama_index.core.prompts.base import ChatPromptTemplate
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..core.errors import ErrorCode, RavenError, error_payload
+from ..core.config import DEFAULT_MAX_DOCUMENT_PAGES, DEFAULT_MAX_SOURCE_FILE_BYTES
 from ..core.events import Event, EventType
 from ..core.operations import (
     Operation,
@@ -78,6 +80,8 @@ class IngestionRetryInput(BaseModel):
     max_extraction_retries: int
     chunk_size: int
     chunk_overlap: int
+    max_source_size_bytes: int
+    max_document_pages: int
 
 
 class IngestionPipeline:
@@ -125,6 +129,8 @@ class IngestionPipeline:
         retry_of: OperationTaskRecord | None = None,
         chunk_size: int = 512,
         chunk_overlap: int = 50,
+        max_source_size_bytes: int = DEFAULT_MAX_SOURCE_FILE_BYTES,
+        max_document_pages: int = DEFAULT_MAX_DOCUMENT_PAGES,
     ) -> OperationTask:
         if retry_of is None:
             path = Path(source_path).expanduser().resolve()
@@ -141,6 +147,8 @@ class IngestionPipeline:
                 max_extraction_retries=self._max_extraction_retries,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
+                max_source_size_bytes=max_source_size_bytes,
+                max_document_pages=max_document_pages,
             )
         else:
             try:
@@ -167,6 +175,8 @@ class IngestionPipeline:
                 reconcile_before_run=retry_of is not None,
                 chunk_size=retry_input.chunk_size,
                 chunk_overlap=retry_input.chunk_overlap,
+                max_source_size_bytes=retry_input.max_source_size_bytes,
+                max_document_pages=retry_input.max_document_pages,
             ),
             retry_input=retry_input.model_dump(mode="json"),
             retry_of=retry_of,
@@ -186,6 +196,8 @@ class IngestionPipeline:
         reconcile_before_run: bool,
         chunk_size: int = 512,
         chunk_overlap: int = 50,
+        max_source_size_bytes: int = DEFAULT_MAX_SOURCE_FILE_BYTES,
+        max_document_pages: int = DEFAULT_MAX_DOCUMENT_PAGES,
     ) -> dict[str, Any]:
         """Run the complete ingestion workflow in the caller-owned operation."""
         path = Path(source_path)
@@ -200,6 +212,8 @@ class IngestionPipeline:
             },
         )
 
+        snapshot_path: Path | None = None
+        ingestion_claimed = False
         try:
             knowledge = self._knowledge_base.get(knowledge_name)
             if reconcile_before_run:
@@ -223,7 +237,30 @@ class IngestionPipeline:
                     f"Source file '{path}' was not found.",
                 )
 
-            current_source_sha256 = await asyncio.to_thread(self._source_sha256, path)
+            source_size = await asyncio.to_thread(lambda: path.stat().st_size)
+            if source_size > max_source_size_bytes:
+                raise RavenError(
+                    ErrorCode.SOURCE_FILE_TOO_LARGE,
+                    f"Source file '{file_name}' exceeds the configured size limit.",
+                    details={
+                        "size_bytes": source_size,
+                        "max_size_bytes": max_source_size_bytes,
+                    },
+                )
+
+            await knowledge.claim_ingestion(file_name, file_id)
+            ingestion_claimed = True
+            snapshot_path = await asyncio.to_thread(
+                self._snapshot_source,
+                path,
+                self._knowledge_base.paths.uploads_dir,
+                file_id,
+            )
+
+            current_source_sha256 = await asyncio.to_thread(
+                self._source_sha256,
+                snapshot_path,
+            )
             if (
                 expected_source_sha256 is not None
                 and current_source_sha256 != expected_source_sha256
@@ -237,7 +274,12 @@ class IngestionPipeline:
                     },
                 )
 
-            parsed_document = await self._document_parser.parse(path, file_id=file_id)
+            parsed_document = await self._document_parser.parse(
+                snapshot_path,
+                file_id=file_id,
+                max_file_size_bytes=max_source_size_bytes,
+                max_pages=max_document_pages,
+            )
             self._raise_if_cancelled(operation)
 
             splitter = ProvenanceAwareSemanticSplitter(
@@ -343,6 +385,11 @@ class IngestionPipeline:
             )
             logger.exception("Ingestion failed for %s", path)
             raise
+        finally:
+            if snapshot_path is not None:
+                await asyncio.to_thread(snapshot_path.unlink, missing_ok=True)
+            if ingestion_claimed:
+                await knowledge.release_ingestion(file_name, file_id)
 
 
     async def _extract_metadata(
@@ -417,3 +464,11 @@ class IngestionPipeline:
             for block in iter(lambda: source.read(1024 * 1024), b""):
                 digest.update(block)
         return digest.hexdigest()
+
+
+    @staticmethod
+    def _snapshot_source(path: Path, directory: Path, file_id: str) -> Path:
+        directory.mkdir(parents=True, exist_ok=True)
+        snapshot = directory / f"{file_id}{path.suffix.lower()}"
+        shutil.copyfile(path, snapshot)
+        return snapshot

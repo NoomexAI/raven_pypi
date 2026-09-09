@@ -255,6 +255,8 @@ class Operation:
         self._cancellation_requested = False
         self._task: asyncio.Task[Any] | None = None
         self._child_tasks: dict[UUID, OperationTask] = {}
+        self._terminal_exception: BaseException | None = None
+        self._restored = False
         self._lock = asyncio.Lock()
 
 
@@ -380,6 +382,7 @@ class Operation:
                     name,
                     worker,
                     root=True,
+                    parent_task_id=None,
                     retry_policy=retry_policy,
                     retry_input=normalized_retry_input,
                     attempt=attempt,
@@ -405,6 +408,11 @@ class Operation:
                 name,
                 worker,
                 root=False,
+                parent_task_id=(
+                    _CURRENT_TASK.get()[0]
+                    if _CURRENT_TASK.get() is not None
+                    else None
+                ),
                 retry_policy=retry_policy,
                 retry_input=normalized_retry_input,
                 attempt=attempt,
@@ -413,9 +421,8 @@ class Operation:
             )
             await task._persist()
             self._register_task(task)
-
-        await task.start()
-        return task
+            await task.start()
+            return task
 
 
     @staticmethod
@@ -443,7 +450,11 @@ class Operation:
         """Wait for the root worker and return this operation."""
         task = self._task
         if task is not None:
-            await asyncio.gather(task, return_exceptions=True)
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if not task.cancelled():
+                    raise
         return self
 
 
@@ -471,7 +482,14 @@ class Operation:
         if root_task is not None and not root_task.done():
             root_task.cancel()
             await asyncio.gather(root_task, return_exceptions=True)
-        elif root_task is None:
+
+        root_handle = next(
+            (task for task in self._child_tasks.values() if task.is_root),
+            None,
+        )
+        if root_handle is not None and not root_handle.is_finished:
+            await root_handle._finalize_cancelled()
+        if not self.is_finished:
             await self._finish_cancelled()
         return self
 
@@ -508,14 +526,90 @@ class Operation:
         try:
             await self._mark_running()
             result = await worker(self)
+            await self._join_children()
             if self._cancellation_requested:
                 await self._finish_cancelled()
             else:
                 await self._finish_completed(result)
-        except asyncio.CancelledError:
-            await self._finish_cancelled()
+        except asyncio.CancelledError as exc:
+            await self._cancel_children()
+            try:
+                await self._finish_cancelled()
+            except BaseException as finish_error:
+                self._set_local_terminal_failure(finish_error)
+            self._terminal_exception = exc
         except Exception as exc:
-            await self._finish_failed(exc)
+            await self._cancel_children()
+            try:
+                await self._finish_failed(exc)
+            except BaseException as finish_error:
+                self._set_local_terminal_failure(finish_error)
+
+
+    async def _join_children(self) -> None:
+        """Wait for every child owned by this operation and surface failures."""
+        while True:
+            async with self._lock:
+                children = tuple(
+                    task
+                    for task in self._child_tasks.values()
+                    if not task.is_root and not task.is_finished
+                )
+            if not children:
+                break
+            await asyncio.gather(
+                *(task._wait_for_worker() for task in children),
+                return_exceptions=True,
+            )
+
+        failed = next(
+            (
+                task
+                for task in self._child_tasks.values()
+                if not task.is_root
+                and not task.result_observed
+                and task.status == OperationStatus.FAILED
+            ),
+            None,
+        )
+        if failed is not None:
+            if failed.error is not None:
+                raise failed.error
+            raise RavenError(
+                ErrorCode.INTERNAL_ERROR,
+                f"Operation task '{failed.task_id}' failed.",
+            )
+
+        cancelled = next(
+            (
+                task
+                for task in self._child_tasks.values()
+                if not task.is_root
+                and not task.result_observed
+                and task.status == OperationStatus.CANCELLED
+            ),
+            None,
+        )
+        if cancelled is not None:
+            raise asyncio.CancelledError
+
+
+    async def _cancel_children(self) -> None:
+        children = tuple(
+            task for task in self._child_tasks.values() if not task.is_root
+        )
+        await asyncio.gather(
+            *(task.cancel() for task in children if not task.is_finished),
+            return_exceptions=True,
+        )
+
+
+    def _set_local_terminal_failure(self, error: BaseException) -> None:
+        self._status = OperationStatus.FAILED
+        self._finished_at = datetime.now(timezone.utc)
+        self._result = None
+        self._error = error_payload(error)
+        self._terminal_exception = error
 
 
     async def _mark_running(self) -> None:
@@ -556,6 +650,7 @@ class Operation:
             event_type=EventType.OPERATION_FAILED,
             error=error_payload(error),
         )
+        self._terminal_exception = error
 
 
     async def _finish_cancelled(self) -> None:
@@ -625,21 +720,20 @@ class Operation:
         async with self._lock:
             if self.is_finished:
                 return
+            data: dict[str, Any] = {"name": self.name, **(event_data or {})}
+            if error is not None:
+                data["error"] = error
+            persisted = await self._stream.publish(
+                Event(
+                    type=event_type,
+                    data=data,
+                    is_final=True,
+                )
+            )
             self._status = status
-            self._finished_at = datetime.now(timezone.utc)
+            self._finished_at = persisted.timestamp
             self._result = result
             self._error = error
-
-        data: dict[str, Any] = {"name": self.name, **(event_data or {})}
-        if error is not None:
-            data["error"] = error
-        await self._stream.publish(
-            Event(
-                type=event_type,
-                data=data,
-                is_final=True,
-            )
-        )
 
 
     @classmethod
@@ -673,11 +767,24 @@ class Operation:
             created_at=events[0].timestamp,
         )
         operation._restore(events)
+        operation._restored = True
         return operation
 
 
     def _register_task(self, task: "OperationTask") -> None:
         self._child_tasks[task.task_id] = task
+
+
+    def _event_belongs_to_task(self, event: Event, task_id: UUID) -> bool:
+        current_id = event.task_id
+        visited: set[UUID] = set()
+        while current_id is not None and current_id not in visited:
+            if current_id == task_id:
+                return True
+            visited.add(current_id)
+            task = self._child_tasks.get(current_id)
+            current_id = task.parent_task_id if task is not None else None
+        return False
 
 
     async def _persist_task(self, task: "OperationTask") -> None:
@@ -751,6 +858,7 @@ class OperationTask:
         worker: TaskWorker,
         *,
         root: bool,
+        parent_task_id: UUID | None,
         retry_policy: RetryPolicy,
         retry_input: dict[str, Any] | None,
         attempt: int,
@@ -763,6 +871,7 @@ class OperationTask:
         self.name = name
         self._worker = worker
         self._root = root
+        self._parent_task_id = parent_task_id
         self._retry_policy = retry_policy
         self._retry_input = retry_input
         self._attempt = attempt
@@ -773,6 +882,7 @@ class OperationTask:
         self._result: Any = None
         self._error: BaseException | None = None
         self._task: asyncio.Task[Any] | None = None
+        self._result_observed = False
 
 
     @property
@@ -804,6 +914,16 @@ class OperationTask:
     @property
     def is_root(self) -> bool:
         return self._root
+
+
+    @property
+    def parent_task_id(self) -> UUID | None:
+        return self._parent_task_id
+
+
+    @property
+    def result_observed(self) -> bool:
+        return self._result_observed
 
 
     @property
@@ -854,31 +974,32 @@ class OperationTask:
 
 
     async def _run(self) -> Any:
-        self._status = OperationStatus.RUNNING
-        await self._publish_lifecycle(EventType.OPERATION_TASK_STARTED)
         token: Token[tuple[UUID, str] | None] = _CURRENT_TASK.set(
             (self.task_id, self.name)
         )
         try:
+            await self._publish_lifecycle(EventType.OPERATION_TASK_STARTED)
+            self._status = OperationStatus.RUNNING
             self.operation.raise_if_cancelled()
-            self._result = await self._worker(self.operation)
-            self._status = OperationStatus.COMPLETED
+            result = await self._worker(self.operation)
             await self._publish_lifecycle(EventType.OPERATION_TASK_COMPLETED)
+            self._result = result
+            self._status = OperationStatus.COMPLETED
             return self._result
         except asyncio.CancelledError as exc:
-            self._status = OperationStatus.CANCELLED
-            self._error = exc
-            await self._publish_lifecycle(EventType.OPERATION_TASK_CANCELLED)
+            await self._finalize_cancelled(exc)
             if self._root:
                 raise
             return None
         except Exception as exc:
-            self._status = OperationStatus.FAILED
-            self._error = exc
-            await self._publish_lifecycle(
-                EventType.OPERATION_TASK_FAILED,
-                {"error": error_payload(exc)},
-            )
+            try:
+                await self._publish_lifecycle(
+                    EventType.OPERATION_TASK_FAILED,
+                    {"error": error_payload(exc)},
+                )
+            finally:
+                self._status = OperationStatus.FAILED
+                self._error = exc
             if self._root:
                 raise
             return None
@@ -891,7 +1012,8 @@ class OperationTask:
         if self._root:
             await self.operation.wait()
         elif self._task is not None:
-            await self._task
+            await asyncio.shield(self._task)
+        self._result_observed = True
         if self._status == OperationStatus.CANCELLED:
             raise RavenError(
                 ErrorCode.OPERATION_CANCELLED,
@@ -899,6 +1021,25 @@ class OperationTask:
             )
         if self._error is not None:
             raise self._error
+        if self._root and self.operation.status == OperationStatus.FAILED:
+            if self.operation._terminal_exception is not None:
+                raise self.operation._terminal_exception
+            payload = self.operation.error or {}
+            code_value = payload.get("code")
+            try:
+                code = ErrorCode(code_value)
+            except (TypeError, ValueError):
+                code = ErrorCode.INTERNAL_ERROR
+            message = payload.get("message")
+            raise RavenError(
+                code,
+                message if isinstance(message, str) else "The operation failed.",
+                details=(
+                    payload.get("details")
+                    if isinstance(payload.get("details"), dict)
+                    else None
+                ),
+            )
         return self._result
 
 
@@ -910,15 +1051,36 @@ class OperationTask:
         task = self._task
         if task is not None and not task.done():
             task.cancel()
-        elif not self.is_finished:
-            self._status = OperationStatus.CANCELLED
+            await asyncio.gather(task, return_exceptions=True)
+        if not self.is_finished:
+            await self._finalize_cancelled()
 
 
     async def events(self, after_event_id: int = 0) -> AsyncIterator[Event]:
-        """Yield events correlated with this task from the parent stream."""
+        """Yield events belonging to this task and its descendants."""
         async for event in self.operation.events(after_event_id=after_event_id):
-            if event.task_id == self.task_id:
+            if self.operation._event_belongs_to_task(event, self.task_id):
                 yield event
+
+
+    async def _wait_for_worker(self) -> None:
+        task = self._task
+        if task is not None:
+            await asyncio.shield(task)
+
+
+    async def _finalize_cancelled(
+        self,
+        error: asyncio.CancelledError | None = None,
+    ) -> None:
+        if self.is_finished:
+            return
+        cancellation = error or asyncio.CancelledError()
+        try:
+            await self._publish_lifecycle(EventType.OPERATION_TASK_CANCELLED)
+        finally:
+            self._status = OperationStatus.CANCELLED
+            self._error = cancellation
 
 
     async def _publish_lifecycle(
@@ -994,20 +1156,23 @@ class OperationManager:
                 operation_id = self._parse_operation_id(stored_id)
                 key = str(operation_id)
                 async with self._lock:
-                    if key in self._operations:
+                    operation = self._operations.get(key)
+
+                if operation is None:
+                    stream = self._create_stream(stored_id)
+                    events = await stream.read()
+                    if not events:
                         continue
 
-                stream = self._create_stream(stored_id)
-                events = await stream.read()
-                if not events:
+                    operation = Operation.from_events(
+                        operation_id=operation_id,
+                        stream=stream,
+                        store=self._store,
+                        events=events,
+                    )
+                elif not operation._restored or operation._task is not None:
                     continue
 
-                operation = Operation.from_events(
-                    operation_id=operation_id,
-                    stream=stream,
-                    store=self._store,
-                    events=events,
-                )
                 if operation.is_finished:
                     continue
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -43,6 +45,10 @@ class SQLiteOperationStore:
     def __init__(self, path: Path) -> None:
         self.path = path
         self._connection: sqlite3.Connection | None = None
+        self._executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="raven-operation-store",
+        )
         self._lock = asyncio.Lock()
         self._start_lock = asyncio.Lock()
         self._write_generation = 0
@@ -73,7 +79,7 @@ class SQLiteOperationStore:
             if self._connection is not None:
                 return
             try:
-                self._connection = await asyncio.to_thread(self._open)
+                await self._run_in_store_thread(self._open_connection)
             except RavenError:
                 raise
             except Exception as exc:
@@ -87,7 +93,7 @@ class SQLiteOperationStore:
         await self.start()
         async with self._lock:
             try:
-                await asyncio.to_thread(self._append, event)
+                await self._run_in_store_thread(self._append, event)
             except RavenError:
                 raise
             except Exception as exc:
@@ -117,7 +123,7 @@ class SQLiteOperationStore:
         await self.start()
         async with self._lock:
             try:
-                await asyncio.to_thread(
+                await self._run_in_store_thread(
                     self._register_task,
                     task_id,
                     operation_id,
@@ -142,7 +148,7 @@ class SQLiteOperationStore:
         await self.start()
         async with self._lock:
             try:
-                row = await asyncio.to_thread(self._read_task, task_id)
+                row = await self._run_in_store_thread(self._read_task, task_id)
             except Exception as exc:
                 raise self._database_error("The operation task could not be read.") from exc
         if row is None:
@@ -162,7 +168,7 @@ class SQLiteOperationStore:
         await self.start()
         async with self._lock:
             try:
-                row = await asyncio.to_thread(self._read_retry, task_id)
+                row = await self._run_in_store_thread(self._read_retry, task_id)
             except Exception as exc:
                 raise self._database_error("The operation retry could not be read.") from exc
         if row is None:
@@ -181,7 +187,10 @@ class SQLiteOperationStore:
         await self.start()
         async with self._lock:
             try:
-                rows = await asyncio.to_thread(self._unfinished_tasks, operation_id)
+                rows = await self._run_in_store_thread(
+                    self._unfinished_tasks,
+                    operation_id,
+                )
             except Exception as exc:
                 raise self._database_error("Unfinished operation tasks could not be read.") from exc
         try:
@@ -201,7 +210,10 @@ class SQLiteOperationStore:
         await self.start()
         async with self._lock:
             try:
-                row = await asyncio.to_thread(self._read_metadata, operation_id)
+                row = await self._run_in_store_thread(
+                    self._read_metadata,
+                    operation_id,
+                )
             except Exception as exc:
                 raise self._database_error("Event metadata could not be read.") from exc
 
@@ -219,7 +231,7 @@ class SQLiteOperationStore:
         await self.start()
         async with self._lock:
             try:
-                rows = await asyncio.to_thread(
+                rows = await self._run_in_store_thread(
                     self._read_after,
                     operation_id,
                     after_event_id,
@@ -241,7 +253,7 @@ class SQLiteOperationStore:
         await self.start()
         async with self._lock:
             try:
-                return await asyncio.to_thread(self._operation_ids)
+                return await self._run_in_store_thread(self._operation_ids)
             except Exception as exc:
                 raise self._database_error("Operation IDs could not be read.") from exc
 
@@ -250,7 +262,9 @@ class SQLiteOperationStore:
         await self.start()
         async with self._lock:
             try:
-                return await asyncio.to_thread(self._unfinished_operation_ids)
+                return await self._run_in_store_thread(
+                    self._unfinished_operation_ids
+                )
             except Exception as exc:
                 raise self._database_error(
                     "Unfinished operation IDs could not be read."
@@ -261,7 +275,7 @@ class SQLiteOperationStore:
         await self.start()
         async with self._lock:
             try:
-                return await asyncio.to_thread(
+                return await self._run_in_store_thread(
                     self._expired_operation_ids,
                     cutoff.isoformat(),
                 )
@@ -273,7 +287,7 @@ class SQLiteOperationStore:
         await self.start()
         async with self._lock:
             try:
-                changed = await asyncio.to_thread(self._delete, operation_id)
+                changed = await self._run_in_store_thread(self._delete, operation_id)
             except Exception as exc:
                 raise self._database_error("The operation events could not be deleted.") from exc
             if changed:
@@ -286,7 +300,7 @@ class SQLiteOperationStore:
             if not self.is_dirty:
                 return False
             try:
-                await asyncio.to_thread(self._checkpoint)
+                await self._run_in_store_thread(self._checkpoint)
             except Exception as exc:
                 raise RavenError(
                     ErrorCode.OPERATION_SYNC_FAILED,
@@ -303,8 +317,27 @@ class SQLiteOperationStore:
             self._closed = True
             connection = self._connection
             self._connection = None
-            if connection is not None:
-                await asyncio.to_thread(connection.close)
+            try:
+                if connection is not None:
+                    await self._run_in_store_thread(connection.close)
+            finally:
+                self._executor.shutdown(wait=False)
+
+
+    async def _run_in_store_thread(self, function: Any, *args: Any) -> Any:
+        """Run one database call without releasing ownership before it exits."""
+        loop = asyncio.get_running_loop()
+        future = loop.run_in_executor(self._executor, partial(function, *args))
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            await asyncio.shield(future)
+            raise
+
+
+    def _open_connection(self) -> None:
+        if self._connection is None:
+            self._connection = self._open()
 
 
     def _open(self) -> sqlite3.Connection:

@@ -141,7 +141,7 @@ class ToolBuilder:
         tools = [
             self._retrieval_tool(mode, conversation, policy, operation)
             for mode in RetrievalMode
-            if mode in policy.scope_modes
+            if policy.permits(mode)
         ]
         tools.extend(self._navigation_tools(conversation, operation))
         tools.extend(

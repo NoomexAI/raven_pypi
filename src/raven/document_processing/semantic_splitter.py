@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import math
 from collections.abc import Callable, Sequence
 from typing import Any
 
 from llama_index.core.node_parser.text.utils import split_by_sentence_tokenizer
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..core.errors import ErrorCode, RavenError
 from .document_parser import ElementType, NavigationType, ParsedDocument
 
 
@@ -68,8 +71,9 @@ class ProvenanceAwareSemanticSplitter:
             [window for window in sentence_windows],
             show_progress=False,
         )
-        distances = self._calculate_distances(embeddings)
-        groups = self._build_groups(units, distances)
+        self._validate_embeddings(embeddings, expected_count=len(sentence_windows))
+        distances = await asyncio.to_thread(self._calculate_distances, embeddings)
+        groups = await asyncio.to_thread(self._build_groups, units, distances)
 
         return [
             self._build_section(document, group)
@@ -124,6 +128,34 @@ class ProvenanceAwareSemanticSplitter:
             1 - self._embed_model.similarity(embeddings[index], embeddings[index + 1])
             for index in range(len(embeddings) - 1)
         ]
+
+
+    @staticmethod
+    def _validate_embeddings(
+        embeddings: Sequence[Sequence[float]],
+        *,
+        expected_count: int,
+    ) -> None:
+        if len(embeddings) != expected_count:
+            raise RavenError(
+                ErrorCode.INVALID_EMBEDDING_RESULT,
+                "Embedding model returned an invalid number of semantic vectors.",
+            )
+        dimensions = {len(vector) for vector in embeddings}
+        if not dimensions or 0 in dimensions or len(dimensions) != 1:
+            raise RavenError(
+                ErrorCode.INVALID_EMBEDDING_RESULT,
+                "Semantic vectors must have one consistent non-zero dimension.",
+            )
+        if any(
+            not math.isfinite(float(value))
+            for vector in embeddings
+            for value in vector
+        ):
+            raise RavenError(
+                ErrorCode.INVALID_EMBEDDING_RESULT,
+                "Semantic vectors must contain only finite numeric values.",
+            )
 
 
     def _build_groups(

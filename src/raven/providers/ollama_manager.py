@@ -6,6 +6,7 @@ service, but it does not start or stop the Ollama process.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -37,9 +38,20 @@ class OllamaManager:
         self.request_timeout = request_timeout
         self.embedding_batch_size = embedding_batch_size
 
-        self._client = ollama.AsyncClient(host=self.host)
+        if request_timeout <= 0:
+            raise ValueError("request_timeout must be positive")
+        if embedding_batch_size <= 0:
+            raise ValueError("embedding_batch_size must be positive")
+
+        self._client = ollama.AsyncClient(
+            host=self.host,
+            timeout=self.request_timeout,
+        )
         self._llms: dict[str, Ollama] = {}
         self._embeddings: dict[str, OllamaEmbedding] = {}
+        self._model_locks: dict[str, asyncio.Lock] = {}
+        self._pull_locks: dict[str, asyncio.Lock] = {}
+        self._closed = False
         self._operation_manager = operation_manager
 
 
@@ -170,29 +182,30 @@ class OllamaManager:
         operation: Operation,
     ) -> None:
         """Pull a model, forwarding each progress item to the caller."""
-        await self._emit(operation, EventType.MODEL_PULL_STARTED, {"model": model})
-        try:
-            stream = await self._client.pull(model, stream=True)
-            async for item in stream:
-                progress = self._dump(item)
+        async with self._pull_lock(model):
+            await self._emit(operation, EventType.MODEL_PULL_STARTED, {"model": model})
+            try:
+                stream = await self._client.pull(model, stream=True)
+                async for item in stream:
+                    progress = self._dump(item)
+                    await self._emit(
+                        operation,
+                        EventType.MODEL_PULL_PROGRESS,
+                        {"model": model, **progress},
+                    )
+                    if on_progress is not None:
+                        result = on_progress(progress)
+                        if result is not None:
+                            await result
+            except Exception as exc:
+                error = self._provider_error("pull model", model)
                 await self._emit(
                     operation,
-                    EventType.MODEL_PULL_PROGRESS,
-                    {"model": model, **progress},
+                    EventType.MODEL_PULL_FAILED,
+                    {"model": model, "error": error_payload(error)},
                 )
-                if on_progress is not None:
-                    result = on_progress(progress)
-                    if result is not None:
-                        await result
-        except Exception as exc:
-            error = self._provider_error("pull model", model)
-            await self._emit(
-                operation,
-                EventType.MODEL_PULL_FAILED,
-                {"model": model, "error": error_payload(error)},
-            )
-            raise error from exc
-        await self._emit(operation, EventType.MODEL_PULL_COMPLETED, {"model": model})
+                raise error from exc
+            await self._emit(operation, EventType.MODEL_PULL_COMPLETED, {"model": model})
 
 
     async def delete(self, model: str, *, operation: Operation | None = None) -> OperationTask:
@@ -211,7 +224,8 @@ class OllamaManager:
     async def _delete(self, model: str, *, operation: Operation) -> None:
         await self._emit(operation, EventType.MODEL_DELETE_STARTED, {"model": model})
         try:
-            await self._client.delete(model)
+            async with self._model_lock(model), self._pull_lock(model):
+                await self._client.delete(model)
         except Exception as exc:
             error = self._provider_error("delete model", model)
             await self._emit(
@@ -247,14 +261,15 @@ class OllamaManager:
         """Return a LlamaIndex LLM adapter, pulling the model if necessary."""
         await self._emit(operation, EventType.MODEL_LOAD_LLM_STARTED, {"model": model})
         try:
-            await self.ensure_available(model, operation=operation)
-            cached = model in self._llms
-            if not cached:
-                self._llms[model] = Ollama(
-                    model=model,
-                    base_url=self.host,
-                    request_timeout=self.request_timeout,
-                )
+            async with self._model_lock(model):
+                await self.ensure_available(model, operation=operation)
+                cached = model in self._llms
+                if not cached:
+                    self._llms[model] = Ollama(
+                        model=model,
+                        base_url=self.host,
+                        request_timeout=self.request_timeout,
+                    )
         except Exception as exc:
             error = self._provider_error("load LLM", model)
             await self._emit(
@@ -294,14 +309,16 @@ class OllamaManager:
         """Return a LlamaIndex embedding adapter, pulling the model if necessary."""
         await self._emit(operation, EventType.MODEL_LOAD_EMBEDDING_STARTED, {"model": model})
         try:
-            await self.ensure_available(model, operation=operation)
-            cached = model in self._embeddings
-            if not cached:
-                self._embeddings[model] = OllamaEmbedding(
-                    model_name=model,
-                    base_url=self.host,
-                    embed_batch_size=self.embedding_batch_size,
-                )
+            async with self._model_lock(model):
+                await self.ensure_available(model, operation=operation)
+                cached = model in self._embeddings
+                if not cached:
+                    self._embeddings[model] = OllamaEmbedding(
+                        model_name=model,
+                        base_url=self.host,
+                        embed_batch_size=self.embedding_batch_size,
+                        client_kwargs={"timeout": self.request_timeout},
+                    )
         except Exception as exc:
             error = self._provider_error("load embedding model", model)
             await self._emit(
@@ -345,12 +362,13 @@ class OllamaManager:
     async def _unload_llm(self, model: str, *, operation: Operation) -> None:
         await self._emit(operation, EventType.MODEL_UNLOAD_LLM_STARTED, {"model": model})
         try:
-            await self._client.generate(
-                model=model,
-                prompt="",
-                keep_alive=0,
-                options={"num_predict": 1},
-            )
+            async with self._model_lock(model):
+                await self._client.generate(
+                    model=model,
+                    prompt="",
+                    keep_alive=0,
+                    options={"num_predict": 1},
+                )
         except Exception as exc:
             error = self._provider_error("unload LLM", model)
             await self._emit(
@@ -389,7 +407,8 @@ class OllamaManager:
     ) -> None:
         await self._emit(operation, EventType.MODEL_UNLOAD_EMBEDDING_STARTED, {"model": model})
         try:
-            await self._client.embed(model=model, input="", keep_alive=0)
+            async with self._model_lock(model):
+                await self._client.embed(model=model, input="", keep_alive=0)
         except Exception as exc:
             error = self._provider_error("unload embedding model", model)
             await self._emit(
@@ -400,6 +419,26 @@ class OllamaManager:
             raise error from exc
         self._embeddings.pop(model, None)
         await self._emit(operation, EventType.MODEL_UNLOAD_EMBEDDING_COMPLETED, {"model": model})
+
+
+    async def close(self) -> None:
+        """Close Raven's client without stopping the external Ollama service."""
+        if self._closed:
+            return
+        self._closed = True
+        self._llms.clear()
+        self._embeddings.clear()
+        self._model_locks.clear()
+        self._pull_locks.clear()
+        await self._client.close()
+
+
+    def _model_lock(self, model: str) -> asyncio.Lock:
+        return self._model_locks.setdefault(model, asyncio.Lock())
+
+
+    def _pull_lock(self, model: str) -> asyncio.Lock:
+        return self._pull_locks.setdefault(model, asyncio.Lock())
 
 
     @staticmethod

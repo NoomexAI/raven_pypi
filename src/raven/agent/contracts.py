@@ -170,7 +170,10 @@ class AgentRun:
         }
         async for event in self._task.events(after_event_id=after_event_id):
             yield event
-            if event.type in terminal_task_events:
+            if (
+                event.task_id == self._task.task_id
+                and event.type in terminal_task_events
+            ):
                 return
 
 
@@ -191,7 +194,7 @@ class AgentRun:
         }
 
         await self._task.result()
-        async for event in self._task.operation.events():
+        async for event in self.events():
             if event.type == EventType.CHAT_RESPONSE_DELTA:
                 delta = event.data.get("delta")
                 if isinstance(delta, str):

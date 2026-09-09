@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ from ..core.operations import (
 )
 from ..data_management.conversation_manager import Conversation, ConversationManager
 from ..data_management.knowledge_base import Knowledge, KnowledgeBase
+from ..document_processing.document_parser import DocumentParser
 from ..pipelines.ingestion import IngestionPipeline, IngestionRetryInput
 from ..pipelines.reconstructor import Reconstructor
 from ..pipelines.retrieval import (
@@ -65,14 +67,21 @@ class Raven:
             self.knowledge_base,
             self.operation_manager,
         )
+        self._document_parser = DocumentParser()
         self.embedded_retrieval: EmbeddedRetrievalPipeline | None = None
         self.hierarchical_retrieval: HierarchicalRetrievalPipeline | None = None
         self.agreement_retrieval: AgreementBasedRetrievalPipeline | None = None
         self.vector_conditioned_retrieval: VectorConditionedRetrievalPipeline | None = None
         self.retrieval_pipelines: RetrievalPipelines | None = None
         self._sessions: dict[str, Session] = {}
+        self._session_registry_lock = threading.RLock()
         self._lifecycle_lock = asyncio.Lock()
+        self._model_lock = asyncio.Lock()
         self._retry_lock = asyncio.Lock()
+        self._close_task: asyncio.Task[None] | None = None
+        self._llm_spec: ModelSpec | None = None
+        self._embedding_spec: ModelSpec | None = None
+        self._models_reloading = False
         self._started = False
         self._closed = False
 
@@ -188,6 +197,7 @@ class Raven:
                 ),
                 buffer_size=retry_input.buffer_size,
                 max_extraction_retries=retry_input.max_extraction_retries,
+                document_parser=self._document_parser,
             )
             return await pipeline.run(
                 retry_input.knowledge_name,
@@ -296,16 +306,48 @@ class Raven:
         *,
         operation: Operation,
     ) -> dict[str, dict[str, str]]:
-        llm_task = await self.provider.load(llm_spec, operation=operation)
-        embedding_task = await self.provider.load(embedding_spec, operation=operation)
-        llm, embed_model = await asyncio.gather(
-            llm_task.result(),
-            embedding_task.result(),
-        )
+        async with self._model_lock:
+            with self._session_registry_lock:
+                self._models_reloading = True
+            try:
+                llm_task = await self.provider.load(llm_spec, operation=operation)
+                embedding_task = await self.provider.load(
+                    embedding_spec,
+                    operation=operation,
+                )
+                loaded = await asyncio.gather(
+                    llm_task.result(),
+                    embedding_task.result(),
+                    return_exceptions=True,
+                )
+                failures = [
+                    value for value in loaded if isinstance(value, BaseException)
+                ]
+                if failures:
+                    raise failures[0]
 
-        self.llm = llm
-        self.embed_model = embed_model
-        self._configure_model_components()
+                llm, embed_model = loaded
+                self._validate_model_capabilities(llm, embed_model)
+                models_changed = (
+                    self._llm_spec != llm_spec
+                    or self._embedding_spec != embedding_spec
+                )
+                if models_changed:
+                    await self.knowledge_base.validate_embedding_model(embed_model)
+                    with self._session_registry_lock:
+                        sessions = tuple(self._sessions.values())
+                    for session in sessions:
+                        await session.conversation.validate_embedding_model(embed_model)
+                    await self._close_sessions()
+
+                self.llm = llm
+                self.embed_model = embed_model
+                self._llm_spec = llm_spec
+                self._embedding_spec = embedding_spec
+                self._configure_model_components()
+            finally:
+                with self._session_registry_lock:
+                    self._models_reloading = False
         return {
             "llm": self._model_result(llm_spec),
             "embedding": self._model_result(embedding_spec),
@@ -379,6 +421,31 @@ class Raven:
         }
 
 
+    @staticmethod
+    def _validate_model_capabilities(llm: Any, embed_model: Any) -> None:
+        llm_methods = ("achat", "astream_chat", "astructured_predict")
+        embedding_methods = (
+            "aget_query_embedding",
+            "aget_text_embedding_batch",
+            "similarity",
+        )
+        missing_llm = [name for name in llm_methods if not callable(getattr(llm, name, None))]
+        missing_embedding = [
+            name
+            for name in embedding_methods
+            if not callable(getattr(embed_model, name, None))
+        ]
+        if missing_llm or missing_embedding:
+            raise RavenError(
+                ErrorCode.MODEL_CAPABILITY_MISSING,
+                "Loaded models do not provide Raven's required async interfaces.",
+                details={
+                    "llm_methods": missing_llm,
+                    "embedding_methods": missing_embedding,
+                },
+            )
+
+
     async def start(self) -> None:
         """Recover operations and open Raven's persistent registries."""
         async with self._lifecycle_lock:
@@ -390,41 +457,102 @@ class Raven:
                     "Raven has been closed and cannot be started again.",
                 )
 
-            await self.operation_manager.recover()
-            await self.knowledge_base.start()
             try:
+                await self.operation_manager.recover()
+                await self.knowledge_base.start()
                 await self.conversation_manager.start()
-            except Exception:
-                await self.knowledge_base.close()
+            except BaseException:
+                self._closed = True
+                self._started = False
+                await asyncio.gather(
+                    self.conversation_manager.close(),
+                    self.knowledge_base.close(),
+                    self.provider.close(),
+                    self.operation_manager.close(),
+                    return_exceptions=True,
+                )
                 raise
             self._started = True
 
 
     async def close(self) -> None:
-        """Cancel work, reconcile pending writes, and close all resources."""
+        """Attempt every owned cleanup step and share one shutdown completion."""
         async with self._lifecycle_lock:
-            if self._closed:
-                return
-            self._closed = True
-            self._started = False
+            if self._close_task is None:
+                self._closed = True
+                self._started = False
+                with self._session_registry_lock:
+                    sessions = list(self._sessions.values())
+                    self._sessions.clear()
+                self._close_task = asyncio.create_task(
+                    self._close_owned_resources(sessions)
+                )
+            close_task = self._close_task
+
+        await asyncio.shield(close_task)
+
+
+    async def _close_owned_resources(self, sessions: list[Session]) -> None:
+        failures: list[tuple[str, BaseException]] = []
+
+        async def attempt(name: str, awaitable: Any) -> None:
+            try:
+                await awaitable
+            except BaseException as exc:
+                failures.append((name, exc))
+
+        session_results = await asyncio.gather(
+            *(session.close() for session in sessions),
+            return_exceptions=True,
+        )
+        failures.extend(
+            ("session", result)
+            for result in session_results
+            if isinstance(result, BaseException)
+        )
+        await attempt("active operations", self.operation_manager.cancel_active())
+        if self.knowledge_base.is_started:
+            await attempt(
+                "knowledge reconciliation",
+                self.knowledge_base.reconcile_pending_ingestions(),
+            )
+            await attempt(
+                "knowledge deletion reconciliation",
+                self.knowledge_base.reconcile_pending_file_deletions(),
+            )
+        await attempt("conversations", self.conversation_manager.close())
+        await attempt("knowledge base", self.knowledge_base.close())
+        await attempt("providers", self.provider.close())
+        await attempt("operation manager", self.operation_manager.close())
+
+        if failures:
+            raise RavenError(
+                ErrorCode.INTERNAL_ERROR,
+                "Raven shutdown completed with cleanup failures.",
+                details={
+                    "failures": [
+                        {"resource": name, "error_type": type(error).__name__}
+                        for name, error in failures
+                    ]
+                },
+            ) from failures[0][1]
+
+
+    async def _close_sessions(self) -> None:
+        with self._session_registry_lock:
             sessions = list(self._sessions.values())
             self._sessions.clear()
-
-        shutdown_error: BaseException | None = None
-        try:
-            await asyncio.gather(*(session.close() for session in sessions))
-            await self.operation_manager.cancel_active()
-            if self.knowledge_base.is_started:
-                await self.knowledge_base.reconcile_pending_ingestions()
-        except BaseException as exc:
-            shutdown_error = exc
-        finally:
-            await self.conversation_manager.close()
-            await self.knowledge_base.close()
-            await self.operation_manager.close()
-
-        if shutdown_error is not None:
-            raise shutdown_error
+        results = await asyncio.gather(
+            *(session.close() for session in sessions),
+            return_exceptions=True,
+        )
+        failures = [result for result in results if isinstance(result, BaseException)]
+        if failures:
+            raise RavenError(
+                ErrorCode.INTERNAL_ERROR,
+                "One or more sessions could not be closed.",
+                details={"failure_count": len(failures)},
+            ) from failures[0]
 
 
     async def create_knowledge(
@@ -468,6 +596,8 @@ class Raven:
         max_extraction_retries: int = 3,
         chunk_size: int = 512,
         chunk_overlap: int = 50,
+        max_source_size_bytes: int = 100 * 1024 * 1024,
+        max_document_pages: int = 1_000,
         operation: Operation | None = None,
     ) -> OperationTask:
         self._ensure_models_loaded()
@@ -479,6 +609,7 @@ class Raven:
             breakpoint_percentile_threshold=breakpoint_percentile_threshold,
             buffer_size=buffer_size,
             max_extraction_retries=max_extraction_retries,
+            document_parser=self._document_parser,
         )
         return await pipeline.run(
             knowledge_name,
@@ -487,6 +618,8 @@ class Raven:
             embed_model=self.embed_model,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
+            max_source_size_bytes=max_source_size_bytes,
+            max_document_pages=max_document_pages,
             operation=operation,
         )
 
@@ -594,6 +727,10 @@ class Raven:
         *,
         operation: Operation | None = None,
     ) -> OperationTask:
+        with self._session_registry_lock:
+            session = self._sessions.pop(conversation_id, None)
+        if session is not None:
+            await session.close()
         return await self.conversation_manager.delete(
             conversation_id,
             operation=operation,
@@ -614,31 +751,58 @@ class Raven:
         assert self.llm is not None
         assert self.embed_model is not None
         assert self.retrieval_pipelines is not None
+        if not self.conversation_manager.owns(conversation):
+            raise RavenError(
+                ErrorCode.FOREIGN_CONVERSATION,
+                "The supplied conversation does not belong to this Raven instance.",
+            )
         conversation_id = conversation.conversation_id
-        existing = self._sessions.get(conversation_id)
-        if existing is not None:
-            return existing
+        with self._session_registry_lock:
+            if self._models_reloading:
+                raise RavenError(
+                    ErrorCode.MODEL_RELOAD_IN_PROGRESS,
+                    "A model reload is in progress; create the session after it completes.",
+                )
+            existing = self._sessions.get(conversation_id)
+            if existing is not None:
+                if existing.is_closed:
+                    self._sessions.pop(conversation_id, None)
+                elif existing.matches_configuration(
+                    llm=self.llm,
+                    embed_model=self.embed_model,
+                    max_iterations=max_iterations,
+                    top_k=top_k,
+                    memory_token_limit=memory_token_limit,
+                    memory_top_k=memory_top_k,
+                ):
+                    return existing
+                else:
+                    raise RavenError(
+                        ErrorCode.CONVERSATION_SESSION_CONFIGURATION_CONFLICT,
+                        "The active session uses different runtime settings.",
+                        details={"conversation_id": conversation_id},
+                    )
 
-        harness = AgentHarness(
-            llm=self.llm,
-            knowledge_base=self.knowledge_base,
-            retrieval_pipelines=self.retrieval_pipelines,
-            operation_manager=self.operation_manager,
-            reconstructor=self.reconstructor,
-            max_iterations=max_iterations,
-            top_k=top_k,
-        )
-        session = Session(
-            conversation,
-            harness,
-            self.operation_manager,
-            llm=self.llm,
-            embed_model=self.embed_model,
-            memory_token_limit=memory_token_limit,
-            memory_top_k=memory_top_k,
-        )
-        self._sessions[conversation_id] = session
-        return session
+            harness = AgentHarness(
+                llm=self.llm,
+                knowledge_base=self.knowledge_base,
+                retrieval_pipelines=self.retrieval_pipelines,
+                operation_manager=self.operation_manager,
+                reconstructor=self.reconstructor,
+                max_iterations=max_iterations,
+                top_k=top_k,
+            )
+            session = Session(
+                conversation,
+                harness,
+                self.operation_manager,
+                llm=self.llm,
+                embed_model=self.embed_model,
+                memory_token_limit=memory_token_limit,
+                memory_top_k=memory_top_k,
+            )
+            self._sessions[conversation_id] = session
+            return session
 
 
     def _ensure_models_loaded(self) -> None:

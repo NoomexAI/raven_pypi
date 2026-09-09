@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import mimetypes
+import threading
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from docling.datamodel.base_models import ConversionStatus
 from docling.document_converter import DocumentConverter
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.errors import ErrorCode, RavenError
+from ..core.config import DEFAULT_MAX_DOCUMENT_PAGES, DEFAULT_MAX_SOURCE_FILE_BYTES
 
 
 class NavigationType(StrEnum):
@@ -55,6 +58,8 @@ class ParsedDocument(BaseModel):
     file_name: str
     media_type: str | None = None
     navigation_type: NavigationType = NavigationType.NONE
+    conversion_status: str = "success"
+    warnings: list[str] = Field(default_factory=list)
     elements: list[ParsedElement] = Field(default_factory=list)
 
     def text_projection(self) -> str:
@@ -73,6 +78,7 @@ class DocumentParser:
 
     def __init__(self, converter: DocumentConverter | None = None) -> None:
         self._converter = converter
+        self._converter_lock = threading.Lock()
 
 
     async def parse(
@@ -80,20 +86,43 @@ class DocumentParser:
         source_path: str | Path,
         *,
         file_id: str,
+        max_file_size_bytes: int = DEFAULT_MAX_SOURCE_FILE_BYTES,
+        max_pages: int = DEFAULT_MAX_DOCUMENT_PAGES,
     ) -> ParsedDocument:
         """Parse a source file without blocking the event loop."""
         self._validate_file_id(file_id)
-        return await asyncio.to_thread(self._parse_sync, Path(source_path), file_id)
+        if max_file_size_bytes <= 0:
+            raise ValueError("max_file_size_bytes must be positive")
+        if max_pages <= 0:
+            raise ValueError("max_pages must be positive")
+        return await asyncio.to_thread(
+            self._parse_sync,
+            Path(source_path),
+            file_id,
+            max_file_size_bytes,
+            max_pages,
+        )
 
 
-    def _parse_sync(self, source_path: Path, file_id: str) -> ParsedDocument:
+    def _parse_sync(
+        self,
+        source_path: Path,
+        file_id: str,
+        max_file_size_bytes: int,
+        max_pages: int,
+    ) -> ParsedDocument:
         path = source_path.expanduser().resolve()
-        self._validate_source(path)
+        self._validate_source(path, max_file_size_bytes=max_file_size_bytes)
 
         try:
             if path.suffix.lower() in {".txt", ".md", ".markdown"}:
                 return self._parse_plain_text(path, file_id)
-            return self._parse_with_docling(path, file_id)
+            return self._parse_with_docling(
+                path,
+                file_id,
+                max_file_size_bytes=max_file_size_bytes,
+                max_pages=max_pages,
+            )
         except RavenError:
             raise
         except (OSError, UnicodeError) as exc:
@@ -109,7 +138,7 @@ class DocumentParser:
 
 
     @classmethod
-    def _validate_source(cls, path: Path) -> None:
+    def _validate_source(cls, path: Path, *, max_file_size_bytes: int) -> None:
         if not path.is_file():
             raise RavenError(
                 ErrorCode.SOURCE_FILE_NOT_FOUND,
@@ -120,6 +149,16 @@ class DocumentParser:
                 ErrorCode.UNSUPPORTED_SOURCE_FILE,
                 f"File type '{path.suffix or '<none>'}' is not supported.",
                 details={"supported_extensions": sorted(cls.SUPPORTED_SUFFIXES)},
+            )
+        size = path.stat().st_size
+        if size > max_file_size_bytes:
+            raise RavenError(
+                ErrorCode.SOURCE_FILE_TOO_LARGE,
+                f"Source file '{path.name}' exceeds the configured size limit.",
+                details={
+                    "size_bytes": size,
+                    "max_size_bytes": max_file_size_bytes,
+                },
             )
 
 
@@ -146,11 +185,45 @@ class DocumentParser:
         )
 
 
-    def _parse_with_docling(self, path: Path, file_id: str) -> ParsedDocument:
-        converter = self._converter or DocumentConverter()
-        self._converter = converter
-        result = converter.convert(path)
+    def _parse_with_docling(
+        self,
+        path: Path,
+        file_id: str,
+        *,
+        max_file_size_bytes: int,
+        max_pages: int,
+    ) -> ParsedDocument:
+        with self._converter_lock:
+            converter = self._converter or DocumentConverter()
+            self._converter = converter
+            result = converter.convert(
+                path,
+                raises_on_error=False,
+                max_num_pages=max_pages,
+                max_file_size=max_file_size_bytes,
+            )
+
+        if result.status not in {
+            ConversionStatus.SUCCESS,
+            ConversionStatus.PARTIAL_SUCCESS,
+        }:
+            raise RavenError(
+                ErrorCode.DOCUMENT_PARSE_FAILED,
+                f"Docling could not convert source file '{path.name}'.",
+                details={"conversion_status": str(result.status.value)},
+            )
         document = result.document
+        page_count = len(getattr(document, "pages", {}) or {})
+        if page_count > max_pages:
+            raise RavenError(
+                ErrorCode.DOCUMENT_PARSE_FAILED,
+                f"Source file '{path.name}' exceeds the configured page limit.",
+                details={"page_count": page_count, "max_pages": max_pages},
+            )
+        warnings = [
+            str(getattr(error, "error_message", None) or error)[:1_000]
+            for error in (getattr(result, "errors", None) or [])[:20]
+        ]
 
         elements = [
             self._normalize_item(item, document, file_id, index)
@@ -171,6 +244,8 @@ class DocumentParser:
             file_name=path.name,
             media_type=mimetypes.guess_type(path.name)[0],
             navigation_type=navigation_type,
+            conversion_status=str(result.status.value),
+            warnings=warnings,
             elements=elements,
         )
 

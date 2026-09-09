@@ -7,9 +7,9 @@ import json
 from typing import Any
 
 from llama_index.core.prompts.base import ChatPromptTemplate
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from ..core.errors import error_payload
+from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
 from ..core.operations import Operation, OperationManager, OperationTask, OperationType
 from ..data_management.knowledge_base import KnowledgeBase
@@ -91,6 +91,8 @@ class RetrievalPipeline:
 class ScoredSection(BaseModel):
     """One LLM relevance score for a section candidate."""
 
+    model_config = ConfigDict(extra="forbid")
+
     section_id: str
     score: int = Field(ge=0, le=10)
 
@@ -98,11 +100,15 @@ class ScoredSection(BaseModel):
 class SectionScoreOutput(BaseModel):
     """Structured LLM output for a section scoring batch."""
 
+    model_config = ConfigDict(extra="forbid")
+
     scores: list[ScoredSection]
 
 
 class ScoredKnowledge(BaseModel):
     """One LLM relevance score for a knowledge summary."""
+
+    model_config = ConfigDict(extra="forbid")
 
     knowledge_name: str
     score: int = Field(ge=0, le=10)
@@ -110,6 +116,8 @@ class ScoredKnowledge(BaseModel):
 
 class KnowledgeScoreOutput(BaseModel):
     """Structured LLM output for a knowledge scoring batch."""
+
+    model_config = ConfigDict(extra="forbid")
 
     scores: list[ScoredKnowledge]
 
@@ -202,12 +210,12 @@ class EmbeddedRetrievalPipeline(RetrievalPipeline):
         )
 
         try:
-            self._raise_if_cancelled(operation)
-            query_vector = await self._embed_model.aget_text_embedding(user_query)
-            self._raise_if_cancelled(operation)
-
             knowledge = self._knowledge_base.get(knowledge_name)
-            hits = await knowledge.search(query_vector, top_k=top_k)
+            await knowledge.validate_embedding_model(self._embed_model)
+            self._raise_if_cancelled(operation)
+            query_vector = await self._embed_model.aget_query_embedding(user_query)
+            self._raise_if_cancelled(operation)
+            hits = await knowledge.search(query_vector, top_k=max(top_k * 4, top_k))
             results: list[dict[str, str]] = []
             seen: set[str] = set()
 
@@ -225,6 +233,8 @@ class EmbeddedRetrievalPipeline(RetrievalPipeline):
                 results.append(
                     self._section_result(knowledge_name, section, section_id)
                 )
+                if len(results) >= top_k:
+                    break
 
             await self._emit(
                 operation,
@@ -294,15 +304,24 @@ class EmbeddedRetrievalPipeline(RetrievalPipeline):
         )
 
         try:
+            knowledge_names = await self._knowledge_names()
+            knowledges = [
+                (name, self._knowledge_base.get(name))
+                for name in knowledge_names
+            ]
+            for _name, knowledge in knowledges:
+                await knowledge.validate_embedding_model(self._embed_model)
             self._raise_if_cancelled(operation)
-            query_vector = await self._embed_model.aget_text_embedding(user_query)
+            query_vector = await self._embed_model.aget_query_embedding(user_query)
             self._raise_if_cancelled(operation)
 
             ranked_hits: list[dict[str, Any]] = []
-            for knowledge_name in await self._knowledge_names():
+            for knowledge_name, knowledge in knowledges:
                 self._raise_if_cancelled(operation)
-                knowledge = self._knowledge_base.get(knowledge_name)
-                hits = await knowledge.search(query_vector, top_k=top_k)
+                hits = await knowledge.search(
+                    query_vector,
+                    top_k=max(top_k * 4, top_k),
+                )
                 ranked_hits.extend(
                     {
                         "knowledge_name": knowledge_name,
@@ -377,13 +396,17 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
         operation_manager: OperationManager,
         *,
         max_retries: int = MAX_SCORING_RETRIES,
+        max_scoring_characters: int = 64_000,
     ) -> None:
         super().__init__(knowledge_base, operation_manager)
         if max_retries <= 0:
             raise ValueError("max_retries must be positive")
+        if max_scoring_characters <= 0:
+            raise ValueError("max_scoring_characters must be positive")
 
         self._llm = llm
         self._max_retries = max_retries
+        self._max_scoring_characters = max_scoring_characters
         self._section_prompt = ChatPromptTemplate.from_messages(
             [
                 ("system", SCORE_SYSTEM_PROMPT),
@@ -429,10 +452,11 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
         if anchor_count < 0:
             raise ValueError("anchor_count must be non-negative")
 
-        batches = [
-            candidates[index : index + max_per_read]
-            for index in range(0, len(candidates), max_per_read)
-        ]
+        batches = self._scoring_batches(
+            candidates,
+            id_field=id_field,
+            max_per_read=max_per_read,
+        )
         scores: dict[str, int] = {}
         order: list[str] = []
 
@@ -443,20 +467,36 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
                 for candidate in batch
                 if candidate.get(id_field) is not None
             }
+            positions = {candidate_id: index for index, candidate_id in enumerate(order)}
             ranked = sorted(
                 scores.items(),
-                key=lambda item: (-item[1], order.index(item[0])),
+                key=lambda item: (-item[1], positions[item[0]]),
             )
-            anchors = "\n".join(
-                f"{candidate_id}: score={score}/10"
-                for candidate_id, score in ranked[:anchor_count]
-            ) or "(none - first read)"
+            all_by_id = {
+                str(candidate[id_field]): candidate
+                for candidate in candidates
+                if candidate.get(id_field) is not None
+            }
+            anchors = json.dumps(
+                [
+                    {
+                        **self._score_metadata(
+                            all_by_id[candidate_id],
+                            id_field=id_field,
+                        ),
+                        "score": score,
+                    }
+                    for candidate_id, score in ranked[:anchor_count]
+                ],
+                ensure_ascii=False,
+            ) if ranked[:anchor_count] else "(none - first read)"
 
             metadata_batch = [
-                self._score_metadata(candidate, id_field=id_field)
+                self._bounded_score_metadata(candidate, id_field=id_field)
                 for candidate in batch
             ]
-            result: SectionScoreOutput | KnowledgeScoreOutput | None = None
+            batch_scores: dict[str, int] | None = None
+            last_error: Exception | None = None
 
             for attempt in range(1, self._max_retries + 1):
                 self._raise_if_cancelled(operation)
@@ -472,31 +512,29 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
                         ),
                     )
                     result = output_cls.model_validate(raw_result)
+                    batch_scores = self._validated_batch_scores(
+                        result,
+                        batch_ids=batch_ids,
+                        id_field=id_field,
+                        mode=mode,
+                    )
                     break
                 except asyncio.CancelledError:
                     raise
-                except Exception:
+                except Exception as exc:
+                    last_error = exc
                     if attempt == self._max_retries:
                         raise
 
-            if result is None:
+            if batch_scores is None:
                 raise RuntimeError(
                     f"{mode}: scoring batch {batch_index} failed"
-                )
+                ) from last_error
 
-            scored_count = 0
-            for entry in result.scores:
-                candidate_id = getattr(entry, id_field, None)
-                if (
-                    not isinstance(candidate_id, str)
-                    or candidate_id not in batch_ids
-                    or candidate_id in scores
-                ):
-                    continue
-
-                scores[candidate_id] = entry.score
+            for candidate in batch:
+                candidate_id = str(candidate[id_field])
+                scores[candidate_id] = batch_scores[candidate_id]
                 order.append(candidate_id)
-                scored_count += 1
 
             await self._emit(
                 operation,
@@ -506,13 +544,14 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
                     "batch": batch_index,
                     "batch_total": len(batches),
                     "candidates": len(batch),
-                    "scored": scored_count,
+                    "scored": len(batch_scores),
                 },
             )
 
+        positions = {candidate_id: index for index, candidate_id in enumerate(order)}
         ranked_ids = sorted(
             order,
-            key=lambda candidate_id: (-scores[candidate_id], order.index(candidate_id)),
+            key=lambda candidate_id: (-scores[candidate_id], positions[candidate_id]),
         )
         by_id = {
             str(candidate[id_field]): candidate
@@ -520,6 +559,40 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
             if candidate.get(id_field) is not None
         }
         return [by_id[candidate_id] for candidate_id in ranked_ids[:top_k]]
+
+
+    @staticmethod
+    def _validated_batch_scores(
+        result: SectionScoreOutput | KnowledgeScoreOutput,
+        *,
+        batch_ids: set[str],
+        id_field: str,
+        mode: str,
+    ) -> dict[str, int]:
+        batch_scores: dict[str, int] = {}
+        for entry in result.scores:
+            candidate_id = getattr(entry, id_field, None)
+            if (
+                not isinstance(candidate_id, str)
+                or candidate_id not in batch_ids
+                or candidate_id in batch_scores
+            ):
+                raise RavenError(
+                    ErrorCode.RETRIEVAL_SCORING_INVALID,
+                    f"{mode}: the scorer returned an unknown or duplicate identifier.",
+                )
+
+            batch_scores[candidate_id] = entry.score
+
+        missing_ids = sorted(batch_ids.difference(batch_scores))
+        if missing_ids:
+            raise RavenError(
+                ErrorCode.RETRIEVAL_SCORING_INVALID,
+                f"{mode}: the scorer did not score every candidate.",
+                details={"missing_ids": missing_ids},
+            )
+
+        return batch_scores
 
 
     @staticmethod
@@ -541,6 +614,49 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
             "knowledge_name": candidate.get("knowledge_name", ""),
             "summary": candidate.get("summary", ""),
         }
+
+
+    def _bounded_score_metadata(
+        self,
+        candidate: dict[str, Any],
+        *,
+        id_field: str,
+    ) -> dict[str, Any]:
+        metadata = self._score_metadata(candidate, id_field=id_field)
+        per_candidate = max(1_000, self._max_scoring_characters // 4)
+        for key, value in tuple(metadata.items()):
+            if isinstance(value, str) and len(value) > per_candidate:
+                metadata[key] = value[:per_candidate]
+            elif isinstance(value, list):
+                metadata[key] = [str(item)[:500] for item in value[:50]]
+        return metadata
+
+
+    def _scoring_batches(
+        self,
+        candidates: list[dict[str, Any]],
+        *,
+        id_field: str,
+        max_per_read: int,
+    ) -> list[list[dict[str, Any]]]:
+        batches: list[list[dict[str, Any]]] = []
+        current: list[dict[str, Any]] = []
+        current_size = 0
+        for candidate in candidates:
+            metadata = self._bounded_score_metadata(candidate, id_field=id_field)
+            candidate_size = len(json.dumps(metadata, ensure_ascii=False))
+            if current and (
+                len(current) >= max_per_read
+                or current_size + candidate_size > self._max_scoring_characters
+            ):
+                batches.append(current)
+                current = []
+                current_size = 0
+            current.append(candidate)
+            current_size += candidate_size
+        if current:
+            batches.append(current)
+        return batches
 
 
     async def _score_sections(

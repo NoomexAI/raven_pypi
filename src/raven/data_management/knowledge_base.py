@@ -25,6 +25,7 @@ from ..core.config import PathConfig
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
 from ..core.operations import Operation, OperationManager, OperationTask, OperationType
+from ..providers.model_identity import embedding_identity
 
 COLLECTION_NAME = "chunks"
 PERSISTENCE_VERSION = 1
@@ -121,6 +122,17 @@ class _KnowledgeFileStore:
 
                     CREATE INDEX IF NOT EXISTS idx_sections_file_id
                     ON sections(file_id, section_index);
+
+                    CREATE TABLE IF NOT EXISTS pending_file_deletions (
+                        file_id TEXT PRIMARY KEY,
+                        file_name TEXT NOT NULL,
+                        started_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    );
                     """
                 )
                 connection.execute(
@@ -278,6 +290,94 @@ class _KnowledgeFileStore:
             return bundle
 
 
+    def begin_file_deletion(self, file_id: str) -> dict[str, str] | None:
+        """Durably mark a file for deletion before touching its vectors."""
+        with self._lock:
+            connection = self._require_connection()
+            pending = connection.execute(
+                "SELECT * FROM pending_file_deletions WHERE file_id = ?",
+                (file_id,),
+            ).fetchone()
+            if pending is not None:
+                return {
+                    "file_id": str(pending["file_id"]),
+                    "file_name": str(pending["file_name"]),
+                    "started_at": str(pending["started_at"]),
+                }
+
+            file_row = connection.execute(
+                "SELECT file_id, file_name FROM files WHERE file_id = ?",
+                (file_id,),
+            ).fetchone()
+            if file_row is None:
+                return None
+
+            record = {
+                "file_id": str(file_row["file_id"]),
+                "file_name": str(file_row["file_name"]),
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            }
+            with connection:
+                connection.execute(
+                    """
+                    INSERT INTO pending_file_deletions (
+                        file_id, file_name, started_at
+                    ) VALUES (?, ?, ?)
+                    """,
+                    (record["file_id"], record["file_name"], record["started_at"]),
+                )
+            return record
+
+
+    def finish_file_deletion(self, file_id: str) -> None:
+        """Atomically remove catalog data and its durable deletion marker."""
+        with self._lock:
+            connection = self._require_connection()
+            with connection:
+                connection.execute("DELETE FROM files WHERE file_id = ?", (file_id,))
+                connection.execute(
+                    "DELETE FROM pending_file_deletions WHERE file_id = ?",
+                    (file_id,),
+                )
+
+
+    def list_pending_file_deletions(self) -> list[dict[str, str]]:
+        with self._lock:
+            rows = self._require_connection().execute(
+                "SELECT * FROM pending_file_deletions ORDER BY started_at"
+            ).fetchall()
+        return [
+            {
+                "file_id": str(row["file_id"]),
+                "file_name": str(row["file_name"]),
+                "started_at": str(row["started_at"]),
+            }
+            for row in rows
+        ]
+
+
+    def get_setting(self, key: str) -> str | None:
+        with self._lock:
+            row = self._require_connection().execute(
+                "SELECT value FROM settings WHERE key = ?",
+                (key,),
+            ).fetchone()
+        return None if row is None else str(row["value"])
+
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self._lock:
+            connection = self._require_connection()
+            with connection:
+                connection.execute(
+                    """
+                    INSERT INTO settings (key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    (key, value),
+                )
+
+
     def restore_file(self, bundle: dict[str, Any]) -> None:
         """Restore a bundle returned by :meth:`remove_file`."""
         file = bundle["file"]
@@ -406,6 +506,7 @@ class Knowledge:
         self._lifecycle_lock = asyncio.Lock()
         self._mutation_lock = asyncio.Lock()
         self._pending_ingestions: set[str] = set()
+        self._ingestion_claims: dict[str, str] = {}
         self._started = False
         self._closed = False
         self._operation_manager = operation_manager
@@ -441,11 +542,18 @@ class Knowledge:
             await asyncio.to_thread(self._open_storage)
             self._started = True
 
+        await self.reconcile_pending_file_deletions()
+
 
     async def close(self) -> None:
         """Close the local Qdrant client."""
+        cleanup_error: BaseException | None = None
         if self.is_started:
-            await self.reconcile_pending_ingestions()
+            try:
+                await self.reconcile_pending_ingestions()
+                await self.reconcile_pending_file_deletions()
+            except BaseException as exc:
+                cleanup_error = exc
 
         async with self._lifecycle_lock:
             if self._closed:
@@ -458,6 +566,42 @@ class Knowledge:
             await asyncio.to_thread(self._file_store.close)
             if qdrant is not None:
                 await asyncio.to_thread(qdrant.close)
+
+        if cleanup_error is not None:
+            raise cleanup_error
+
+
+    async def claim_ingestion(self, file_name: str, file_id: str) -> None:
+        """Prevent concurrent pipelines from parsing the same target file."""
+        async with self._mutation_lock:
+            if await asyncio.to_thread(self._file_store.file_exists, file_name):
+                existing = await asyncio.to_thread(self._file_result_by_id, file_id)
+                if existing is not None and existing["file"] == file_name:
+                    return
+                raise RavenError(
+                    ErrorCode.FILE_ALREADY_EXISTS,
+                    f"File '{file_name}' already exists in knowledge '{self.name}'.",
+                )
+            owner = self._ingestion_claims.get(file_name)
+            if owner is not None and owner != file_id:
+                raise RavenError(
+                    ErrorCode.FILE_ALREADY_EXISTS,
+                    f"File '{file_name}' is already being ingested.",
+                )
+            self._ingestion_claims[file_name] = file_id
+
+
+    async def release_ingestion(self, file_name: str, file_id: str) -> None:
+        async with self._mutation_lock:
+            if self._ingestion_claims.get(file_name) == file_id:
+                self._ingestion_claims.pop(file_name, None)
+
+
+    async def validate_embedding_model(self, embed_model: Any) -> None:
+        """Reject adapters that do not match this knowledge's vector space."""
+        self._ensure_started()
+        async with self._mutation_lock:
+            await asyncio.to_thread(self._ensure_embedding_identity, embed_model)
 
 
     async def set_summary(
@@ -674,6 +818,39 @@ class Knowledge:
         return results
 
 
+    async def reconcile_pending_file_deletions(self) -> list[dict[str, Any]]:
+        """Finish file deletions that were interrupted after their durable marker."""
+        self._ensure_started()
+        results: list[dict[str, Any]] = []
+        async with self._mutation_lock:
+            pending = await asyncio.to_thread(
+                self._file_store.list_pending_file_deletions
+            )
+            for record in pending:
+                file_id = record["file_id"]
+                await asyncio.to_thread(self._delete_points_by_file_id, file_id)
+                finish_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        self._file_store.finish_file_deletion,
+                        file_id,
+                    )
+                )
+                try:
+                    await asyncio.shield(finish_task)
+                except asyncio.CancelledError:
+                    await finish_task
+                    raise
+                results.append(
+                    {
+                        "knowledge": self.name,
+                        "file_id": file_id,
+                        "file": record["file_name"],
+                        "status": "deleted",
+                    }
+                )
+        return results
+
+
     async def _ingest(
         self,
         file_name: str,
@@ -774,6 +951,11 @@ class Knowledge:
 
                 if operation is not None:
                     operation.raise_if_cancelled()
+
+                await asyncio.to_thread(
+                    self._ensure_embedding_identity,
+                    embed_model,
+                )
 
                 vectors = await embed_model.aget_text_embedding_batch(
                     [record[1] for record in chunk_records]
@@ -912,7 +1094,8 @@ class Knowledge:
         self._ensure_started()
         if top_k <= 0:
             return []
-        return await asyncio.to_thread(self._search, query_vector, top_k)
+        async with self._mutation_lock:
+            return await asyncio.to_thread(self._search, query_vector, top_k)
 
 
     async def retrieve_context(
@@ -947,7 +1130,8 @@ class Knowledge:
     async def count(self) -> int:
         """Return the number of indexed vector points."""
         self._ensure_started()
-        return await asyncio.to_thread(self._count)
+        async with self._mutation_lock:
+            return await asyncio.to_thread(self._count)
 
 
     async def delete_file(
@@ -983,18 +1167,65 @@ class Knowledge:
         )
 
         async with self._mutation_lock:
-            bundle = await asyncio.to_thread(self._file_store.remove_file, file_id)
-            if bundle is None:
-                raise RavenError(
+            marker_task = asyncio.create_task(
+                asyncio.to_thread(self._file_store.begin_file_deletion, file_id)
+            )
+            try:
+                marker = await asyncio.shield(marker_task)
+            except asyncio.CancelledError:
+                await marker_task
+                raise
+            except Exception as exc:
+                await self._emit(
+                    operation,
+                    EventType.KNOWLEDGE_FILE_DELETE_FAILED,
+                    {
+                        "knowledge": self.name,
+                        "file_id": file_id,
+                        "error": error_payload(exc),
+                    },
+                )
+                raise
+            if marker is None:
+                error = RavenError(
                     ErrorCode.FILE_NOT_FOUND,
                     f"File '{file_id}' does not exist in knowledge '{self.name}'.",
                 )
-            file_name = str(bundle["file"]["file_name"])
+                await self._emit(
+                    operation,
+                    EventType.KNOWLEDGE_FILE_DELETE_FAILED,
+                    {
+                        "knowledge": self.name,
+                        "file_id": file_id,
+                        "error": error_payload(error),
+                    },
+                )
+                raise error
+            file_name = marker["file_name"]
 
             try:
-                await asyncio.to_thread(self._delete_points_by_file_id, file_id)
+                delete_task = asyncio.create_task(
+                    asyncio.to_thread(self._delete_points_by_file_id, file_id)
+                )
+                try:
+                    await asyncio.shield(delete_task)
+                except asyncio.CancelledError:
+                    await delete_task
+                    raise
+                finish_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        self._file_store.finish_file_deletion,
+                        file_id,
+                    )
+                )
+                try:
+                    await asyncio.shield(finish_task)
+                except asyncio.CancelledError:
+                    await finish_task
+                    raise
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
-                await asyncio.to_thread(self._file_store.restore_file, bundle)
                 await self._emit(
                     operation,
                     EventType.KNOWLEDGE_FILE_DELETE_FAILED,
@@ -1087,22 +1318,12 @@ class Knowledge:
 
 
     def _collection_exists(self) -> bool:
-        qdrant = self._require_qdrant()
-        try:
-            qdrant.get_collection(COLLECTION_NAME)
-        except Exception:
-            return False
-        return True
+        return bool(self._require_qdrant().collection_exists(COLLECTION_NAME))
 
 
     def _ensure_collection(self, dimension: int) -> None:
         qdrant = self._require_qdrant()
-        try:
-            existing = qdrant.get_collection(COLLECTION_NAME)
-        except Exception:
-            existing = None
-
-        if existing is None:
+        if not qdrant.collection_exists(COLLECTION_NAME):
             qdrant.create_collection(
                 collection_name=COLLECTION_NAME,
                 vectors_config=qmodels.VectorParams(
@@ -1111,6 +1332,8 @@ class Knowledge:
                 ),
             )
             return
+
+        existing = qdrant.get_collection(COLLECTION_NAME)
 
         vectors = existing.config.params.vectors
         if isinstance(vectors, dict):
@@ -1129,6 +1352,20 @@ class Knowledge:
                     "collection_dimension": current_dimension,
                     "model_dimension": dimension,
                 },
+            )
+
+
+    def _ensure_embedding_identity(self, embed_model: Any) -> None:
+        current = embedding_identity(embed_model)
+        stored = self._file_store.get_setting("embedding_identity")
+        if stored is None:
+            self._file_store.set_setting("embedding_identity", current)
+            return
+        if stored != current:
+            raise RavenError(
+                ErrorCode.EMBEDDING_IDENTITY_MISMATCH,
+                f"Embedding model does not match knowledge '{self.name}'.",
+                details={"knowledge": self.name},
             )
 
 
@@ -1246,6 +1483,7 @@ class KnowledgeBase:
         paths: PathConfig,
         operation_manager: OperationManager,
     ) -> None:
+        self.paths = paths
         self.knowledge_base_path = paths.knowledge_base_dir
         self._knowledges: dict[str, Knowledge] = {}
         self._lifecycle_lock = asyncio.Lock()
@@ -1295,7 +1533,17 @@ class KnowledgeBase:
             knowledges = list(self._knowledges.values())
             self._knowledges.clear()
 
-        await asyncio.gather(*(knowledge.close() for knowledge in knowledges))
+        results = await asyncio.gather(
+            *(knowledge.close() for knowledge in knowledges),
+            return_exceptions=True,
+        )
+        failures = [result for result in results if isinstance(result, BaseException)]
+        if failures:
+            raise RavenError(
+                ErrorCode.INTERNAL_ERROR,
+                "One or more knowledge databases could not be closed.",
+                details={"failure_count": len(failures)},
+            ) from failures[0]
 
 
     async def create(
@@ -1394,7 +1642,7 @@ class KnowledgeBase:
                 "count": await knowledge.count(),
                 "created_at": knowledge.meta.get("created_at"),
             }
-            for knowledge in self._knowledges.values()
+            for knowledge in tuple(self._knowledges.values())
         ]
 
 
@@ -1412,6 +1660,22 @@ class KnowledgeBase:
                 )
                 raise
         return results
+
+
+    async def reconcile_pending_file_deletions(self) -> list[dict[str, Any]]:
+        """Finish durable file deletions across all open knowledges."""
+        self._ensure_started()
+        results: list[dict[str, Any]] = []
+        for knowledge in tuple(self._knowledges.values()):
+            results.extend(await knowledge.reconcile_pending_file_deletions())
+        return results
+
+
+    async def validate_embedding_model(self, embed_model: Any) -> None:
+        """Validate one embedding adapter against every persisted knowledge."""
+        self._ensure_started()
+        for knowledge in tuple(self._knowledges.values()):
+            await knowledge.validate_embedding_model(embed_model)
 
 
     async def delete(

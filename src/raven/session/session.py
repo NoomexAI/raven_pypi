@@ -13,7 +13,7 @@ from ..agent.contracts import AgentRunResult
 from ..agent.harness import AgentHarness
 from ..agent.policy import RetrievalMode
 from ..core.errors import ErrorCode, RavenError
-from ..core.events import Event
+from ..core.events import Event, EventType
 from ..core.operations import (
     Operation,
     OperationManager,
@@ -78,8 +78,8 @@ class SessionRun:
 
 
     async def events(self, after_event_id: int = 0) -> AsyncIterator[Event]:
-        """Yield the complete parent operation stream after a cursor."""
-        async for event in self._task.operation.events(after_event_id=after_event_id):
+        """Yield events from this session task and its descendants."""
+        async for event in self._task.events(after_event_id=after_event_id):
             yield event
 
 
@@ -155,6 +155,8 @@ class Session:
         self._embed_model = embed_model
         self._memory_token_limit = memory_token_limit
         self._memory_top_k = memory_top_k
+        self._session_id = uuid4()
+        self._owns_conversation = False
         self._turn_lock = asyncio.Lock()
         self._lifecycle_lock = asyncio.Lock()
         self._active_runs: set[SessionRun] = set()
@@ -172,6 +174,32 @@ class Session:
         return self._started and not self._closed
 
 
+    @property
+    def is_closed(self) -> bool:
+        return self._closed
+
+
+    def matches_configuration(
+        self,
+        *,
+        llm: Any,
+        embed_model: Any,
+        max_iterations: int,
+        top_k: int,
+        memory_token_limit: int,
+        memory_top_k: int,
+    ) -> bool:
+        """Return whether requested settings match this canonical session."""
+        return (
+            self._llm is llm
+            and self._embed_model is embed_model
+            and self.harness.max_iterations == max_iterations
+            and self.harness.top_k == top_k
+            and self._memory_token_limit == memory_token_limit
+            and self._memory_top_k == memory_top_k
+        )
+
+
     async def start(self) -> None:
         """Open the conversation and initialize its memory resources."""
         async with self._lifecycle_lock:
@@ -183,14 +211,21 @@ class Session:
                     f"Session for conversation '{self.conversation_id}' is closed.",
                 )
 
-            await self.conversation.start()
-            await self.conversation.initialize_memory(
-                self._llm,
-                self._embed_model,
-                token_limit=self._memory_token_limit,
-                memory_top_k=self._memory_top_k,
-            )
-            self._started = True
+            await self.conversation._claim_session(self._session_id)
+            self._owns_conversation = True
+            try:
+                await self.conversation.start()
+                await self.conversation.initialize_memory(
+                    self._llm,
+                    self._embed_model,
+                    token_limit=self._memory_token_limit,
+                    memory_top_k=self._memory_top_k,
+                )
+                self._started = True
+            except BaseException:
+                await self.conversation._release_session(self._session_id)
+                self._owns_conversation = False
+                raise
 
 
     async def close(self) -> None:
@@ -206,6 +241,12 @@ class Session:
             *(run.cancel() for run in active_runs),
             return_exceptions=True,
         )
+        release_memory = getattr(self.conversation, "release_memory_resources", None)
+        if callable(release_memory):
+            await release_memory()
+        if self._owns_conversation:
+            await self.conversation._release_session(self._session_id)
+            self._owns_conversation = False
 
 
     async def generate_response(
@@ -295,6 +336,16 @@ class Session:
                         operation=active_operation,
                     )
                     await reconcile_task.result()
+                    await active_operation.publish(
+                        Event(
+                            type=EventType.CHAT_RESULT_REUSED,
+                            data={
+                                "conversation_id": self.conversation_id,
+                                "turn_id": str(turn_id),
+                                "result": result.model_dump(mode="json"),
+                            },
+                        )
+                    )
                 else:
                     agent_run = await self.harness.start(
                         self.conversation,
@@ -314,12 +365,17 @@ class Session:
 
                 generate_title = getattr(self.conversation, "generate_title", None)
                 if generate_title is not None:
-                    title_task = await generate_title(
-                        self._llm,
-                        query,
-                        operation=active_operation,
-                    )
-                    await title_task.result()
+                    try:
+                        title_task = await generate_title(
+                            self._llm,
+                            query,
+                            operation=active_operation,
+                        )
+                        await title_task.result()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        pass
                 return result
             finally:
                 run = run_holder.get("run")
@@ -339,9 +395,12 @@ class Session:
             session_run = SessionRun(task, turn_id, self._release_run)
             run_holder["run"] = session_run
             self._active_runs.add(session_run)
+            if task.is_finished:
+                session_run._release_once()
             return session_run
-        except Exception:
-            self._turn_lock.release()
+        except BaseException:
+            if self._turn_lock.locked():
+                self._turn_lock.release()
             raise
 
 
@@ -365,6 +424,8 @@ class Session:
 
 
     def _release_run(self, run: SessionRun) -> None:
+        if run not in self._active_runs:
+            return
         self._active_runs.discard(run)
         if self._turn_lock.locked():
             self._turn_lock.release()

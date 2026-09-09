@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from typing import Any
@@ -113,6 +114,7 @@ class LiteLLMManager:
         self,
         model: str,
         *,
+        provider: str | None = None,
         api_key: str | None = None,
         options: dict[str, Any] | None = None,
         operation: Operation | None = None,
@@ -124,6 +126,7 @@ class LiteLLMManager:
             OperationType.MODEL_LOAD_EMBEDDING,
             lambda active_operation: self._load_embedding(
                 model,
+                provider=provider,
                 api_key=api_key,
                 options=options,
                 operation=active_operation,
@@ -135,11 +138,12 @@ class LiteLLMManager:
         self,
         model: str,
         *,
+        provider: str | None,
         api_key: str | None,
         options: dict[str, Any] | None,
         operation: Operation,
     ) -> Any:
-        data = self._event_data(model=model, provider=None, role="embedding")
+        data = self._event_data(model=model, provider=provider, role="embedding")
         await self._emit(operation, EventType.MODEL_LOAD_EMBEDDING_STARTED, data)
         try:
             from llama_index.embeddings.litellm import LiteLLMEmbedding
@@ -150,10 +154,11 @@ class LiteLLMManager:
                 embedding_options,
                 {"api_base", "dimensions", "timeout"},
             )
+            adapter_model = self._embedding_model_name(model, provider)
             cache_key = self._cache_key(
                 role="embedding",
-                model=model,
-                provider=None,
+                model=adapter_model,
+                provider=provider,
                 api_key=api_key,
                 options={
                     "embed_batch_size": embed_batch_size,
@@ -162,8 +167,26 @@ class LiteLLMManager:
             )
             cached = cache_key in self._embeddings
             if not cached:
-                self._embeddings[cache_key] = LiteLLMEmbedding(
-                    model_name=model,
+                class AsyncLiteLLMEmbedding(LiteLLMEmbedding):
+                    """Keep the synchronous LiteLLM adapter off Raven's event loop."""
+
+                    async def _aget_query_embedding(self, query: str) -> list[float]:
+                        return await asyncio.to_thread(self._get_query_embedding, query)
+
+
+                    async def _aget_text_embedding(self, text: str) -> list[float]:
+                        return await asyncio.to_thread(self._get_text_embedding, text)
+
+
+                    async def _aget_text_embeddings(
+                        self,
+                        texts: list[str],
+                    ) -> list[list[float]]:
+                        return await asyncio.to_thread(self._get_text_embeddings, texts)
+
+
+                self._embeddings[cache_key] = AsyncLiteLLMEmbedding(
+                    model_name=adapter_model,
                     api_key=api_key,
                     embed_batch_size=embed_batch_size,
                     **embedding_options,
@@ -178,7 +201,7 @@ class LiteLLMManager:
         except Exception as exc:
             error = self._provider_error(
                 model=model,
-                provider=None,
+                provider=provider,
                 role="embedding",
                 action="load embedding model",
             )
@@ -195,6 +218,19 @@ class LiteLLMManager:
             {**data, "cached": cached},
         )
         return self._embeddings[cache_key]
+
+
+    async def close(self) -> None:
+        """Drop cached adapters and their retained credentials."""
+        self._llms.clear()
+        self._embeddings.clear()
+
+
+    @staticmethod
+    def _embedding_model_name(model: str, provider: str | None) -> str:
+        if provider is None or "/" in model:
+            return model
+        return f"{provider}/{model}"
 
 
     @staticmethod

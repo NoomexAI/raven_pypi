@@ -23,6 +23,7 @@ class EventType(StrEnum):
     CHAT_TOOL_CALL = "chat.tool_call"
     CHAT_TOOL_RESULT = "chat.tool_result"
     CHAT_MAX_ITERATIONS = "chat.max_iterations"
+    CHAT_RESULT_REUSED = "chat.result_reused"
     CHAT_COMPLETED = "chat.completed"
     CHAT_FAILED = "chat.failed"
     WORK_PROGRESS = "work.progress"
@@ -237,16 +238,15 @@ class EventStream:
                     "event_id": self._last_event_id + 1,
                 }
             )
-            self._last_write_generation = await self._store.append(persisted)
+            commit = asyncio.create_task(self._commit(persisted))
+            try:
+                generation = await asyncio.shield(commit)
+            except asyncio.CancelledError:
+                generation = await asyncio.shield(commit)
+                self._apply_persisted_event(persisted, generation)
+                raise
 
-            if persisted.is_final or persisted.type in _IMMEDIATE_SYNC_EVENT_TYPES:
-                await self._sync_locked()
-
-            self._last_event_id = persisted.event_id or self._last_event_id
-            self._finished = persisted.is_final
-            if persisted.is_final:
-                self._finished_at = persisted.timestamp
-            self._condition.notify_all()
+            self._apply_persisted_event(persisted, generation)
             return persisted
 
 
@@ -361,6 +361,22 @@ class EventStream:
             await self._store.read_metadata(self.operation_id)
         )
         self._loaded = True
+
+
+    async def _commit(self, event: Event) -> int:
+        generation = await self._store.append(event)
+        if event.is_final or event.type in _IMMEDIATE_SYNC_EVENT_TYPES:
+            await self._sync_locked()
+        return generation
+
+
+    def _apply_persisted_event(self, event: Event, generation: int) -> None:
+        self._last_write_generation = generation
+        self._last_event_id = event.event_id or self._last_event_id
+        self._finished = event.is_final
+        if event.is_final:
+            self._finished_at = event.timestamp
+        self._condition.notify_all()
 
 
     async def _sync_locked(self) -> bool:
