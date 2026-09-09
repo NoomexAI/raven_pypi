@@ -85,6 +85,7 @@ class ErrorCode(StrEnum):
     EVENT_HISTORY_GAP = "event_history_gap"
     OPERATION_SYNC_FAILED = "operation_sync_failed"
     OPERATION_DATABASE_FAILED = "operation_database_failed"
+    OPERATION_DATABASE_IN_USE = "operation_database_in_use"
     OPERATION_DATABASE_CORRUPTED = "operation_database_corrupted"
     INVALID_OPERATION_SYNC_INTERVAL = "invalid_operation_sync_interval"
     INVALID_RETENTION = "invalid_retention"

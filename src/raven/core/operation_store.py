@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from .errors import ErrorCode, RavenError
 from .events import Event, EventType
@@ -44,7 +45,9 @@ class SQLiteOperationStore:
 
     def __init__(self, path: Path) -> None:
         self.path = path
+        self.ownership_path = path.with_suffix(f"{path.suffix}.lock")
         self._connection: sqlite3.Connection | None = None
+        self._ownership_handle: BinaryIO | None = None
         self._executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="raven-operation-store",
@@ -330,11 +333,8 @@ class SQLiteOperationStore:
             if self._closed:
                 return
             self._closed = True
-            connection = self._connection
-            self._connection = None
             try:
-                if connection is not None:
-                    await self._run_in_store_thread(connection.close)
+                await self._run_in_store_thread(self._close_connection)
             finally:
                 self._executor.shutdown(wait=False)
 
@@ -352,7 +352,85 @@ class SQLiteOperationStore:
 
     def _open_connection(self) -> None:
         if self._connection is None:
-            self._connection = self._open()
+            self._acquire_ownership()
+            try:
+                self._connection = self._open()
+            except BaseException:
+                self._release_ownership()
+                raise
+
+
+    def _close_connection(self) -> None:
+        connection = self._connection
+        self._connection = None
+        try:
+            if connection is not None:
+                connection.close()
+        finally:
+            self._release_ownership()
+
+
+    def _acquire_ownership(self) -> None:
+        if self._ownership_handle is not None:
+            return
+
+        self.ownership_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.ownership_path.open("a+b")
+        try:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            self._lock_ownership_file(handle)
+        except OSError as exc:
+            handle.close()
+            raise RavenError(
+                ErrorCode.OPERATION_DATABASE_IN_USE,
+                "The operation database is already owned by another Raven runtime.",
+            ) from exc
+        except BaseException:
+            handle.close()
+            raise
+        self._ownership_handle = handle
+
+
+    def _release_ownership(self) -> None:
+        handle = self._ownership_handle
+        self._ownership_handle = None
+        if handle is None:
+            return
+        try:
+            self._unlock_ownership_file(handle)
+        finally:
+            handle.close()
+
+
+    @staticmethod
+    def _lock_ownership_file(handle: BinaryIO) -> None:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            return
+
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+    @staticmethod
+    def _unlock_ownership_file(handle: BinaryIO) -> None:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            return
+
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
     def _open(self) -> sqlite3.Connection:
