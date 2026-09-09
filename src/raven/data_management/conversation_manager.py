@@ -31,6 +31,7 @@ from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
 from ..core.operations import Operation, OperationManager, OperationTask, OperationType
 from ..providers.model_identity import embedding_identity
+from .discovery import DiscoveryIssue
 from .knowledge_base import KnowledgeBase
 
 
@@ -1801,17 +1802,56 @@ class Conversation:
         after_open: Callable[["Conversation"], Awaitable[None]] | None = None,
     ) -> "Conversation":
         """Load and validate a conversation from its metadata file."""
-        metadata_path = Path(dir_path) / "metadata.json"
-        data = json.loads(metadata_path.read_text(encoding="utf-8"))
+        directory = Path(dir_path)
+        metadata_path = directory / "metadata.json"
+        if not metadata_path.is_file():
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                f"Conversation directory '{directory.name}' has no metadata.json file.",
+            )
+        try:
+            data = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                f"Metadata for conversation '{directory.name}' could not be read.",
+            ) from exc
         if not isinstance(data, dict):
             raise RavenError(
                 ErrorCode.INVALID_METADATA,
-                f"Invalid conversation metadata in '{metadata_path}'.",
+                f"Invalid metadata for conversation '{directory.name}'.",
             )
-        if data.get("schema_version", PERSISTENCE_VERSION) != PERSISTENCE_VERSION:
+        if "schema_version" not in data:
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                f"Metadata for conversation '{directory.name}' has no schema version.",
+            )
+        version = data["schema_version"]
+        if isinstance(version, bool) or not isinstance(version, int):
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                f"Metadata for conversation '{directory.name}' has an invalid schema version.",
+            )
+        if version != PERSISTENCE_VERSION:
             raise RavenError(
                 ErrorCode.UNSUPPORTED_METADATA_VERSION,
-                f"Unsupported conversation metadata version in '{metadata_path}'.",
+                f"Unsupported metadata version for conversation '{directory.name}'.",
+                details={"schema_version": version},
+            )
+        expected_fields = {
+            "schema_version",
+            "conversation_id",
+            "type",
+            "knowledge_name",
+            "title",
+            "is_titled",
+            "pinned",
+            "created_at",
+        }
+        if set(data) != expected_fields:
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                f"Metadata for conversation '{directory.name}' has invalid fields.",
             )
 
         conversation_id = data.get("conversation_id")
@@ -1822,26 +1862,33 @@ class Conversation:
                 ErrorCode.INVALID_CONVERSATION_ID,
                 "Conversation metadata contains an invalid conversation ID.",
             )
+        if conversation_id != directory.name:
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                f"Conversation metadata ID does not match directory '{directory.name}'.",
+            )
 
         created_at = data.get("created_at")
         try:
-            parsed_created_at = (
-                datetime.fromisoformat(created_at)
-                if isinstance(created_at, str)
-                else datetime.now(timezone.utc)
-            )
-        except ValueError as exc:
+            parsed_created_at = datetime.fromisoformat(created_at)
+        except (TypeError, ValueError) as exc:
             raise RavenError(
                 ErrorCode.INVALID_METADATA,
                 "Conversation metadata contains an invalid created_at value.",
             ) from exc
 
         if parsed_created_at.tzinfo is None:
-            parsed_created_at = parsed_created_at.replace(tzinfo=timezone.utc)
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                "Conversation metadata contains a timezone-naive created_at value.",
+            )
 
-        title = data.get("title", DEFAULT_TITLE)
+        title = data.get("title")
         if not isinstance(title, str) or not title.strip():
-            title = DEFAULT_TITLE
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                "Conversation metadata contains an invalid title.",
+            )
 
         is_titled = data.get("is_titled")
         if not isinstance(is_titled, bool):
@@ -1851,14 +1898,28 @@ class Conversation:
             )
 
         knowledge_name = data.get("knowledge_name")
-        if knowledge_name is not None and not isinstance(knowledge_name, str):
+        if knowledge_name is not None and (
+            not isinstance(knowledge_name, str) or not knowledge_name.strip()
+        ):
             raise RavenError(
                 ErrorCode.INVALID_METADATA,
                 "Conversation metadata contains an invalid knowledge_name.",
             )
+        pinned = data.get("pinned")
+        if not isinstance(pinned, bool):
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                "Conversation metadata contains an invalid pinned value.",
+            )
+        expected_type = "local" if knowledge_name is not None else "global"
+        if data.get("type") != expected_type:
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                "Conversation metadata type does not match its knowledge scope.",
+            )
 
         conversation = cls(
-            Path(dir_path),
+            directory,
             operation_manager=operation_manager,
             before_open=before_open,
             after_open=after_open,
@@ -1868,7 +1929,7 @@ class Conversation:
             knowledge_name=knowledge_name,
             title=title,
             is_titled=is_titled,
-            pinned=bool(data.get("pinned", False)),
+            pinned=pinned,
             created_at=parsed_created_at,
         )
         return conversation
@@ -1901,6 +1962,7 @@ class ConversationManager:
         self._operation_manager = operation_manager
         self.max_open_conversations = max_open_conversations
         self._conversations: OrderedDict[str, Conversation] = OrderedDict()
+        self._discovery_issues: OrderedDict[str, DiscoveryIssue] = OrderedDict()
         self._lifecycle_lock = asyncio.Lock()
         self._resource_lock = asyncio.Lock()
         self._mutation_lock = asyncio.Lock()
@@ -1933,17 +1995,32 @@ class ConversationManager:
             await asyncio.to_thread(self._cleanup_deletion_tombstones)
             conversation_paths = await asyncio.to_thread(self._scan_existing)
             loaded: OrderedDict[str, Conversation] = OrderedDict()
+            issues: OrderedDict[str, DiscoveryIssue] = OrderedDict()
             for path in conversation_paths:
-                conversation = await asyncio.to_thread(
-                    Conversation.from_dir,
-                    path,
-                    operation_manager=self._operation_manager,
-                    before_open=self._before_conversation_open,
-                    after_open=self._after_conversation_open,
-                )
-                loaded[conversation.conversation_id] = conversation
+                try:
+                    conversation = await asyncio.to_thread(
+                        Conversation.from_dir,
+                        path,
+                        operation_manager=self._operation_manager,
+                        before_open=self._before_conversation_open,
+                        after_open=self._after_conversation_open,
+                    )
+                    if conversation.conversation_id in loaded:
+                        raise RavenError(
+                            ErrorCode.INVALID_METADATA,
+                            "Duplicate conversation identity "
+                            f"'{conversation.conversation_id}' was discovered.",
+                        )
+                    loaded[conversation.conversation_id] = conversation
+                except Exception as exc:
+                    issues[path.name] = DiscoveryIssue.from_error(
+                        "conversation",
+                        path.name,
+                        exc,
+                    )
 
             self._conversations = loaded
+            self._discovery_issues = issues
             self._started = True
 
 
@@ -2007,7 +2084,10 @@ class ConversationManager:
 
         try:
             async with self._mutation_lock:
-                conversation_id = uuid4().hex[:12]
+                while True:
+                    conversation_id = uuid4().hex[:12]
+                    if not (self.conversation_dir / conversation_id).exists():
+                        break
                 conversation = Conversation(
                     self.conversation_dir / conversation_id,
                     operation_manager=self._operation_manager,
@@ -2025,6 +2105,7 @@ class ConversationManager:
                 await asyncio.to_thread(conversation.write_metadata)
                 self._conversations[conversation_id] = conversation
                 self._conversations.move_to_end(conversation_id)
+                self._discovery_issues.pop(conversation_id, None)
 
             await self._emit(
                 operation,
@@ -2050,12 +2131,21 @@ class ConversationManager:
         try:
             conversation = self._conversations[conversation_id]
         except KeyError as exc:
+            issue = self._discovery_issues.get(conversation_id)
+            if issue is not None:
+                raise issue.as_error() from exc
             raise RavenError(
                 ErrorCode.CONVERSATION_NOT_FOUND,
                 f"Conversation '{conversation_id}' does not exist.",
             ) from exc
         self._conversations.move_to_end(conversation_id)
         return conversation
+
+
+    def list_discovery_issues(self) -> list[DiscoveryIssue]:
+        """Return persisted conversation directories that could not be loaded."""
+        self._ensure_started()
+        return list(self._discovery_issues.values())
 
 
     def owns(self, conversation: Conversation) -> bool:
@@ -2186,11 +2276,14 @@ class ConversationManager:
     def _scan_existing(self) -> list[Path]:
         if not self.conversation_dir.is_dir():
             return []
-        return [
-            entry
-            for entry in self.conversation_dir.iterdir()
-            if entry.is_dir() and (entry / "metadata.json").is_file()
-        ]
+        return sorted(
+            (
+                entry
+                for entry in self.conversation_dir.iterdir()
+                if entry.is_dir() and not entry.name.startswith(".deleting-")
+            ),
+            key=lambda entry: entry.name,
+        )
 
 
     def _cleanup_deletion_tombstones(self) -> None:

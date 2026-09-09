@@ -32,6 +32,7 @@ from ..core.operations import (
     TaskWorker,
 )
 from ..data_management.conversation_manager import Conversation, ConversationManager
+from ..data_management.discovery import DiscoveryIssue
 from ..data_management.knowledge_base import Knowledge, KnowledgeBase
 from ..document_processing.document_parser import DocumentParser
 from ..pipelines.ingestion import IngestionPipeline, IngestionRetryInput
@@ -846,6 +847,14 @@ class Raven:
 
     def list_conversations(self) -> list[dict[str, Any]]:
         return self.conversation_manager.list()
+
+
+    def list_discovery_issues(self) -> list[DiscoveryIssue]:
+        """Return persisted knowledge and conversation resources that failed validation."""
+        return [
+            *self.knowledge_base.list_discovery_issues(),
+            *self.conversation_manager.list_discovery_issues(),
+        ]
 
 
     async def update_conversation(

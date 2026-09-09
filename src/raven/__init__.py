@@ -14,6 +14,7 @@ from .core.operations import (
     RetryPolicy,
 )
 from .data_management.conversation_manager import Conversation, ConversationManager
+from .data_management.discovery import DiscoveryIssue
 from .data_management.knowledge_base import Knowledge, KnowledgeBase
 from .document_processing.document_parser import (
     DocumentParser,
@@ -46,6 +47,7 @@ __all__ = [
     "AgreementBasedRetrievalPipeline",
     "Conversation",
     "ConversationManager",
+    "DiscoveryIssue",
     "DocumentParser",
     "ElementType",
     "EmbeddedRetrievalPipeline",

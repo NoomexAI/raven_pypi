@@ -27,6 +27,7 @@ from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
 from ..core.operations import Operation, OperationManager, OperationTask, OperationType
 from ..providers.model_identity import embedding_identity
+from .discovery import DiscoveryIssue
 
 COLLECTION_NAME = "chunks"
 PERSISTENCE_VERSION = 1
@@ -501,7 +502,7 @@ class Knowledge:
         self.dir_path = Path(dir_path)
         self.name = self.dir_path.name
         self.qdrant_dir = self.dir_path / "qdrant"
-        self.meta_path = self.dir_path / "meta.json"
+        self.meta_path = self.dir_path / "metadata.json"
         self.files_path = self.dir_path / "file.sqlite3"
 
         self._qdrant: qdrant_client.QdrantClient | None = None
@@ -1363,6 +1364,11 @@ class Knowledge:
 
 
     def _load_descriptor(self) -> None:
+        if not self.meta_path.is_file():
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                f"Knowledge directory '{self.name}' has no metadata.json file.",
+            )
         self._meta = self._load_meta()
 
 
@@ -1389,27 +1395,70 @@ class Knowledge:
             self._write_json(self.meta_path, meta)
             return meta
 
-        meta = self._read_json(self.meta_path)
+        try:
+            meta = self._read_json(self.meta_path)
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                f"Metadata for knowledge '{self.name}' could not be read.",
+            ) from exc
         if not isinstance(meta, dict):
             raise RavenError(
                 ErrorCode.INVALID_METADATA,
                 f"Invalid metadata for knowledge '{self.name}'.",
             )
-        if meta.get("schema_version", PERSISTENCE_VERSION) != PERSISTENCE_VERSION:
+        if "schema_version" not in meta:
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                f"Metadata for knowledge '{self.name}' has no schema version.",
+            )
+        version = meta["schema_version"]
+        if isinstance(version, bool) or not isinstance(version, int):
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                f"Metadata for knowledge '{self.name}' has an invalid schema version.",
+            )
+        if version != PERSISTENCE_VERSION:
             raise RavenError(
                 ErrorCode.UNSUPPORTED_METADATA_VERSION,
                 f"Unsupported metadata version for knowledge '{self.name}'.",
+                details={"schema_version": version},
             )
-
-        normalized = {
-            "schema_version": PERSISTENCE_VERSION,
-            "created_at": meta.get("created_at") or datetime.now(timezone.utc).isoformat(),
-            "name": self.name,
-            "user_summary": meta.get("user_summary", ""),
+        expected_fields = {
+            "schema_version",
+            "created_at",
+            "name",
+            "user_summary",
         }
-        if normalized != meta:
-            self._write_json(self.meta_path, normalized)
-        return normalized
+        if set(meta) != expected_fields:
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                f"Metadata for knowledge '{self.name}' has invalid fields.",
+            )
+        if meta["name"] != self.name:
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                f"Knowledge metadata name does not match directory '{self.name}'.",
+            )
+        created_at = meta["created_at"]
+        try:
+            parsed_created_at = datetime.fromisoformat(created_at)
+        except (TypeError, ValueError) as exc:
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                f"Knowledge '{self.name}' has an invalid created_at value.",
+            ) from exc
+        if parsed_created_at.tzinfo is None:
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                f"Knowledge '{self.name}' has a timezone-naive created_at value.",
+            )
+        if not isinstance(meta["user_summary"], str):
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                f"Knowledge '{self.name}' has an invalid user_summary value.",
+            )
+        return meta
 
 
     def _split(self, text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
@@ -1611,6 +1660,7 @@ class KnowledgeBase:
         self.knowledge_base_path = paths.knowledge_base_dir
         self.max_open_knowledges = max_open_knowledges
         self._knowledges: OrderedDict[str, Knowledge] = OrderedDict()
+        self._discovery_issues: OrderedDict[str, DiscoveryIssue] = OrderedDict()
         self._lifecycle_lock = asyncio.Lock()
         self._resource_lock = asyncio.Lock()
         self._opening_knowledges: set[int] = set()
@@ -1636,16 +1686,33 @@ class KnowledgeBase:
                 )
 
             await asyncio.to_thread(self.knowledge_base_path.mkdir, parents=True, exist_ok=True)
-            names = await asyncio.to_thread(self._scan_existing)
-            for name in names:
-                knowledge = Knowledge(
-                    self.knowledge_base_path / name,
-                    operation_manager=self._operation_manager,
-                    before_open=self._before_knowledge_open,
-                    after_open=self._after_knowledge_open,
-                )
-                await asyncio.to_thread(knowledge._load_descriptor)
-                self._knowledges[name] = knowledge
+            paths = await asyncio.to_thread(self._scan_existing)
+            loaded: OrderedDict[str, Knowledge] = OrderedDict()
+            issues: OrderedDict[str, DiscoveryIssue] = OrderedDict()
+            for path in paths:
+                try:
+                    knowledge = Knowledge(
+                        path,
+                        operation_manager=self._operation_manager,
+                        before_open=self._before_knowledge_open,
+                        after_open=self._after_knowledge_open,
+                    )
+                    await asyncio.to_thread(knowledge._load_descriptor)
+                    if knowledge.name in loaded:
+                        raise RavenError(
+                            ErrorCode.INVALID_METADATA,
+                            f"Duplicate knowledge identity '{knowledge.name}' was discovered.",
+                        )
+                    loaded[knowledge.name] = knowledge
+                except Exception as exc:
+                    issues[path.name] = DiscoveryIssue.from_error(
+                        "knowledge",
+                        path.name,
+                        exc,
+                    )
+
+            self._knowledges = loaded
+            self._discovery_issues = issues
             self._started = True
 
 
@@ -1736,6 +1803,7 @@ class KnowledgeBase:
                 raise
             self._knowledges[safe_name] = knowledge
             self._knowledges.move_to_end(safe_name)
+            self._discovery_issues.pop(safe_name, None)
 
         await self._emit(
             operation,
@@ -1752,12 +1820,21 @@ class KnowledgeBase:
         try:
             knowledge = self._knowledges[safe_name]
         except KeyError as exc:
+            issue = self._discovery_issues.get(safe_name)
+            if issue is not None:
+                raise issue.as_error() from exc
             raise RavenError(
                 ErrorCode.KNOWLEDGE_NOT_FOUND,
                 f"Knowledge '{name}' does not exist.",
             ) from exc
         self._knowledges.move_to_end(safe_name)
         return knowledge
+
+
+    def list_discovery_issues(self) -> list[DiscoveryIssue]:
+        """Return persisted knowledge directories that could not be loaded."""
+        self._ensure_started()
+        return list(self._discovery_issues.values())
 
 
     async def list(self) -> list[dict[str, Any]]:
@@ -1902,24 +1979,13 @@ class KnowledgeBase:
             self._opening_knowledges.discard(id(target))
 
 
-    def _scan_existing(self) -> list[str]:
+    def _scan_existing(self) -> list[Path]:
         if not self.knowledge_base_path.is_dir():
             return []
-        names: list[str] = []
-        for entry in self.knowledge_base_path.iterdir():
-            if not entry.is_dir() or not (entry / "meta.json").exists():
-                continue
-            try:
-                metadata = json.loads((entry / "meta.json").read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if (
-                isinstance(metadata, dict)
-                and metadata.get("schema_version", PERSISTENCE_VERSION) == PERSISTENCE_VERSION
-                and metadata.get("name") == entry.name
-            ):
-                names.append(entry.name)
-        return sorted(names)
+        return sorted(
+            (entry for entry in self.knowledge_base_path.iterdir() if entry.is_dir()),
+            key=lambda entry: entry.name,
+        )
 
 
     async def _emit(
