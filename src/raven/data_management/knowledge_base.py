@@ -11,17 +11,18 @@ import re
 import shutil
 import sqlite3
 import threading
-from collections.abc import Sequence
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 from uuid import UUID, uuid5
 
 import qdrant_client
 from llama_index.core.node_parser import SentenceSplitter
 from qdrant_client.http import models as qmodels
 
-from ..core.config import PathConfig
+from ..core.config import DEFAULT_OPEN_KNOWLEDGE_LIMIT, PathConfig
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
 from ..core.operations import Operation, OperationManager, OperationTask, OperationType
@@ -38,6 +39,7 @@ KEY_CHUNK_INDEX = "chunk_index"
 POINT_NAMESPACE = UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
 
 logger = logging.getLogger(__name__)
+_ResultT = TypeVar("_ResultT")
 
 
 def _safe_name(name: str) -> str:
@@ -493,6 +495,8 @@ class Knowledge:
         dir_path: Path,
         *,
         operation_manager: OperationManager,
+        before_open: Callable[["Knowledge"], Awaitable[None]] | None = None,
+        after_open: Callable[["Knowledge"], Awaitable[None]] | None = None,
     ) -> None:
         self.dir_path = Path(dir_path)
         self.name = self.dir_path.name
@@ -503,6 +507,7 @@ class Knowledge:
         self._qdrant: qdrant_client.QdrantClient | None = None
         self._file_store = _KnowledgeFileStore(self.files_path)
         self._meta: dict[str, Any] = {}
+        self._start_lock = asyncio.Lock()
         self._lifecycle_lock = asyncio.Lock()
         self._mutation_lock = asyncio.Lock()
         self._pending_ingestions: set[str] = set()
@@ -510,6 +515,10 @@ class Knowledge:
         self._started = False
         self._closed = False
         self._operation_manager = operation_manager
+        self._before_open = before_open
+        self._after_open = after_open
+        self._usage_lock = threading.Lock()
+        self._active_uses = 0
 
 
     @property
@@ -523,14 +532,24 @@ class Knowledge:
 
 
     @property
+    def active_uses(self) -> int:
+        with self._usage_lock:
+            return self._active_uses
+
+
+    @property
     def meta(self) -> dict[str, Any]:
-        self._ensure_started()
+        if self._closed:
+            raise RavenError(
+                ErrorCode.KNOWLEDGE_CLOSED,
+                f"Knowledge '{self.name}' is closed.",
+            )
         return copy.deepcopy(self._meta)
 
 
     async def start(self) -> None:
         """Open this knowledge database and load its metadata."""
-        async with self._lifecycle_lock:
+        async with self._start_lock:
             if self._started and not self._closed:
                 return
             if self._closed:
@@ -539,10 +558,26 @@ class Knowledge:
                     f"Knowledge '{self.name}' is closed.",
                 )
 
-            await asyncio.to_thread(self._open_storage)
-            self._started = True
+            reserved = False
+            try:
+                if self._before_open is not None:
+                    await self._before_open(self)
+                    reserved = True
 
-        await self.reconcile_pending_file_deletions()
+                async with self._lifecycle_lock:
+                    if self._started and not self._closed:
+                        return
+                    if self._closed:
+                        raise RavenError(
+                            ErrorCode.KNOWLEDGE_CLOSED,
+                            f"Knowledge '{self.name}' is closed.",
+                        )
+                    await asyncio.to_thread(self._open_storage)
+                    self._started = True
+                    await self._reconcile_pending_file_deletions()
+            finally:
+                if reserved and self._after_open is not None:
+                    await self._after_open(self)
 
 
     async def close(self) -> None:
@@ -569,6 +604,43 @@ class Knowledge:
 
         if cleanup_error is not None:
             raise cleanup_error
+
+
+    async def release_resources(self) -> bool:
+        """Close idle storage while keeping this knowledge reopenable."""
+        async with self._lifecycle_lock:
+            if not self.is_started:
+                return True
+            with self._usage_lock:
+                if self._active_uses:
+                    return False
+                qdrant = self._qdrant
+                self._qdrant = None
+                self._started = False
+            await asyncio.to_thread(self._file_store.close)
+            if qdrant is not None:
+                await asyncio.to_thread(qdrant.close)
+            return True
+
+
+    async def _run_in_use(
+        self,
+        worker: Callable[[], Awaitable[_ResultT]],
+    ) -> _ResultT:
+        async with self._lifecycle_lock:
+            if self._closed:
+                raise RavenError(
+                    ErrorCode.KNOWLEDGE_CLOSED,
+                    f"Knowledge '{self.name}' is closed.",
+                )
+            with self._usage_lock:
+                self._active_uses += 1
+        try:
+            await self.start()
+            return await worker()
+        finally:
+            with self._usage_lock:
+                self._active_uses -= 1
 
 
     async def claim_ingestion(self, file_name: str, file_id: str) -> None:
@@ -599,9 +671,11 @@ class Knowledge:
 
     async def validate_embedding_model(self, embed_model: Any) -> None:
         """Reject adapters that do not match this knowledge's vector space."""
-        self._ensure_started()
-        async with self._mutation_lock:
-            await asyncio.to_thread(self._ensure_embedding_identity, embed_model)
+        async def validate() -> None:
+            async with self._mutation_lock:
+                await asyncio.to_thread(self._ensure_embedding_identity, embed_model)
+
+        await self._run_in_use(validate)
 
 
     async def set_summary(
@@ -615,9 +689,11 @@ class Knowledge:
         )
         return await active_operation.run(
             OperationType.KNOWLEDGE_SET_SUMMARY,
-            lambda active_operation: self._set_summary(
-                summary,
-                operation=active_operation,
+            lambda active_operation: self._run_in_use(
+                lambda: self._set_summary(
+                    summary,
+                    operation=active_operation,
+                )
             ),
         )
 
@@ -644,28 +720,23 @@ class Knowledge:
 
 
     def get_summary(self) -> str:
-        self._ensure_started()
         return str(self._meta.get("user_summary", ""))
 
 
     def file_exists(self, file_name: str) -> bool:
-        self._ensure_started()
-        return self._file_store.file_exists(file_name)
+        return self._read_file_store("file_exists", file_name)
 
 
     def list_files(self) -> list[dict[str, Any]]:
-        self._ensure_started()
-        return self._file_store.list_files()
+        return self._read_file_store("list_files")
 
 
     def list_sections(self, file_name: str) -> list[dict[str, Any]]:
-        self._ensure_started()
-        return self._file_store.list_sections(file_name)
+        return self._read_file_store("list_sections", file_name)
 
 
     def get_section(self, section_id: str) -> dict[str, Any] | None:
-        self._ensure_started()
-        return self._file_store.get_section(section_id)
+        return self._read_file_store("get_section", section_id)
 
 
     async def ingest(
@@ -685,15 +756,17 @@ class Knowledge:
         )
         return await active_operation.run(
             OperationType.KNOWLEDGE_INGEST,
-            lambda active_operation: self._ingest(
-                file_name,
-                sections,
-                file_id=file_id,
-                embed_model=embed_model,
-                navigation_type=navigation_type,
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-                operation=active_operation,
+            lambda active_operation: self._run_in_use(
+                lambda: self._ingest(
+                    file_name,
+                    sections,
+                    file_id=file_id,
+                    embed_model=embed_model,
+                    navigation_type=navigation_type,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                    operation=active_operation,
+                )
             ),
         )
 
@@ -710,9 +783,11 @@ class Knowledge:
         )
         return await active_operation.run(
             OperationType.INGESTION_CLEANUP,
-            lambda active_operation: self._reconcile_ingestion(
-                file_id,
-                operation=active_operation,
+            lambda active_operation: self._run_in_use(
+                lambda: self._reconcile_ingestion(
+                    file_id,
+                    operation=active_operation,
+                )
             ),
         )
 
@@ -779,47 +854,51 @@ class Knowledge:
 
     async def reconcile_pending_ingestions(self) -> list[dict[str, Any]]:
         """Perform the final targeted cleanup used during graceful shutdown."""
-        self._ensure_started()
-        results: list[dict[str, Any]] = []
+        async def reconcile() -> list[dict[str, Any]]:
+            results: list[dict[str, Any]] = []
+            async with self._mutation_lock:
+                for file_id in tuple(self._pending_ingestions):
+                    committed = await asyncio.to_thread(
+                        self._file_result_by_id,
+                        file_id,
+                    )
+                    if committed is not None:
+                        self._pending_ingestions.discard(file_id)
+                        results.append(
+                            {
+                                "knowledge": self.name,
+                                "file_id": file_id,
+                                "status": "committed",
+                                "points_removed": 0,
+                            }
+                        )
+                        continue
 
-        async with self._mutation_lock:
-            for file_id in tuple(self._pending_ingestions):
-                committed = await asyncio.to_thread(
-                    self._file_result_by_id,
-                    file_id,
-                )
-                if committed is not None:
+                    points_removed = await asyncio.to_thread(
+                        self._count_points_by_file_id,
+                        file_id,
+                    )
+                    await asyncio.to_thread(self._delete_points_by_file_id, file_id)
                     self._pending_ingestions.discard(file_id)
                     results.append(
                         {
                             "knowledge": self.name,
                             "file_id": file_id,
-                            "status": "committed",
-                            "points_removed": 0,
+                            "status": "cleaned",
+                            "points_removed": points_removed,
                         }
                     )
-                    continue
+            return results
 
-                points_removed = await asyncio.to_thread(
-                    self._count_points_by_file_id,
-                    file_id,
-                )
-                await asyncio.to_thread(self._delete_points_by_file_id, file_id)
-                self._pending_ingestions.discard(file_id)
-                results.append(
-                    {
-                        "knowledge": self.name,
-                        "file_id": file_id,
-                        "status": "cleaned",
-                        "points_removed": points_removed,
-                    }
-                )
-
-        return results
+        return await self._run_in_use(reconcile)
 
 
     async def reconcile_pending_file_deletions(self) -> list[dict[str, Any]]:
         """Finish file deletions that were interrupted after their durable marker."""
+        return await self._run_in_use(self._reconcile_pending_file_deletions)
+
+
+    async def _reconcile_pending_file_deletions(self) -> list[dict[str, Any]]:
         self._ensure_started()
         results: list[dict[str, Any]] = []
         async with self._mutation_lock:
@@ -1091,11 +1170,14 @@ class Knowledge:
 
     async def search(self, query_vector: list[float], top_k: int = 5) -> list[dict[str, Any]]:
         """Return vector hits containing only identifiers and scores."""
-        self._ensure_started()
         if top_k <= 0:
             return []
-        async with self._mutation_lock:
-            return await asyncio.to_thread(self._search, query_vector, top_k)
+
+        async def search_vectors() -> list[dict[str, Any]]:
+            async with self._mutation_lock:
+                return await asyncio.to_thread(self._search, query_vector, top_k)
+
+        return await self._run_in_use(search_vectors)
 
 
     async def retrieve_context(
@@ -1129,9 +1211,11 @@ class Knowledge:
 
     async def count(self) -> int:
         """Return the number of indexed vector points."""
-        self._ensure_started()
-        async with self._mutation_lock:
-            return await asyncio.to_thread(self._count)
+        async def count_vectors() -> int:
+            async with self._mutation_lock:
+                return await asyncio.to_thread(self._count)
+
+        return await self._run_in_use(count_vectors)
 
 
     async def delete_file(
@@ -1145,9 +1229,11 @@ class Knowledge:
         )
         return await active_operation.run(
             OperationType.KNOWLEDGE_DELETE_FILE,
-            lambda active_operation: self._delete_file(
-                file_id,
-                operation=active_operation,
+            lambda active_operation: self._run_in_use(
+                lambda: self._delete_file(
+                    file_id,
+                    operation=active_operation,
+                )
             ),
         )
 
@@ -1251,6 +1337,33 @@ class Knowledge:
     ) -> None:
         if operation is not None:
             await operation.publish(Event(type=event_type, data=data or {}))
+
+
+    def _read_file_store(self, method_name: str, *args: Any) -> Any:
+        if self._closed:
+            raise RavenError(
+                ErrorCode.KNOWLEDGE_CLOSED,
+                f"Knowledge '{self.name}' is closed.",
+            )
+        with self._usage_lock:
+            self._active_uses += 1
+        temporary_store: _KnowledgeFileStore | None = None
+        try:
+            store = self._file_store
+            if not self.is_started:
+                temporary_store = _KnowledgeFileStore(self.files_path)
+                temporary_store.open()
+                store = temporary_store
+            return getattr(store, method_name)(*args)
+        finally:
+            if temporary_store is not None:
+                temporary_store.close()
+            with self._usage_lock:
+                self._active_uses -= 1
+
+
+    def _load_descriptor(self) -> None:
+        self._meta = self._load_meta()
 
 
     def _open_storage(self) -> None:
@@ -1482,11 +1595,25 @@ class KnowledgeBase:
         self,
         paths: PathConfig,
         operation_manager: OperationManager,
+        *,
+        max_open_knowledges: int = DEFAULT_OPEN_KNOWLEDGE_LIMIT,
     ) -> None:
+        if (
+            isinstance(max_open_knowledges, bool)
+            or not isinstance(max_open_knowledges, int)
+            or max_open_knowledges <= 0
+        ):
+            raise RavenError(
+                ErrorCode.INVALID_RESOURCE_CACHE_SIZE,
+                "Open knowledge limit must be a positive integer.",
+            )
         self.paths = paths
         self.knowledge_base_path = paths.knowledge_base_dir
-        self._knowledges: dict[str, Knowledge] = {}
+        self.max_open_knowledges = max_open_knowledges
+        self._knowledges: OrderedDict[str, Knowledge] = OrderedDict()
         self._lifecycle_lock = asyncio.Lock()
+        self._resource_lock = asyncio.Lock()
+        self._opening_knowledges: set[int] = set()
         self._started = False
         self._closed = False
         self._operation_manager = operation_manager
@@ -1510,16 +1637,15 @@ class KnowledgeBase:
 
             await asyncio.to_thread(self.knowledge_base_path.mkdir, parents=True, exist_ok=True)
             names = await asyncio.to_thread(self._scan_existing)
-            opened: list[Knowledge] = []
-            try:
-                for name in names:
-                    knowledge = await self._open(name)
-                    self._knowledges[name] = knowledge
-                    opened.append(knowledge)
-            except Exception:
-                await asyncio.gather(*(knowledge.close() for knowledge in opened))
-                self._knowledges.clear()
-                raise
+            for name in names:
+                knowledge = Knowledge(
+                    self.knowledge_base_path / name,
+                    operation_manager=self._operation_manager,
+                    before_open=self._before_knowledge_open,
+                    after_open=self._after_knowledge_open,
+                )
+                await asyncio.to_thread(knowledge._load_descriptor)
+                self._knowledges[name] = knowledge
             self._started = True
 
 
@@ -1609,6 +1735,7 @@ class KnowledgeBase:
                 )
                 raise
             self._knowledges[safe_name] = knowledge
+            self._knowledges.move_to_end(safe_name)
 
         await self._emit(
             operation,
@@ -1623,12 +1750,14 @@ class KnowledgeBase:
         self._ensure_started()
         safe_name = _safe_name(name)
         try:
-            return self._knowledges[safe_name]
+            knowledge = self._knowledges[safe_name]
         except KeyError as exc:
             raise RavenError(
                 ErrorCode.KNOWLEDGE_NOT_FOUND,
                 f"Knowledge '{name}' does not exist.",
             ) from exc
+        self._knowledges.move_to_end(safe_name)
+        return knowledge
 
 
     async def list(self) -> list[dict[str, Any]]:
@@ -1728,9 +1857,49 @@ class KnowledgeBase:
         knowledge = Knowledge(
             self.knowledge_base_path / name,
             operation_manager=self._operation_manager,
+            before_open=self._before_knowledge_open,
+            after_open=self._after_knowledge_open,
         )
         await knowledge.start()
         return knowledge
+
+
+    async def _before_knowledge_open(self, target: Knowledge) -> None:
+        async with self._resource_lock:
+            if target.name in self._knowledges:
+                self._knowledges.move_to_end(target.name)
+            unavailable: set[int] = set()
+            while True:
+                opened = [
+                    knowledge
+                    for knowledge in self._knowledges.values()
+                    if knowledge.is_started and knowledge is not target
+                    and id(knowledge) not in self._opening_knowledges
+                ]
+                if (
+                    len(opened) + len(self._opening_knowledges)
+                    < self.max_open_knowledges
+                ):
+                    break
+                candidate = next(
+                    (
+                        knowledge
+                        for knowledge in opened
+                        if knowledge.active_uses == 0
+                        and id(knowledge) not in unavailable
+                    ),
+                    None,
+                )
+                if candidate is None:
+                    break
+                if not await candidate.release_resources():
+                    unavailable.add(id(candidate))
+            self._opening_knowledges.add(id(target))
+
+
+    async def _after_knowledge_open(self, target: Knowledge) -> None:
+        async with self._resource_lock:
+            self._opening_knowledges.discard(id(target))
 
 
     def _scan_existing(self) -> list[str]:

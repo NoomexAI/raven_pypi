@@ -10,10 +10,11 @@ import re
 import shutil
 import sqlite3
 import threading
-from collections.abc import Sequence
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 from uuid import UUID, uuid4
 
 from llama_index.core.base.llms.types import MessageRole
@@ -25,12 +26,15 @@ from llama_index.vector_stores.qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qdrant_models
 
-from ..core.config import PathConfig
+from ..core.config import DEFAULT_OPEN_CONVERSATION_LIMIT, PathConfig
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
 from ..core.operations import Operation, OperationManager, OperationTask, OperationType
 from ..providers.model_identity import embedding_identity
 from .knowledge_base import KnowledgeBase
+
+
+_ResultT = TypeVar("_ResultT")
 
 
 DEFAULT_TITLE = "New Conversation"
@@ -413,6 +417,8 @@ class Conversation:
         dir_path: Path,
         *,
         operation_manager: OperationManager,
+        before_open: Callable[["Conversation"], Awaitable[None]] | None = None,
+        after_open: Callable[["Conversation"], Awaitable[None]] | None = None,
     ) -> None:
         self.dir_path = Path(dir_path)
         self.conversation_id = ""
@@ -433,6 +439,7 @@ class Conversation:
         self._chat_memory: ChatSummaryMemoryBuffer | None = None
         self._vector_memory: VectorMemory | None = None
         self._preferences: list[dict[str, str]] = []
+        self._start_lock = asyncio.Lock()
         self._lifecycle_lock = asyncio.Lock()
         self._memory_lock = asyncio.Lock()
         self._mutation_lock = asyncio.Lock()
@@ -442,6 +449,10 @@ class Conversation:
         self._started = False
         self._closed = False
         self._operation_manager = operation_manager
+        self._before_open = before_open
+        self._after_open = after_open
+        self._usage_lock = threading.Lock()
+        self._active_uses = 0
 
 
     @property
@@ -479,9 +490,15 @@ class Conversation:
         return self._active_session_id is not None
 
 
+    @property
+    def active_uses(self) -> int:
+        with self._usage_lock:
+            return self._active_uses
+
+
     async def start(self) -> None:
         """Open the conversation storage without initializing model memory."""
-        async with self._lifecycle_lock:
+        async with self._start_lock:
             if self.is_started:
                 return
             if self._closed:
@@ -490,8 +507,25 @@ class Conversation:
                     f"Conversation '{self.conversation_id}' is closed.",
                 )
 
-            await asyncio.to_thread(self._open_storage)
-            self._started = True
+            reserved = False
+            try:
+                if self._before_open is not None:
+                    await self._before_open(self)
+                    reserved = True
+
+                async with self._lifecycle_lock:
+                    if self.is_started:
+                        return
+                    if self._closed:
+                        raise RavenError(
+                            ErrorCode.CONVERSATION_CLOSED,
+                            f"Conversation '{self.conversation_id}' is closed.",
+                        )
+                    await asyncio.to_thread(self._open_storage)
+                    self._started = True
+            finally:
+                if reserved and self._after_open is not None:
+                    await self._after_open(self)
 
 
     async def close(self) -> None:
@@ -513,18 +547,59 @@ class Conversation:
                 await asyncio.to_thread(qdrant.close)
 
 
+    async def release_resources(self) -> bool:
+        """Close idle storage while keeping this conversation reopenable."""
+        async with self._lifecycle_lock:
+            if not self.is_started:
+                return True
+            with self._usage_lock:
+                if self.has_active_session or self._active_uses:
+                    return False
+                qdrant = self._qdrant
+                self._qdrant = None
+                self._chat_store = None
+                self._chat_memory = None
+                self._vector_memory = None
+                self._started = False
+            await asyncio.to_thread(self._message_store.close)
+            if qdrant is not None:
+                await asyncio.to_thread(qdrant.close)
+            return True
+
+
+    async def _run_in_use(
+        self,
+        worker: Callable[[], Awaitable[_ResultT]],
+    ) -> _ResultT:
+        async with self._lifecycle_lock:
+            if self._closed:
+                raise RavenError(
+                    ErrorCode.CONVERSATION_CLOSED,
+                    f"Conversation '{self.conversation_id}' is closed.",
+                )
+            with self._usage_lock:
+                self._active_uses += 1
+        try:
+            await self.start()
+            return await worker()
+        finally:
+            with self._usage_lock:
+                self._active_uses -= 1
+
+
     async def _claim_session(self, session_id: UUID) -> None:
         """Reserve this conversation for one active Session instance."""
-        async with self._session_lock:
-            if (
-                self._active_session_id is not None
-                and self._active_session_id != session_id
-            ):
-                raise RavenError(
-                    ErrorCode.CONVERSATION_SESSION_ACTIVE,
-                    f"Conversation '{self.conversation_id}' already has an active session.",
-                )
-            self._active_session_id = session_id
+        async with self._lifecycle_lock:
+            async with self._session_lock:
+                if (
+                    self._active_session_id is not None
+                    and self._active_session_id != session_id
+                ):
+                    raise RavenError(
+                        ErrorCode.CONVERSATION_SESSION_ACTIVE,
+                        f"Conversation '{self.conversation_id}' already has an active session.",
+                    )
+                self._active_session_id = session_id
 
 
     async def _release_session(self, session_id: UUID) -> None:
@@ -639,9 +714,11 @@ class Conversation:
         )
         return await active_operation.run(
             OperationType.CONVERSATION_GET_CONTEXT,
-            lambda active_operation: self._get_context_messages(
-                initial_token_count=initial_token_count,
-                operation=active_operation,
+            lambda active_operation: self._run_in_use(
+                lambda: self._get_context_messages(
+                    initial_token_count=initial_token_count,
+                    operation=active_operation,
+                )
             ),
         )
 
@@ -740,8 +817,9 @@ class Conversation:
 
     async def get_messages(self) -> list[ChatMessage]:
         """Return the complete stored chat history without applying a window."""
-        self._ensure_started()
-        return await asyncio.to_thread(self._message_store.list_messages)
+        return await self._run_in_use(
+            lambda: asyncio.to_thread(self._message_store.list_messages)
+        )
 
 
     async def get_turn_messages(
@@ -749,21 +827,23 @@ class Conversation:
         turn_id: UUID | str,
     ) -> list[ChatMessage]:
         """Return only the canonical messages committed under ``turn_id``."""
-        self._ensure_started()
-        normalized_turn_id = self._validate_turn_id(turn_id)
-        turn = await asyncio.to_thread(
-            self._message_store.get_turn,
-            normalized_turn_id,
-        )
-        if turn is None:
-            raise RavenError(
-                ErrorCode.CONVERSATION_TURN_NOT_FOUND,
-                f"Turn '{normalized_turn_id}' does not exist.",
+        async def load_turn() -> list[ChatMessage]:
+            normalized_turn_id = self._validate_turn_id(turn_id)
+            turn = await asyncio.to_thread(
+                self._message_store.get_turn,
+                normalized_turn_id,
             )
-        return await asyncio.to_thread(
-            self._message_store.get_turn_messages,
-            normalized_turn_id,
-        )
+            if turn is None:
+                raise RavenError(
+                    ErrorCode.CONVERSATION_TURN_NOT_FOUND,
+                    f"Turn '{normalized_turn_id}' does not exist.",
+                )
+            return await asyncio.to_thread(
+                self._message_store.get_turn_messages,
+                normalized_turn_id,
+            )
+
+        return await self._run_in_use(load_turn)
 
 
     async def search_memory(self, query: str) -> list[ChatMessage]:
@@ -819,13 +899,15 @@ class Conversation:
         )
         return await active_operation.run(
             OperationType.CONVERSATION_APPEND_TURN,
-            lambda active_operation: self._append_turn(
-                messages,
-                turn_id=normalized_turn_id,
-                user_query=normalized_query,
-                result=result,
-                index_in_vector_memory=index_in_vector_memory,
-                operation=active_operation,
+            lambda active_operation: self._run_in_use(
+                lambda: self._append_turn(
+                    messages,
+                    turn_id=normalized_turn_id,
+                    user_query=normalized_query,
+                    result=result,
+                    index_in_vector_memory=index_in_vector_memory,
+                    operation=active_operation,
+                )
             ),
         )
 
@@ -939,9 +1021,11 @@ class Conversation:
         )
         return await active_operation.run(
             OperationType.CONVERSATION_RECONCILE_TURN,
-            lambda active_operation: self._reconcile_turn(
-                normalized_turn_id,
-                operation=active_operation,
+            lambda active_operation: self._run_in_use(
+                lambda: self._reconcile_turn(
+                    normalized_turn_id,
+                    operation=active_operation,
+                )
             ),
         )
 
@@ -1143,9 +1227,11 @@ class Conversation:
         )
         return await active_operation.run(
             OperationType.CONVERSATION_SAVE_PREFERENCE,
-            lambda active_operation: self._save_preference(
-                text,
-                operation=active_operation,
+            lambda active_operation: self._run_in_use(
+                lambda: self._save_preference(
+                    text,
+                    operation=active_operation,
+                )
             ),
         )
 
@@ -1205,9 +1291,11 @@ class Conversation:
         )
         return await active_operation.run(
             OperationType.CONVERSATION_REMOVE_PREFERENCE,
-            lambda active_operation: self._remove_preference(
-                preference_id,
-                operation=active_operation,
+            lambda active_operation: self._run_in_use(
+                lambda: self._remove_preference(
+                    preference_id,
+                    operation=active_operation,
+                )
             ),
         )
 
@@ -1264,10 +1352,12 @@ class Conversation:
         )
         return await active_operation.run(
             OperationType.CONVERSATION_UPDATE,
-            lambda active_operation: self._update(
-                title=title,
-                pinned=pinned,
-                operation=active_operation,
+            lambda active_operation: self._run_in_use(
+                lambda: self._update(
+                    title=title,
+                    pinned=pinned,
+                    operation=active_operation,
+                )
             ),
         )
 
@@ -1346,10 +1436,12 @@ class Conversation:
         )
         return await active_operation.run(
             OperationType.CONVERSATION_GENERATE_TITLE,
-            lambda active_operation: self._generate_title(
-                llm,
-                first_user_message,
-                operation=active_operation,
+            lambda active_operation: self._run_in_use(
+                lambda: self._generate_title(
+                    llm,
+                    first_user_message,
+                    operation=active_operation,
+                )
             ),
         )
 
@@ -1705,6 +1797,8 @@ class Conversation:
         dir_path: Path,
         *,
         operation_manager: OperationManager,
+        before_open: Callable[["Conversation"], Awaitable[None]] | None = None,
+        after_open: Callable[["Conversation"], Awaitable[None]] | None = None,
     ) -> "Conversation":
         """Load and validate a conversation from its metadata file."""
         metadata_path = Path(dir_path) / "metadata.json"
@@ -1766,6 +1860,8 @@ class Conversation:
         conversation = cls(
             Path(dir_path),
             operation_manager=operation_manager,
+            before_open=before_open,
+            after_open=after_open,
         )
         conversation._set_metadata(
             conversation_id=conversation_id,
@@ -1788,13 +1884,27 @@ class ConversationManager:
         paths: PathConfig,
         knowledge_base: KnowledgeBase,
         operation_manager: OperationManager,
+        *,
+        max_open_conversations: int = DEFAULT_OPEN_CONVERSATION_LIMIT,
     ) -> None:
+        if (
+            isinstance(max_open_conversations, bool)
+            or not isinstance(max_open_conversations, int)
+            or max_open_conversations <= 0
+        ):
+            raise RavenError(
+                ErrorCode.INVALID_RESOURCE_CACHE_SIZE,
+                "Open conversation limit must be a positive integer.",
+            )
         self.conversation_dir = paths.conversations_dir
         self._knowledge_base = knowledge_base
         self._operation_manager = operation_manager
-        self._conversations: dict[str, Conversation] = {}
+        self.max_open_conversations = max_open_conversations
+        self._conversations: OrderedDict[str, Conversation] = OrderedDict()
         self._lifecycle_lock = asyncio.Lock()
+        self._resource_lock = asyncio.Lock()
         self._mutation_lock = asyncio.Lock()
+        self._opening_conversations: set[int] = set()
         self._started = False
         self._closed = False
 
@@ -1822,12 +1932,14 @@ class ConversationManager:
             )
             await asyncio.to_thread(self._cleanup_deletion_tombstones)
             conversation_paths = await asyncio.to_thread(self._scan_existing)
-            loaded: dict[str, Conversation] = {}
+            loaded: OrderedDict[str, Conversation] = OrderedDict()
             for path in conversation_paths:
                 conversation = await asyncio.to_thread(
                     Conversation.from_dir,
                     path,
                     operation_manager=self._operation_manager,
+                    before_open=self._before_conversation_open,
+                    after_open=self._after_conversation_open,
                 )
                 loaded[conversation.conversation_id] = conversation
 
@@ -1899,6 +2011,8 @@ class ConversationManager:
                 conversation = Conversation(
                     self.conversation_dir / conversation_id,
                     operation_manager=self._operation_manager,
+                    before_open=self._before_conversation_open,
+                    after_open=self._after_conversation_open,
                 )
                 conversation._set_metadata(
                     conversation_id=conversation_id,
@@ -1910,6 +2024,7 @@ class ConversationManager:
                 )
                 await asyncio.to_thread(conversation.write_metadata)
                 self._conversations[conversation_id] = conversation
+                self._conversations.move_to_end(conversation_id)
 
             await self._emit(
                 operation,
@@ -1933,12 +2048,14 @@ class ConversationManager:
         self._ensure_started()
         conversation_id = self._validate_id(conversation_id)
         try:
-            return self._conversations[conversation_id]
+            conversation = self._conversations[conversation_id]
         except KeyError as exc:
             raise RavenError(
                 ErrorCode.CONVERSATION_NOT_FOUND,
                 f"Conversation '{conversation_id}' does not exist.",
             ) from exc
+        self._conversations.move_to_end(conversation_id)
+        return conversation
 
 
     def owns(self, conversation: Conversation) -> bool:
@@ -2082,6 +2199,45 @@ class ConversationManager:
         for entry in self.conversation_dir.iterdir():
             if entry.is_dir() and entry.name.startswith(".deleting-"):
                 shutil.rmtree(entry)
+
+
+    async def _before_conversation_open(self, target: Conversation) -> None:
+        async with self._resource_lock:
+            if target.conversation_id in self._conversations:
+                self._conversations.move_to_end(target.conversation_id)
+            unavailable: set[int] = set()
+            while True:
+                opened = [
+                    conversation
+                    for conversation in self._conversations.values()
+                    if conversation.is_started and conversation is not target
+                    and id(conversation) not in self._opening_conversations
+                ]
+                if (
+                    len(opened) + len(self._opening_conversations)
+                    < self.max_open_conversations
+                ):
+                    break
+                candidate = next(
+                    (
+                        conversation
+                        for conversation in opened
+                        if not conversation.has_active_session
+                        and conversation.active_uses == 0
+                        and id(conversation) not in unavailable
+                    ),
+                    None,
+                )
+                if candidate is None:
+                    break
+                if not await candidate.release_resources():
+                    unavailable.add(id(candidate))
+            self._opening_conversations.add(id(target))
+
+
+    async def _after_conversation_open(self, target: Conversation) -> None:
+        async with self._resource_lock:
+            self._opening_conversations.discard(id(target))
 
 
     def _validate_knowledge(self, knowledge_name: str) -> None:

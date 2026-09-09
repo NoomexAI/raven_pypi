@@ -14,6 +14,7 @@ class ErrorCode(StrEnum):
     KNOWLEDGE_NOT_FOUND = "knowledge_not_found"
     KNOWLEDGE_CLOSED = "knowledge_closed"
     KNOWLEDGE_NOT_STARTED = "knowledge_not_started"
+    INVALID_RESOURCE_CACHE_SIZE = "invalid_resource_cache_size"
     CONVERSATION_ALREADY_EXISTS = "conversation_already_exists"
     CONVERSATION_NOT_FOUND = "conversation_not_found"
     CONVERSATION_CLOSED = "conversation_closed"
