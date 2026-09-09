@@ -5,8 +5,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections import OrderedDict
 from typing import Any
 
+from ..core.config import (
+    DEFAULT_EMBEDDING_ADAPTER_CACHE_SIZE,
+    DEFAULT_LLM_ADAPTER_CACHE_SIZE,
+)
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
 from ..core.operations import Operation, OperationManager, OperationTask, OperationType
@@ -15,10 +20,23 @@ from ..core.operations import Operation, OperationManager, OperationTask, Operat
 class LiteLLMManager:
     """Create and cache LlamaIndex adapters backed by LiteLLM."""
 
-    def __init__(self, *, operation_manager: OperationManager) -> None:
+    def __init__(
+        self,
+        *,
+        operation_manager: OperationManager,
+        max_cached_llms: int = DEFAULT_LLM_ADAPTER_CACHE_SIZE,
+        max_cached_embeddings: int = DEFAULT_EMBEDDING_ADAPTER_CACHE_SIZE,
+    ) -> None:
+        self._validate_cache_size(max_cached_llms, "LLM")
+        self._validate_cache_size(max_cached_embeddings, "embedding")
         self._operation_manager = operation_manager
-        self._llms: dict[str, Any] = {}
-        self._embeddings: dict[str, Any] = {}
+        self._max_cached_llms = max_cached_llms
+        self._max_cached_embeddings = max_cached_embeddings
+        self._llms: OrderedDict[str, Any] = OrderedDict()
+        self._embeddings: OrderedDict[str, Any] = OrderedDict()
+        self._llm_cache_lock = asyncio.Lock()
+        self._embedding_cache_lock = asyncio.Lock()
+        self._closed = False
 
 
     async def load_llm(
@@ -71,16 +89,22 @@ class LiteLLMManager:
                 api_key=api_key,
                 options=model_options,
             )
-            cached = cache_key in self._llms
-            if not cached:
-                llm_options: dict[str, Any] = {
-                    "model": model,
-                    "api_key": api_key,
-                    **model_options,
-                }
-                if provider is not None:
-                    llm_options["custom_llm_provider"] = provider
-                self._llms[cache_key] = LiteLLM(**llm_options)
+            async with self._llm_cache_lock:
+                self._ensure_open()
+                cached = cache_key in self._llms
+                if cached:
+                    self._llms.move_to_end(cache_key)
+                else:
+                    llm_options: dict[str, Any] = {
+                        "model": model,
+                        "api_key": api_key,
+                        **model_options,
+                    }
+                    if provider is not None:
+                        llm_options["custom_llm_provider"] = provider
+                    self._llms[cache_key] = LiteLLM(**llm_options)
+                    self._trim_cache(self._llms, self._max_cached_llms)
+                adapter = self._llms[cache_key]
         except RavenError as error:
             await self._emit(
                 operation,
@@ -107,7 +131,7 @@ class LiteLLMManager:
             EventType.MODEL_LOAD_LLM_COMPLETED,
             {**data, "cached": cached},
         )
-        return self._llms[cache_key]
+        return adapter
 
 
     async def load_embedding(
@@ -165,32 +189,41 @@ class LiteLLMManager:
                     **embedding_options,
                 },
             )
-            cached = cache_key in self._embeddings
-            if not cached:
-                class AsyncLiteLLMEmbedding(LiteLLMEmbedding):
-                    """Keep the synchronous LiteLLM adapter off Raven's event loop."""
+            async with self._embedding_cache_lock:
+                self._ensure_open()
+                cached = cache_key in self._embeddings
+                if cached:
+                    self._embeddings.move_to_end(cache_key)
+                else:
+                    class AsyncLiteLLMEmbedding(LiteLLMEmbedding):
+                        """Keep synchronous LiteLLM embedding calls off the event loop."""
 
-                    async def _aget_query_embedding(self, query: str) -> list[float]:
-                        return await asyncio.to_thread(self._get_query_embedding, query)
-
-
-                    async def _aget_text_embedding(self, text: str) -> list[float]:
-                        return await asyncio.to_thread(self._get_text_embedding, text)
-
-
-                    async def _aget_text_embeddings(
-                        self,
-                        texts: list[str],
-                    ) -> list[list[float]]:
-                        return await asyncio.to_thread(self._get_text_embeddings, texts)
+                        async def _aget_query_embedding(self, query: str) -> list[float]:
+                            return await asyncio.to_thread(self._get_query_embedding, query)
 
 
-                self._embeddings[cache_key] = AsyncLiteLLMEmbedding(
-                    model_name=adapter_model,
-                    api_key=api_key,
-                    embed_batch_size=embed_batch_size,
-                    **embedding_options,
-                )
+                        async def _aget_text_embedding(self, text: str) -> list[float]:
+                            return await asyncio.to_thread(self._get_text_embedding, text)
+
+
+                        async def _aget_text_embeddings(
+                            self,
+                            texts: list[str],
+                        ) -> list[list[float]]:
+                            return await asyncio.to_thread(self._get_text_embeddings, texts)
+
+
+                    self._embeddings[cache_key] = AsyncLiteLLMEmbedding(
+                        model_name=adapter_model,
+                        api_key=api_key,
+                        embed_batch_size=embed_batch_size,
+                        **embedding_options,
+                    )
+                    self._trim_cache(
+                        self._embeddings,
+                        self._max_cached_embeddings,
+                    )
+                adapter = self._embeddings[cache_key]
         except RavenError as error:
             await self._emit(
                 operation,
@@ -217,13 +250,41 @@ class LiteLLMManager:
             EventType.MODEL_LOAD_EMBEDDING_COMPLETED,
             {**data, "cached": cached},
         )
-        return self._embeddings[cache_key]
+        return adapter
 
 
     async def close(self) -> None:
         """Drop cached adapters and their retained credentials."""
-        self._llms.clear()
-        self._embeddings.clear()
+        async with self._llm_cache_lock:
+            async with self._embedding_cache_lock:
+                if self._closed:
+                    return
+                self._closed = True
+                self._llms.clear()
+                self._embeddings.clear()
+
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RavenError(
+                ErrorCode.MODEL_PROVIDER_FAILED,
+                "LiteLLM manager is closed.",
+            )
+
+
+    @staticmethod
+    def _trim_cache(cache: OrderedDict[str, Any], maximum: int) -> None:
+        while len(cache) > maximum:
+            cache.popitem(last=False)
+
+
+    @staticmethod
+    def _validate_cache_size(value: int, role: str) -> None:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise RavenError(
+                ErrorCode.INVALID_RESOURCE_CACHE_SIZE,
+                f"{role} adapter cache size must be a positive integer.",
+            )
 
 
     @staticmethod

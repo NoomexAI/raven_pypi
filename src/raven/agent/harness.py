@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, cast
@@ -10,6 +11,7 @@ from typing import Any, cast
 from llama_index.core.agent.workflow import FunctionAgent, ToolCall, ToolCallResult
 from llama_index.core.llms import ChatMessage
 
+from ..core.config import DEFAULT_PROMPT_CACHE_SIZE
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
 from ..core.operations import Operation, OperationManager, OperationType
@@ -31,7 +33,7 @@ INSUFFICIENT_EVIDENCE_RESPONSE = (
 
 @dataclass(frozen=True, slots=True)
 class _CachedPrompt:
-    key: tuple[Any, ...]
+    conversation_id: str
     bundle: PromptBundle
 
 
@@ -49,6 +51,7 @@ class AgentHarness:
         reconstructor: Reconstructor | None = None,
         max_iterations: int = 10,
         top_k: int = 3,
+        max_cached_prompts: int = DEFAULT_PROMPT_CACHE_SIZE,
         agent_factory: Callable[..., Any] = FunctionAgent,
     ) -> None:
         if llm is None:
@@ -57,6 +60,15 @@ class AgentHarness:
             raise ValueError("max_iterations must be positive")
         if top_k <= 0:
             raise ValueError("top_k must be positive")
+        if (
+            isinstance(max_cached_prompts, bool)
+            or not isinstance(max_cached_prompts, int)
+            or max_cached_prompts <= 0
+        ):
+            raise RavenError(
+                ErrorCode.INVALID_RESOURCE_CACHE_SIZE,
+                "Prompt cache size must be a positive integer.",
+            )
 
         self._llm = llm
         self._knowledge_base = knowledge_base
@@ -68,8 +80,11 @@ class AgentHarness:
         )
         self._max_iterations = max_iterations
         self._top_k = top_k
+        self._max_cached_prompts = max_cached_prompts
         self._agent_factory = agent_factory
-        self._prompt_cache: dict[str, list[_CachedPrompt]] = {}
+        self._prompt_cache: OrderedDict[tuple[Any, ...], _CachedPrompt] = (
+            OrderedDict()
+        )
 
 
     @property
@@ -126,7 +141,13 @@ class AgentHarness:
 
     def invalidate_system_prompt(self, conversation_id: str) -> None:
         """Invalidate prompts cached for one conversation."""
-        self._prompt_cache.pop(conversation_id, None)
+        stale_keys = [
+            key
+            for key, cached in self._prompt_cache.items()
+            if cached.conversation_id == conversation_id
+        ]
+        for key in stale_keys:
+            self._prompt_cache.pop(key, None)
 
 
     async def _execute(
@@ -294,6 +315,7 @@ class AgentHarness:
     ) -> PromptBundle:
         preferences = conversation.get_preferences()
         key = (
+            conversation.conversation_id,
             policy.conversation_type,
             policy.knowledge_name,
             policy.retrieval_mode,
@@ -302,16 +324,18 @@ class AgentHarness:
                 for preference in preferences
             ),
         )
-        cached_prompts = self._prompt_cache.setdefault(
-            conversation.conversation_id,
-            [],
-        )
-        for cached in cached_prompts:
-            if cached.key == key:
-                return cached.bundle
+        cached = self._prompt_cache.get(key)
+        if cached is not None:
+            self._prompt_cache.move_to_end(key)
+            return cached.bundle
 
         bundle = PromptBuilder.build(policy, preferences)
-        cached_prompts.append(_CachedPrompt(key=key, bundle=bundle))
+        self._prompt_cache[key] = _CachedPrompt(
+            conversation_id=conversation.conversation_id,
+            bundle=bundle,
+        )
+        while len(self._prompt_cache) > self._max_cached_prompts:
+            self._prompt_cache.popitem(last=False)
         return bundle
 
 
