@@ -11,6 +11,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .config import DEFAULT_EVENT_REPLAY_PAGE_SIZE
 from .errors import ErrorCode, RavenError
 
 
@@ -176,6 +177,8 @@ class EventStore(Protocol):
         self,
         operation_id: str,
         after_event_id: int,
+        *,
+        limit: int | None = None,
     ) -> list[Event]: ...
 
 
@@ -250,15 +253,25 @@ class EventStream:
             return persisted
 
 
-    async def read(self, after_event_id: int = 0) -> list[Event]:
+    async def read(
+        self,
+        after_event_id: int = 0,
+        *,
+        limit: int | None = None,
+    ) -> list[Event]:
         """Read this stream's retained events after a cursor."""
         self._validate_cursor(after_event_id)
+        self._validate_page_size(limit)
 
         async with self._condition:
             await self._load()
             self._raise_if_unhealthy()
             self._validate_available_cursor(after_event_id)
-            return await self._store.read_after(self.operation_id, after_event_id)
+            return await self._store.read_after(
+                self.operation_id,
+                after_event_id,
+                limit=limit,
+            )
 
 
     async def events(self, after_event_id: int = 0) -> AsyncIterator[Event]:
@@ -275,7 +288,11 @@ class EventStream:
             async with self._condition:
                 await self._load()
                 self._raise_if_unhealthy()
-                events = await self._store.read_after(self.operation_id, cursor)
+                events = await self._store.read_after(
+                    self.operation_id,
+                    cursor,
+                    limit=DEFAULT_EVENT_REPLAY_PAGE_SIZE,
+                )
 
                 if not events:
                     if self._finished or self._closed:
@@ -337,6 +354,17 @@ class EventStream:
             raise RavenError(
                 ErrorCode.INVALID_EVENT_CURSOR,
                 "after_event_id cannot be negative.",
+            )
+
+
+    @staticmethod
+    def _validate_page_size(limit: int | None) -> None:
+        if limit is None:
+            return
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise RavenError(
+                ErrorCode.INVALID_EVENT_PAGE_SIZE,
+                "Event page size must be a positive integer.",
             )
 
 

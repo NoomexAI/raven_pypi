@@ -227,7 +227,21 @@ class SQLiteOperationStore:
         )
 
 
-    async def read_after(self, operation_id: str, after_event_id: int) -> list[Event]:
+    async def read_after(
+        self,
+        operation_id: str,
+        after_event_id: int,
+        *,
+        limit: int | None = None,
+    ) -> list[Event]:
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
+        ):
+            raise RavenError(
+                ErrorCode.INVALID_EVENT_PAGE_SIZE,
+                "Event page size must be a positive integer.",
+            )
+
         await self.start()
         async with self._lock:
             try:
@@ -235,6 +249,7 @@ class SQLiteOperationStore:
                     self._read_after,
                     operation_id,
                     after_event_id,
+                    limit,
                 )
             except Exception as exc:
                 raise self._database_error("Events could not be read.") from exc
@@ -707,9 +722,9 @@ class SQLiteOperationStore:
         self,
         operation_id: str,
         after_event_id: int,
+        limit: int | None,
     ) -> list[sqlite3.Row]:
-        return self._require_connection().execute(
-            """
+        query = """
             SELECT
                 operation_id,
                 event_id,
@@ -722,9 +737,12 @@ class SQLiteOperationStore:
             FROM events
             WHERE operation_id = ? AND event_id > ?
             ORDER BY event_id
-            """,
-            (operation_id, after_event_id),
-        ).fetchall()
+        """
+        parameters: tuple[Any, ...] = (operation_id, after_event_id)
+        if limit is not None:
+            query += " LIMIT ?"
+            parameters += (limit,)
+        return self._require_connection().execute(query, parameters).fetchall()
 
 
     def _read_task(self, task_id: str) -> sqlite3.Row | None:

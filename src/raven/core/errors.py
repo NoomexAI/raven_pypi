@@ -81,6 +81,7 @@ class ErrorCode(StrEnum):
     EVENT_STREAM_CLOSED = "event_stream_closed"
     EVENT_STREAM_FINISHED = "event_stream_finished"
     INVALID_EVENT_CURSOR = "invalid_event_cursor"
+    INVALID_EVENT_PAGE_SIZE = "invalid_event_page_size"
     EVENT_HISTORY_GAP = "event_history_gap"
     OPERATION_SYNC_FAILED = "operation_sync_failed"
     OPERATION_DATABASE_FAILED = "operation_database_failed"
