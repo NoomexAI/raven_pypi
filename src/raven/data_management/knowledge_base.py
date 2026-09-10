@@ -573,7 +573,7 @@ class Knowledge:
                             ErrorCode.KNOWLEDGE_CLOSED,
                             f"Knowledge '{self.name}' is closed.",
                         )
-                    await asyncio.to_thread(self._open_storage)
+                    await self._open_storage_safely()
                     self._started = True
                     await self._reconcile_pending_file_deletions()
             finally:
@@ -628,6 +628,15 @@ class Knowledge:
         self,
         worker: Callable[[], Awaitable[_ResultT]],
     ) -> _ResultT:
+        await self._acquire_use()
+        try:
+            return await worker()
+        finally:
+            self._release_use()
+
+
+    async def _acquire_use(self) -> None:
+        """Pin this knowledge open until the matching usage release."""
         async with self._lifecycle_lock:
             if self._closed:
                 raise RavenError(
@@ -638,36 +647,58 @@ class Knowledge:
                 self._active_uses += 1
         try:
             await self.start()
-            return await worker()
-        finally:
+        except BaseException:
             with self._usage_lock:
                 self._active_uses -= 1
+            raise
+
+
+    def _release_use(self) -> None:
+        with self._usage_lock:
+            if self._active_uses <= 0:
+                raise RuntimeError(
+                    f"Knowledge '{self.name}' has no active usage reservation."
+                )
+            self._active_uses -= 1
 
 
     async def claim_ingestion(self, file_name: str, file_id: str) -> None:
-        """Prevent concurrent pipelines from parsing the same target file."""
-        async with self._mutation_lock:
-            if await asyncio.to_thread(self._file_store.file_exists, file_name):
-                existing = await asyncio.to_thread(self._file_result_by_id, file_id)
-                if existing is not None and existing["file"] == file_name:
-                    return
-                raise RavenError(
-                    ErrorCode.FILE_ALREADY_EXISTS,
-                    f"File '{file_name}' already exists in knowledge '{self.name}'.",
-                )
-            owner = self._ingestion_claims.get(file_name)
-            if owner is not None and owner != file_id:
-                raise RavenError(
-                    ErrorCode.FILE_ALREADY_EXISTS,
-                    f"File '{file_name}' is already being ingested.",
-                )
-            self._ingestion_claims[file_name] = file_id
+        """Pin storage and reserve one target file for an ingestion pipeline."""
+        await self._acquire_use()
+        claimed = False
+        try:
+            async with self._mutation_lock:
+                owner = self._ingestion_claims.get(file_name)
+                if owner is not None:
+                    raise RavenError(
+                        ErrorCode.FILE_ALREADY_EXISTS,
+                        f"File '{file_name}' is already being ingested.",
+                    )
+
+                if await asyncio.to_thread(self._file_store.file_exists, file_name):
+                    existing = await asyncio.to_thread(self._file_result_by_id, file_id)
+                    if existing is None or existing["file"] != file_name:
+                        raise RavenError(
+                            ErrorCode.FILE_ALREADY_EXISTS,
+                            f"File '{file_name}' already exists in knowledge '{self.name}'.",
+                        )
+
+                self._ingestion_claims[file_name] = file_id
+                claimed = True
+        finally:
+            if not claimed:
+                self._release_use()
 
 
     async def release_ingestion(self, file_name: str, file_id: str) -> None:
+        released = False
         async with self._mutation_lock:
             if self._ingestion_claims.get(file_name) == file_id:
                 self._ingestion_claims.pop(file_name, None)
+                released = True
+
+        if released:
+            self._release_use()
 
 
     async def validate_embedding_model(self, embed_model: Any) -> None:
@@ -1382,6 +1413,50 @@ class Knowledge:
         except Exception:
             self._file_store.close()
             raise
+
+
+    async def _open_storage_safely(self) -> None:
+        """Finish and roll back a threaded open before propagating cancellation."""
+        opening = asyncio.create_task(asyncio.to_thread(self._open_storage))
+        try:
+            await asyncio.shield(opening)
+        except asyncio.CancelledError:
+            try:
+                await asyncio.shield(opening)
+            except BaseException:
+                pass
+            await self._rollback_open_storage()
+            raise
+        except BaseException:
+            await self._rollback_open_storage()
+            raise
+
+
+    async def _rollback_open_storage(self) -> None:
+        cleanup = asyncio.create_task(asyncio.to_thread(self._close_open_storage))
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            await asyncio.shield(cleanup)
+            raise
+
+
+    def _close_open_storage(self) -> None:
+        qdrant = self._qdrant
+        self._qdrant = None
+        cleanup_error: BaseException | None = None
+        try:
+            self._file_store.close()
+        except BaseException as exc:
+            cleanup_error = exc
+        if qdrant is not None:
+            try:
+                qdrant.close()
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+        if cleanup_error is not None:
+            raise cleanup_error
 
 
     def _load_meta(self) -> dict[str, Any]:

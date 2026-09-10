@@ -91,8 +91,12 @@ class ErrorCode(StrEnum):
     OPERATION_DATABASE_FAILED = "operation_database_failed"
     OPERATION_DATABASE_IN_USE = "operation_database_in_use"
     OPERATION_DATABASE_CORRUPTED = "operation_database_corrupted"
+    UNSUPPORTED_OPERATION_DATABASE_VERSION = (
+        "unsupported_operation_database_version"
+    )
     INVALID_OPERATION_SYNC_INTERVAL = "invalid_operation_sync_interval"
     INVALID_RETENTION = "invalid_retention"
+    INVALID_CLEANUP_BATCH_SIZE = "invalid_cleanup_batch_size"
 
     OLLAMA_UNAVAILABLE = "ollama_unavailable"
     OLLAMA_OPERATION_FAILED = "ollama_operation_failed"

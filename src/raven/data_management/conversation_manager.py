@@ -522,7 +522,7 @@ class Conversation:
                             ErrorCode.CONVERSATION_CLOSED,
                             f"Conversation '{self.conversation_id}' is closed.",
                         )
-                    await asyncio.to_thread(self._open_storage)
+                    await self._open_storage_safely()
                     self._started = True
             finally:
                 if reserved and self._after_open is not None:
@@ -1533,6 +1533,53 @@ class Conversation:
         except Exception:
             self._message_store.close()
             raise
+
+
+    async def _open_storage_safely(self) -> None:
+        """Finish and roll back a threaded open before propagating cancellation."""
+        opening = asyncio.create_task(asyncio.to_thread(self._open_storage))
+        try:
+            await asyncio.shield(opening)
+        except asyncio.CancelledError:
+            try:
+                await asyncio.shield(opening)
+            except BaseException:
+                pass
+            await self._rollback_open_storage()
+            raise
+        except BaseException:
+            await self._rollback_open_storage()
+            raise
+
+
+    async def _rollback_open_storage(self) -> None:
+        cleanup = asyncio.create_task(asyncio.to_thread(self._close_open_storage))
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            await asyncio.shield(cleanup)
+            raise
+
+
+    def _close_open_storage(self) -> None:
+        qdrant = self._qdrant
+        self._qdrant = None
+        self._chat_store = None
+        self._chat_memory = None
+        self._vector_memory = None
+        cleanup_error: BaseException | None = None
+        try:
+            self._message_store.close()
+        except BaseException as exc:
+            cleanup_error = exc
+        if qdrant is not None:
+            try:
+                qdrant.close()
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+        if cleanup_error is not None:
+            raise cleanup_error
 
 
     def _open_qdrant(self) -> None:

@@ -2,6 +2,7 @@
 
 from .operations import (
     Operation,
+    OperationCleanupResult,
     OperationManager,
     OperationRecord,
     OperationStatus,
@@ -13,6 +14,7 @@ from .operations import (
 
 __all__ = [
     "Operation",
+    "OperationCleanupResult",
     "OperationManager",
     "OperationRecord",
     "OperationStatus",

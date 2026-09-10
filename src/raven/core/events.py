@@ -214,6 +214,8 @@ class EventStream:
         self._sync_error: RavenError | None = None
         self._loaded = False
         self._closed = False
+        self._active_event_readers = 0
+        self._cleanup_reserved = False
 
 
     @property
@@ -227,6 +229,7 @@ class EventStream:
         self._raise_if_unhealthy()
 
         async with self._condition:
+            self._ensure_open()
             await self._load()
             self._raise_if_unhealthy()
             if self._finished:
@@ -264,6 +267,11 @@ class EventStream:
         self._validate_page_size(limit)
 
         async with self._condition:
+            if self._cleanup_reserved:
+                raise RavenError(
+                    ErrorCode.EVENT_STREAM_CLOSED,
+                    "Event stream is being removed.",
+                )
             await self._load()
             self._raise_if_unhealthy()
             self._validate_available_cursor(after_event_id)
@@ -280,29 +288,40 @@ class EventStream:
         cursor = after_event_id
 
         async with self._condition:
+            if self._cleanup_reserved:
+                raise RavenError(
+                    ErrorCode.EVENT_STREAM_CLOSED,
+                    "Event stream is being removed.",
+                )
             await self._load()
             self._raise_if_unhealthy()
             self._validate_available_cursor(after_event_id)
+            self._active_event_readers += 1
 
-        while True:
+        try:
+            while True:
+                async with self._condition:
+                    await self._load()
+                    self._raise_if_unhealthy()
+                    events = await self._store.read_after(
+                        self.operation_id,
+                        cursor,
+                        limit=DEFAULT_EVENT_REPLAY_PAGE_SIZE,
+                    )
+
+                    if not events:
+                        if self._finished or self._closed:
+                            return
+                        await self._condition.wait()
+                        continue
+
+                for event in events:
+                    cursor = event.event_id or cursor
+                    yield event
+        finally:
             async with self._condition:
-                await self._load()
-                self._raise_if_unhealthy()
-                events = await self._store.read_after(
-                    self.operation_id,
-                    cursor,
-                    limit=DEFAULT_EVENT_REPLAY_PAGE_SIZE,
-                )
-
-                if not events:
-                    if self._finished or self._closed:
-                        return
-                    await self._condition.wait()
-                    continue
-
-            for event in events:
-                cursor = event.event_id or cursor
-                yield event
+                self._active_event_readers -= 1
+                self._condition.notify_all()
 
 
     async def sync(self) -> bool:
@@ -330,6 +349,32 @@ class EventStream:
             if self._store.is_dirty:
                 await self._sync_locked()
             self._closed = True
+            self._condition.notify_all()
+
+
+    async def _reserve_cleanup(self) -> bool:
+        """Prevent new readers when a finished, idle stream can be removed."""
+        async with self._condition:
+            await self._load()
+            if (
+                self._closed
+                or not self._finished
+                or self._active_event_readers > 0
+            ):
+                return False
+            self._cleanup_reserved = True
+            self._closed = True
+            self._condition.notify_all()
+            return True
+
+
+    async def _release_cleanup(self) -> None:
+        """Restore a stream whose reserved database deletion failed."""
+        async with self._condition:
+            if not self._cleanup_reserved:
+                return
+            self._cleanup_reserved = False
+            self._closed = False
             self._condition.notify_all()
 
 

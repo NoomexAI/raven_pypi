@@ -4,6 +4,7 @@ from .agent import AgentHarness, AgentPolicy
 from .core.events import Event, EventStream, EventType
 from .core.operations import (
     Operation,
+    OperationCleanupResult,
     OperationCleanupService,
     OperationManager,
     OperationRecord,
@@ -64,6 +65,7 @@ __all__ = [
     "NavigationType",
     "OllamaManager",
     "Operation",
+    "OperationCleanupResult",
     "OperationCleanupService",
     "OperationManager",
     "OperationRecord",

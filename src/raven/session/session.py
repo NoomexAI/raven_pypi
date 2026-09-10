@@ -93,7 +93,8 @@ class SessionRun:
                 )
             return result
         finally:
-            self._release_once()
+            if self._task.is_finished:
+                self._release_once()
 
 
     async def cancel(self) -> None:
@@ -104,7 +105,8 @@ class SessionRun:
             except Exception:
                 pass
         finally:
-            self._release_once()
+            if self._task.is_finished:
+                self._release_once()
 
 
     async def wait(self) -> OperationStatus:
@@ -113,7 +115,8 @@ class SessionRun:
         except Exception:
             pass
         finally:
-            self._release_once()
+            if self._task.is_finished:
+                self._release_once()
         return self._task.status
 
 
@@ -160,6 +163,8 @@ class Session:
         self._turn_lock = asyncio.Lock()
         self._lifecycle_lock = asyncio.Lock()
         self._active_runs: set[SessionRun] = set()
+        self._close_task: asyncio.Task[None] | None = None
+        self._cleanup_complete = False
         self._started = False
         self._closed = False
 
@@ -231,22 +236,54 @@ class Session:
     async def close(self) -> None:
         """Cancel active turns without closing shared manager resources."""
         async with self._lifecycle_lock:
-            if self._closed:
+            if self._cleanup_complete:
                 return
-            self._closed = True
-            self._started = False
-            active_runs = list(self._active_runs)
+            if self._close_task is None:
+                self._closed = True
+                self._started = False
+                active_runs = list(self._active_runs)
+                self._close_task = asyncio.create_task(
+                    self._finish_close(active_runs),
+                    name=f"raven-session-close-{self.conversation_id}",
+                )
+            close_task = self._close_task
 
+        try:
+            await asyncio.shield(close_task)
+        finally:
+            if close_task.done():
+                async with self._lifecycle_lock:
+                    if self._close_task is close_task:
+                        self._close_task = None
+                        if not close_task.cancelled() and close_task.exception() is None:
+                            self._cleanup_complete = True
+
+
+    async def _finish_close(self, active_runs: list[SessionRun]) -> None:
+        """Attempt every cleanup step and report the first failure afterward."""
+        cleanup_errors: list[BaseException] = []
         await asyncio.gather(
             *(run.cancel() for run in active_runs),
             return_exceptions=True,
         )
+
         release_memory = getattr(self.conversation, "release_memory_resources", None)
         if callable(release_memory):
-            await release_memory()
+            try:
+                await release_memory()
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+
         if self._owns_conversation:
-            await self.conversation._release_session(self._session_id)
-            self._owns_conversation = False
+            try:
+                await self.conversation._release_session(self._session_id)
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+            else:
+                self._owns_conversation = False
+
+        if cleanup_errors:
+            raise cleanup_errors[0]
 
 
     async def generate_response(

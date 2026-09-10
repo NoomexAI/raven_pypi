@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import math
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextvars import ContextVar, Token
@@ -14,10 +15,11 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from .config import (
     DEFAULT_FINISHED_OPERATION_CACHE_SIZE,
+    DEFAULT_OPERATION_CLEANUP_BATCH_SIZE,
     DEFAULT_OPERATION_PAGE_SIZE,
     OPERATION_SYNC_INTERVAL_SECONDS,
     PathConfig,
@@ -240,6 +242,17 @@ class OperationRecord(BaseModel):
     @property
     def is_finished(self) -> bool:
         return self.status in _TERMINAL_STATUSES
+
+
+
+class OperationCleanupResult(BaseModel):
+    """Outcome of one bounded expired-operation cleanup pass."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    deleted_operation_ids: tuple[str, ...] = ()
+    skipped_operation_ids: tuple[str, ...] = ()
+    failures: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 OperationWorker = Callable[["Operation"], Awaitable[Any]]
@@ -1225,10 +1238,15 @@ class OperationManager:
             DEFAULT_FINISHED_OPERATION_CACHE_SIZE
         ),
     ) -> None:
-        if sync_interval <= 0:
+        if (
+            isinstance(sync_interval, bool)
+            or not isinstance(sync_interval, (int, float))
+            or not math.isfinite(sync_interval)
+            or sync_interval <= 0
+        ):
             raise RavenError(
                 ErrorCode.INVALID_OPERATION_SYNC_INTERVAL,
-                "Operation synchronization interval must be greater than zero.",
+                "Operation synchronization interval must be a finite positive number.",
             )
         if (
             isinstance(max_cached_finished_operations, bool)
@@ -1241,11 +1259,11 @@ class OperationManager:
             )
         self.storage_dir = paths.operation_storage_dir
         self.database_path = paths.operation_database_path
-        self.sync_interval = sync_interval
+        self.sync_interval = float(sync_interval)
         self.max_cached_finished_operations = max_cached_finished_operations
         self._store = SQLiteOperationStore(self.database_path)
         self._operations: OrderedDict[str, Operation] = OrderedDict()
-        self._sync_service = OperationSyncService(self, sync_interval)
+        self._sync_service = OperationSyncService(self, self.sync_interval)
         self._sync_error: RavenError | None = None
         self._lock = asyncio.Lock()
         self._recovery_lock = asyncio.Lock()
@@ -1588,28 +1606,56 @@ class OperationManager:
             self._operations.pop(operation_id, None)
 
 
-    async def _delete_finished(self, operation_id: str) -> None:
+    async def _delete_finished(self, operation_id: str) -> bool:
         async with self._lock:
             operation = self._operations.get(operation_id)
+            if operation is not None:
+                if not operation.is_finished:
+                    return False
+                if not await operation._stream._reserve_cleanup():
+                    return False
 
-        if operation is None:
-            await self._store.delete(operation_id)
-        else:
-            if not operation.is_finished:
-                raise RuntimeError(
-                    f"operation '{operation_id}' cannot be deleted before it finishes"
-                )
-            await operation._stream.close()
-            await self._store.delete(operation_id)
-            async with self._lock:
+            deletion = asyncio.create_task(self._store.delete(operation_id))
+            try:
+                deleted = await asyncio.shield(deletion)
+            except asyncio.CancelledError:
+                try:
+                    deleted = await asyncio.shield(deletion)
+                except BaseException:
+                    if operation is not None:
+                        await operation._stream._release_cleanup()
+                    raise
+                if deleted and operation is not None:
+                    if self._operations.get(operation_id) is operation:
+                        self._operations.pop(operation_id, None)
+                elif operation is not None:
+                    await operation._stream._release_cleanup()
+                raise
+            except BaseException:
+                if operation is not None:
+                    await operation._stream._release_cleanup()
+                raise
+
+            if not deleted:
+                if operation is not None:
+                    await operation._stream._release_cleanup()
+                return False
+
+            if operation is not None:
                 if self._operations.get(operation_id) is operation:
                     self._operations.pop(operation_id, None)
+            return True
 
 
-    async def _expired_operation_ids(self, cutoff: datetime) -> list[str]:
+    async def _expired_operation_ids(
+        self,
+        cutoff: datetime,
+        *,
+        limit: int,
+    ) -> list[str]:
         self._ensure_open()
         await self.start()
-        return await self._store.expired_operation_ids(cutoff)
+        return await self._store.expired_operation_ids(cutoff, limit=limit)
 
 
     async def _record_sync_failure(
@@ -1720,26 +1766,72 @@ class OperationSyncService:
 
 
 class OperationCleanupService:
-    """Delete finished operations after a configured retention period."""
+    """Delete a bounded batch of finished operations after retention expires.
 
-    def __init__(self, manager: OperationManager, retention: timedelta) -> None:
+    Retention applies to complete operation records, including retry inputs and
+    events. A task must therefore be retried before its source operation expires.
+    Retry operations are retained according to their own completion timestamps.
+    """
+
+    def __init__(
+        self,
+        manager: OperationManager,
+        retention: timedelta,
+        *,
+        batch_size: int = DEFAULT_OPERATION_CLEANUP_BATCH_SIZE,
+    ) -> None:
         if retention < timedelta(0):
             raise RavenError(
                 ErrorCode.INVALID_RETENTION,
                 "retention cannot be negative.",
             )
+        if (
+            isinstance(batch_size, bool)
+            or not isinstance(batch_size, int)
+            or batch_size <= 0
+        ):
+            raise RavenError(
+                ErrorCode.INVALID_CLEANUP_BATCH_SIZE,
+                "Cleanup batch size must be a positive integer.",
+            )
         self._manager = manager
         self.retention = retention
+        self.batch_size = batch_size
+        self._lock = asyncio.Lock()
 
 
-    async def run_once(self, now: datetime | None = None) -> list[str]:
-        """Delete expired operations and return their IDs."""
-        current_time = now or datetime.now(timezone.utc)
-        if current_time.tzinfo is None:
-            current_time = current_time.replace(tzinfo=timezone.utc)
-        cutoff = current_time.astimezone(timezone.utc) - self.retention
-        operation_ids = await self._manager._expired_operation_ids(cutoff)
+    async def run_once(
+        self,
+        now: datetime | None = None,
+    ) -> OperationCleanupResult:
+        """Attempt one cleanup batch without aborting on an individual failure."""
+        async with self._lock:
+            current_time = now or datetime.now(timezone.utc)
+            if current_time.tzinfo is None:
+                current_time = current_time.replace(tzinfo=timezone.utc)
+            cutoff = current_time.astimezone(timezone.utc) - self.retention
+            operation_ids = await self._manager._expired_operation_ids(
+                cutoff,
+                limit=self.batch_size,
+            )
 
-        for operation_id in operation_ids:
-            await self._manager._delete_finished(operation_id)
-        return operation_ids
+            deleted: list[str] = []
+            skipped: list[str] = []
+            failures: dict[str, dict[str, Any]] = {}
+            for operation_id in operation_ids:
+                try:
+                    was_deleted = await self._manager._delete_finished(operation_id)
+                except Exception as exc:
+                    failures[operation_id] = error_payload(exc)
+                    continue
+
+                if was_deleted:
+                    deleted.append(operation_id)
+                else:
+                    skipped.append(operation_id)
+
+            return OperationCleanupResult(
+                deleted_operation_ids=tuple(deleted),
+                skipped_operation_ids=tuple(skipped),
+                failures=failures,
+            )

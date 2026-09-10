@@ -38,6 +38,8 @@ _TERMINAL_TASK_EVENT_TYPES = {
     EventType.OPERATION_TASK_CANCELLED,
 }
 
+_OPERATION_STORE_SCHEMA_VERSION = 2
+
 
 
 class SQLiteOperationStore:
@@ -369,19 +371,25 @@ class SQLiteOperationStore:
                 ) from exc
 
 
-    async def expired_operation_ids(self, cutoff: datetime) -> list[str]:
+    async def expired_operation_ids(
+        self,
+        cutoff: datetime,
+        *,
+        limit: int,
+    ) -> list[str]:
         await self.start()
         async with self._lock:
             try:
                 return await self._run_in_store_thread(
                     self._expired_operation_ids,
                     cutoff.isoformat(),
+                    limit,
                 )
             except Exception as exc:
                 raise self._database_error("Expired operations could not be read.") from exc
 
 
-    async def delete(self, operation_id: str) -> None:
+    async def delete(self, operation_id: str) -> bool:
         await self.start()
         async with self._lock:
             try:
@@ -390,6 +398,7 @@ class SQLiteOperationStore:
                 raise self._database_error("The operation events could not be deleted.") from exc
             if changed:
                 self._write_generation += 1
+            return changed
 
 
     async def checkpoint(self) -> bool:
@@ -524,6 +533,13 @@ class SQLiteOperationStore:
         connection.row_factory = sqlite3.Row
 
         try:
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if version not in {0, _OPERATION_STORE_SCHEMA_VERSION}:
+                raise RavenError(
+                    ErrorCode.UNSUPPORTED_OPERATION_DATABASE_VERSION,
+                    "The operation database uses an unsupported schema version.",
+                    details={"schema_version": version},
+                )
             connection.execute("PRAGMA busy_timeout = 5000")
             connection.execute("PRAGMA foreign_keys = ON")
             journal_mode = connection.execute("PRAGMA journal_mode = WAL").fetchone()
@@ -592,9 +608,10 @@ class SQLiteOperationStore:
                 CREATE UNIQUE INDEX IF NOT EXISTS tasks_single_direct_retry
                     ON tasks(retry_of_task_id)
                     WHERE retry_of_task_id IS NOT NULL;
-
-                PRAGMA user_version = 2;
                 """
+            )
+            connection.execute(
+                f"PRAGMA user_version = {_OPERATION_STORE_SCHEMA_VERSION}"
             )
             return connection
         except Exception:
@@ -1152,15 +1169,16 @@ class SQLiteOperationStore:
         ).fetchall()
 
 
-    def _expired_operation_ids(self, cutoff: str) -> list[str]:
+    def _expired_operation_ids(self, cutoff: str, limit: int) -> list[str]:
         rows = self._require_connection().execute(
             """
             SELECT operation_id
             FROM operations
             WHERE is_finished = 1 AND finished_at < ?
-            ORDER BY finished_at
+            ORDER BY finished_at, operation_id
+            LIMIT ?
             """,
-            (cutoff,),
+            (cutoff, limit),
         ).fetchall()
         return [str(row["operation_id"]) for row in rows]
 
