@@ -1379,6 +1379,7 @@ class Conversation:
         title: str | None = None,
         pinned: bool | None = None,
         operation: Operation,
+        only_if_untitled: bool = False,
     ) -> "Conversation":
         """Update and persist mutable conversation metadata."""
         if title is None and pinned is None:
@@ -1393,39 +1394,40 @@ class Conversation:
         )
 
         async with self._mutation_lock:
-            previous_title = self.title
-            previous_is_titled = self.is_titled
-            previous_pinned = self.pinned
-            if title is not None:
-                self.title = title
-                self.is_titled = True
-            if pinned is not None:
-                self.pinned = pinned
+            if not only_if_untitled or not self.is_titled:
+                previous_title = self.title
+                previous_is_titled = self.is_titled
+                previous_pinned = self.pinned
+                if title is not None:
+                    self.title = title
+                    self.is_titled = True
+                if pinned is not None:
+                    self.pinned = pinned
 
-            try:
-                write_task = asyncio.create_task(
-                    asyncio.to_thread(self.write_metadata)
-                )
                 try:
-                    await asyncio.shield(write_task)
+                    write_task = asyncio.create_task(
+                        asyncio.to_thread(self.write_metadata)
+                    )
+                    try:
+                        await asyncio.shield(write_task)
+                    except asyncio.CancelledError:
+                        await write_task
+                        raise
                 except asyncio.CancelledError:
-                    await write_task
                     raise
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self.title = previous_title
-                self.is_titled = previous_is_titled
-                self.pinned = previous_pinned
-                await self._emit(
-                    operation,
-                    EventType.CONVERSATION_UPDATE_FAILED,
-                    {
-                        "conversation_id": self.conversation_id,
-                        "error": error_payload(exc),
-                    },
-                )
-                raise
+                except Exception as exc:
+                    self.title = previous_title
+                    self.is_titled = previous_is_titled
+                    self.pinned = previous_pinned
+                    await self._emit(
+                        operation,
+                        EventType.CONVERSATION_UPDATE_FAILED,
+                        {
+                            "conversation_id": self.conversation_id,
+                            "error": error_payload(exc),
+                        },
+                    )
+                    raise
 
         await self._emit(
             operation,
@@ -1498,7 +1500,16 @@ class Conversation:
                 ]
             )
             title = self._title_from_response(response)
-            update_task = await self.update(title=title, operation=operation)
+            update_task = await operation.run(
+                OperationType.CONVERSATION_UPDATE,
+                lambda active_operation: self._run_in_use(
+                    lambda: self._update(
+                        title=title,
+                        operation=active_operation,
+                        only_if_untitled=True,
+                    )
+                ),
+            )
             await update_task.result()
             return self.title
 

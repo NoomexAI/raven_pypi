@@ -420,21 +420,23 @@ class Session:
                     run._release_once()
 
         try:
-            active_operation = operation or await self._operation_manager.create(
-                OperationType.SESSION_GENERATE_RESPONSE
-            )
-            task = await active_operation.run(
-                OperationType.SESSION_GENERATE_RESPONSE,
-                worker,
-                retry_input=retry_input.model_dump(mode="json"),
-                retry_of=retry_of,
-            )
-            session_run = SessionRun(task, turn_id, self._release_run)
-            run_holder["run"] = session_run
-            self._active_runs.add(session_run)
-            if task.is_finished:
-                session_run._release_once()
-            return session_run
+            async with self._lifecycle_lock:
+                self._ensure_started()
+                active_operation = operation or await self._operation_manager.create(
+                    OperationType.SESSION_GENERATE_RESPONSE
+                )
+                task = await active_operation.run(
+                    OperationType.SESSION_GENERATE_RESPONSE,
+                    worker,
+                    retry_input=retry_input.model_dump(mode="json"),
+                    retry_of=retry_of,
+                )
+                session_run = SessionRun(task, turn_id, self._release_run)
+                run_holder["run"] = session_run
+                self._active_runs.add(session_run)
+                if task.is_finished:
+                    session_run._release_once()
+                return session_run
         except BaseException:
             if self._turn_lock.locked():
                 self._turn_lock.release()

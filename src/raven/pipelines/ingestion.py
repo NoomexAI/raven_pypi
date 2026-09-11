@@ -291,12 +291,19 @@ class IngestionPipeline:
 
             await knowledge.claim_ingestion(file_name, file_id)
             ingestion_claimed = True
-            snapshot_path = await asyncio.to_thread(
-                self._snapshot_source,
+            snapshot_path = self._snapshot_path(
                 path,
                 self._knowledge_base.paths.uploads_dir,
                 file_id,
             )
+            snapshot_copy = asyncio.create_task(
+                asyncio.to_thread(self._snapshot_source, path, snapshot_path)
+            )
+            try:
+                await asyncio.shield(snapshot_copy)
+            except asyncio.CancelledError:
+                await snapshot_copy
+                raise
 
             current_source_sha256 = await asyncio.to_thread(
                 self._source_sha256,
@@ -569,8 +576,12 @@ class IngestionPipeline:
 
 
     @staticmethod
-    def _snapshot_source(path: Path, directory: Path, file_id: str) -> Path:
-        directory.mkdir(parents=True, exist_ok=True)
-        snapshot = directory / f"{file_id}{path.suffix.lower()}"
-        shutil.copyfile(path, snapshot)
-        return snapshot
+    def _snapshot_path(path: Path, directory: Path, file_id: str) -> Path:
+        return directory / f"{file_id}{path.suffix.lower()}"
+
+
+    @staticmethod
+    def _snapshot_source(path: Path, snapshot_path: Path) -> Path:
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, snapshot_path)
+        return snapshot_path
