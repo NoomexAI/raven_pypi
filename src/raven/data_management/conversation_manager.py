@@ -1001,11 +1001,13 @@ class Conversation:
 
     async def get_turn(self, turn_id: UUID | str) -> dict[str, Any] | None:
         """Return one committed turn by its stable identity."""
-        self._ensure_started()
         normalized_turn_id = self._validate_turn_id(turn_id)
-        return await asyncio.to_thread(
-            self._message_store.get_turn,
-            normalized_turn_id,
+
+        return await self._run_in_use(
+            lambda: asyncio.to_thread(
+                self._message_store.get_turn,
+                normalized_turn_id,
+            )
         )
 
 
@@ -1215,6 +1217,14 @@ class Conversation:
         """Return copies of explicit conversation preferences."""
         self._ensure_started()
         return copy.deepcopy(self._preferences)
+
+
+    async def list_preferences(self) -> list[dict[str, str]]:
+        """Return preferences while safely pinning evictable storage."""
+        async def load_preferences() -> list[dict[str, str]]:
+            return self.get_preferences()
+
+        return await self._run_in_use(load_preferences)
 
 
     async def save_preference(

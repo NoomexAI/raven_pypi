@@ -44,6 +44,7 @@ from ..pipelines.retrieval import (
     VectorConditionedRetrievalPipeline,
 )
 from ..providers import ModelRole, ModelSpec, Provider
+from ..providers.ollama_manager import ProgressCallback
 from ..session.session import Session, SessionRetryInput
 
 
@@ -101,6 +102,29 @@ class Raven:
     @property
     def models_loaded(self) -> bool:
         return self.llm is not None and self.embed_model is not None
+
+
+    def runtime_status(self) -> dict[str, Any]:
+        """Return a transport-safe snapshot of this user-scoped runtime."""
+        return {
+            "user_id": str(self.paths.user_id),
+            "started": self.is_started,
+            "closed": self._closed,
+            "models_loaded": self.models_loaded,
+            "operation_store_healthy": self.operation_manager.is_healthy,
+            "models": {
+                "llm": (
+                    self._model_result(self._llm_spec)
+                    if self._llm_spec is not None
+                    else None
+                ),
+                "embedding": (
+                    self._model_result(self._embedding_spec)
+                    if self._embedding_spec is not None
+                    else None
+                ),
+            },
+        }
 
 
     async def submit_operation(
@@ -324,6 +348,75 @@ class Raven:
             after_event_id=after_event_id,
         ):
             yield event
+
+
+    async def check_ollama_connection(
+        self,
+        *,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        return await self.provider.ollama.check_connection(operation=operation)
+
+
+    async def list_ollama_models(
+        self,
+        *,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        return await self.provider.ollama.list_models(operation=operation)
+
+
+    async def inspect_ollama_model(
+        self,
+        model: str,
+        *,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        return await self.provider.ollama.inspect(model, operation=operation)
+
+
+    async def pull_ollama_model(
+        self,
+        model: str,
+        on_progress: ProgressCallback | None = None,
+        *,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        return await self.provider.ollama.pull(
+            model,
+            on_progress,
+            operation=operation,
+        )
+
+
+    async def delete_ollama_model(
+        self,
+        model: str,
+        *,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        return await self.provider.ollama.delete(model, operation=operation)
+
+
+    async def unload_ollama_llm(
+        self,
+        model: str,
+        *,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        return await self.provider.ollama.unload_llm(model, operation=operation)
+
+
+    async def unload_ollama_embedding(
+        self,
+        model: str,
+        *,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        return await self.provider.ollama.unload_embedding(
+            model,
+            operation=operation,
+        )
 
 
     async def load(
@@ -622,8 +715,84 @@ class Raven:
         return self.knowledge_base.get(name)
 
 
+    def get_knowledge_details(self, name: str) -> dict[str, Any]:
+        return self.knowledge_base.get(name).meta
+
+
     async def list_knowledges(self) -> list[dict[str, Any]]:
         return await self.knowledge_base.list()
+
+
+    async def update_knowledge(
+        self,
+        name: str,
+        *,
+        user_summary: str,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        knowledge = self.knowledge_base.get(name)
+        return await knowledge.set_summary(user_summary, operation=operation)
+
+
+    async def list_knowledge_files(
+        self,
+        knowledge_name: str,
+    ) -> list[dict[str, Any]]:
+        knowledge = self.knowledge_base.get(knowledge_name)
+        return await asyncio.to_thread(knowledge.list_files)
+
+
+    async def list_file_sections(
+        self,
+        knowledge_name: str,
+        file_name: str,
+    ) -> list[dict[str, Any]]:
+        knowledge = self.knowledge_base.get(knowledge_name)
+        sections = await asyncio.to_thread(knowledge.list_sections, file_name)
+        if not sections and not await asyncio.to_thread(
+            knowledge.file_exists,
+            file_name,
+        ):
+            raise RavenError(
+                ErrorCode.FILE_NOT_FOUND,
+                f"File '{file_name}' does not exist in knowledge '{knowledge_name}'.",
+            )
+        return sections
+
+
+    async def get_knowledge_section(
+        self,
+        knowledge_name: str,
+        section_id: str,
+        *,
+        file_name: str | None = None,
+    ) -> dict[str, Any]:
+        knowledge = self.knowledge_base.get(knowledge_name)
+        section = await asyncio.to_thread(knowledge.get_section, section_id)
+        if section is None or (
+            file_name is not None and section.get("file_name") != file_name
+        ):
+            raise RavenError(
+                ErrorCode.SECTION_NOT_FOUND,
+                f"Section '{section_id}' does not exist in knowledge '{knowledge_name}'.",
+            )
+        return section
+
+
+    async def count_knowledge_vectors(self, knowledge_name: str) -> int:
+        knowledge = self.knowledge_base.get(knowledge_name)
+        return await knowledge.count()
+
+
+    async def delete_knowledge_file(
+        self,
+        knowledge_name: str,
+        file_id: str,
+        *,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        knowledge = self.knowledge_base.get(knowledge_name)
+        return await knowledge.delete_file(file_id, operation=operation)
 
 
     async def delete_knowledge(
@@ -845,8 +1014,77 @@ class Raven:
         return self.conversation_manager.get(conversation_id)
 
 
+    def get_conversation_details(self, conversation_id: str) -> dict[str, Any]:
+        return self.conversation_manager.get(conversation_id).to_dict()
+
+
     def list_conversations(self) -> list[dict[str, Any]]:
         return self.conversation_manager.list()
+
+
+    async def get_conversation_messages(
+        self,
+        conversation_id: str,
+    ) -> list[ChatMessage]:
+        conversation = self.conversation_manager.get(conversation_id)
+        return await conversation.get_messages()
+
+
+    async def get_conversation_turn(
+        self,
+        conversation_id: str,
+        turn_id: UUID | str,
+    ) -> dict[str, Any]:
+        conversation = self.conversation_manager.get(conversation_id)
+        turn = await conversation.get_turn(turn_id)
+        if turn is None:
+            raise RavenError(
+                ErrorCode.CONVERSATION_TURN_NOT_FOUND,
+                f"Turn '{turn_id}' does not exist in conversation '{conversation_id}'.",
+            )
+        return turn
+
+
+    async def get_conversation_turn_messages(
+        self,
+        conversation_id: str,
+        turn_id: UUID | str,
+    ) -> list[ChatMessage]:
+        conversation = self.conversation_manager.get(conversation_id)
+        return await conversation.get_turn_messages(turn_id)
+
+
+    async def get_conversation_preferences(
+        self,
+        conversation_id: str,
+    ) -> list[dict[str, str]]:
+        conversation = self.conversation_manager.get(conversation_id)
+        return await conversation.list_preferences()
+
+
+    async def save_conversation_preference(
+        self,
+        conversation_id: str,
+        text: str,
+        *,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        conversation = self.conversation_manager.get(conversation_id)
+        return await conversation.save_preference(text, operation=operation)
+
+
+    async def remove_conversation_preference(
+        self,
+        conversation_id: str,
+        preference_id: str,
+        *,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        conversation = self.conversation_manager.get(conversation_id)
+        return await conversation.remove_preference(
+            preference_id,
+            operation=operation,
+        )
 
 
     def list_discovery_issues(self) -> list[DiscoveryIssue]:
