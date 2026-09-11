@@ -211,6 +211,19 @@ class IngestionPipeline:
                 "file_id": file_id,
             },
         )
+        await self._emit(
+            operation,
+            EventType.INGESTION_PROGRESS,
+            {
+                "knowledge": knowledge_name,
+                "file": file_name,
+                "file_id": file_id,
+                "stage": "source_validation",
+                "status": "started",
+                "completed": None,
+                "total": None,
+            },
+        )
 
         snapshot_path: Path | None = None
         ingestion_claimed = False
@@ -248,6 +261,34 @@ class IngestionPipeline:
                     },
                 )
 
+            await self._emit(
+                operation,
+                EventType.INGESTION_PROGRESS,
+                {
+                    "knowledge": knowledge_name,
+                    "file": file_name,
+                    "file_id": file_id,
+                    "stage": "source_validation",
+                    "status": "completed",
+                    "completed": None,
+                    "total": None,
+                    "size_bytes": source_size,
+                },
+            )
+            await self._emit(
+                operation,
+                EventType.INGESTION_PROGRESS,
+                {
+                    "knowledge": knowledge_name,
+                    "file": file_name,
+                    "file_id": file_id,
+                    "stage": "source_snapshot",
+                    "status": "started",
+                    "completed": None,
+                    "total": None,
+                },
+            )
+
             await knowledge.claim_ingestion(file_name, file_id)
             ingestion_claimed = True
             snapshot_path = await asyncio.to_thread(
@@ -274,6 +315,33 @@ class IngestionPipeline:
                     },
                 )
 
+            await self._emit(
+                operation,
+                EventType.INGESTION_PROGRESS,
+                {
+                    "knowledge": knowledge_name,
+                    "file": file_name,
+                    "file_id": file_id,
+                    "stage": "source_snapshot",
+                    "status": "completed",
+                    "completed": None,
+                    "total": None,
+                },
+            )
+            await self._emit(
+                operation,
+                EventType.INGESTION_PROGRESS,
+                {
+                    "knowledge": knowledge_name,
+                    "file": file_name,
+                    "file_id": file_id,
+                    "stage": "parsing",
+                    "status": "started",
+                    "completed": None,
+                    "total": None,
+                },
+            )
+
             parsed_document = await self._document_parser.parse(
                 snapshot_path,
                 file_id=file_id,
@@ -281,6 +349,32 @@ class IngestionPipeline:
                 max_pages=max_document_pages,
             )
             self._raise_if_cancelled(operation)
+            await self._emit(
+                operation,
+                EventType.INGESTION_PROGRESS,
+                {
+                    "knowledge": knowledge_name,
+                    "file": file_name,
+                    "file_id": file_id,
+                    "stage": "parsing",
+                    "status": "completed",
+                    "completed": len(parsed_document.elements),
+                    "total": len(parsed_document.elements),
+                },
+            )
+            await self._emit(
+                operation,
+                EventType.INGESTION_PROGRESS,
+                {
+                    "knowledge": knowledge_name,
+                    "file": file_name,
+                    "file_id": file_id,
+                    "stage": "sectioning",
+                    "status": "started",
+                    "completed": None,
+                    "total": None,
+                },
+            )
 
             splitter = ProvenanceAwareSemanticSplitter(
                 embed_model=embed_model,
@@ -295,7 +389,9 @@ class IngestionPipeline:
                 {
                     "knowledge": knowledge_name,
                     "file": file_name,
+                    "file_id": file_id,
                     "stage": "sectioning",
+                    "status": "completed",
                     "completed": total,
                     "total": total,
                 },
@@ -308,20 +404,21 @@ class IngestionPipeline:
                 )
 
             sections: list[dict[str, Any]] = []
+            await self._emit(
+                operation,
+                EventType.INGESTION_PROGRESS,
+                {
+                    "knowledge": knowledge_name,
+                    "file": file_name,
+                    "file_id": file_id,
+                    "stage": "metadata_extraction",
+                    "status": "started",
+                    "completed": 0,
+                    "total": total,
+                },
+            )
             for section_index, semantic_section in enumerate(semantic_sections, start=1):
                 self._raise_if_cancelled(operation)
-                await self._emit(
-                    operation,
-                    EventType.INGESTION_PROGRESS,
-                    {
-                        "knowledge": knowledge_name,
-                        "file": file_name,
-                        "stage": "metadata_extraction",
-                        "completed": section_index - 1,
-                        "total": total,
-                        "section_index": section_index,
-                    },
-                )
                 section_text = semantic_section.raw_content
                 metadata = await self._extract_metadata(
                     llm,
@@ -340,19 +437,24 @@ class IngestionPipeline:
                         "source_range": semantic_section.source_range,
                     }
                 )
+                await self._emit(
+                    operation,
+                    EventType.INGESTION_PROGRESS,
+                    {
+                        "knowledge": knowledge_name,
+                        "file": file_name,
+                        "file_id": file_id,
+                        "stage": "metadata_extraction",
+                        "status": (
+                            "completed" if section_index == total else "running"
+                        ),
+                        "completed": section_index,
+                        "total": total,
+                        "section_index": section_index,
+                    },
+                )
 
             self._raise_if_cancelled(operation)
-            await self._emit(
-                operation,
-                EventType.INGESTION_PROGRESS,
-                {
-                    "knowledge": knowledge_name,
-                    "file": file_name,
-                    "stage": "storage",
-                    "completed": len(sections),
-                    "total": total,
-                },
-            )
             ingest_task = await knowledge.ingest(
                 file_name,
                 sections,

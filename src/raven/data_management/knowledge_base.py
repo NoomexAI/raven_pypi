@@ -1035,6 +1035,19 @@ class Knowledge:
                     )
 
                 chunk_records: list[tuple[str, str, int, int, dict[str, Any]]] = []
+                await self._emit(
+                    operation,
+                    EventType.INGESTION_PROGRESS,
+                    {
+                        "knowledge": self.name,
+                        "file": file_name,
+                        "file_id": file_id,
+                        "stage": "chunking",
+                        "status": "started",
+                        "completed": 0,
+                        "total": len(sections),
+                    },
+                )
 
                 for section_index, section in enumerate(sections, start=1):
                     texts = self._split(
@@ -1060,9 +1073,37 @@ class Knowledge:
                         f"No chunks were produced for file '{file_name}'.",
                     )
 
+                await self._emit(
+                    operation,
+                    EventType.INGESTION_PROGRESS,
+                    {
+                        "knowledge": self.name,
+                        "file": file_name,
+                        "file_id": file_id,
+                        "stage": "chunking",
+                        "status": "completed",
+                        "completed": len(sections),
+                        "total": len(sections),
+                        "chunk_count": len(chunk_records),
+                    },
+                )
+
                 if operation is not None:
                     operation.raise_if_cancelled()
 
+                await self._emit(
+                    operation,
+                    EventType.INGESTION_PROGRESS,
+                    {
+                        "knowledge": self.name,
+                        "file": file_name,
+                        "file_id": file_id,
+                        "stage": "embedding",
+                        "status": "started",
+                        "completed": 0,
+                        "total": len(chunk_records),
+                    },
+                )
                 await asyncio.to_thread(
                     self._ensure_embedding_identity,
                     embed_model,
@@ -1076,6 +1117,20 @@ class Knowledge:
                         ErrorCode.INVALID_EMBEDDING_RESULT,
                         "Embedding model returned an invalid number of vectors.",
                     )
+
+                await self._emit(
+                    operation,
+                    EventType.INGESTION_PROGRESS,
+                    {
+                        "knowledge": self.name,
+                        "file": file_name,
+                        "file_id": file_id,
+                        "stage": "embedding",
+                        "status": "completed",
+                        "completed": len(vectors),
+                        "total": len(chunk_records),
+                    },
+                )
 
                 await asyncio.to_thread(self._ensure_collection, len(vectors[0]))
                 points = [
@@ -1097,6 +1152,19 @@ class Knowledge:
                 if operation is not None:
                     operation.raise_if_cancelled()
                 self._pending_ingestions.add(file_id)
+                await self._emit(
+                    operation,
+                    EventType.INGESTION_PROGRESS,
+                    {
+                        "knowledge": self.name,
+                        "file": file_name,
+                        "file_id": file_id,
+                        "stage": "vector_storage",
+                        "status": "started",
+                        "completed": 0,
+                        "total": len(points),
+                    },
+                )
                 upsert_task = asyncio.create_task(
                     asyncio.to_thread(self._upsert_points, points)
                 )
@@ -1105,6 +1173,19 @@ class Knowledge:
                 except asyncio.CancelledError:
                     await upsert_task
                     raise
+                await self._emit(
+                    operation,
+                    EventType.INGESTION_PROGRESS,
+                    {
+                        "knowledge": self.name,
+                        "file": file_name,
+                        "file_id": file_id,
+                        "stage": "vector_storage",
+                        "status": "completed",
+                        "completed": len(points),
+                        "total": len(points),
+                    },
+                )
                 await self._emit(
                     operation,
                     EventType.INGESTION_VECTORS_WRITTEN,
@@ -1141,6 +1222,19 @@ class Knowledge:
                         "source_range": section.get("source_range"),
                     })
 
+                await self._emit(
+                    operation,
+                    EventType.INGESTION_PROGRESS,
+                    {
+                        "knowledge": self.name,
+                        "file": file_name,
+                        "file_id": file_id,
+                        "stage": "metadata_commit",
+                        "status": "started",
+                        "completed": 0,
+                        "total": 1,
+                    },
+                )
                 metadata_task = asyncio.create_task(
                     asyncio.to_thread(
                         self._file_store.add_file,
@@ -1157,6 +1251,19 @@ class Knowledge:
                 metadata_written = True
                 self._pending_ingestions.discard(file_id)
                 cleanup_completed = True
+                await self._emit(
+                    operation,
+                    EventType.INGESTION_PROGRESS,
+                    {
+                        "knowledge": self.name,
+                        "file": file_name,
+                        "file_id": file_id,
+                        "stage": "metadata_commit",
+                        "status": "completed",
+                        "completed": 1,
+                        "total": 1,
+                    },
+                )
                 await self._emit(
                     operation,
                     EventType.INGESTION_METADATA_COMMITTED,
