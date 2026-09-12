@@ -217,6 +217,39 @@ class SQLiteOperationStore:
             ) from exc
 
 
+    async def read_task_terminal_event(
+        self,
+        operation_id: str,
+        task_id: str,
+    ) -> Event | None:
+        """Return the persisted terminal lifecycle event for one task."""
+        await self.start()
+        async with self._lock:
+            try:
+                row = await self._run_in_store_thread(
+                    self._read_task_terminal_event,
+                    operation_id,
+                    task_id,
+                )
+            except Exception as exc:
+                raise self._database_error(
+                    "The operation task terminal event could not be read."
+                ) from exc
+        if row is None:
+            return None
+        try:
+            return self._event_from_row(row)
+        except Exception as exc:
+            raise RavenError(
+                ErrorCode.OPERATION_DATABASE_CORRUPTED,
+                "The operation database contains an invalid task terminal event.",
+                details={
+                    "operation_id": operation_id,
+                    "task_id": task_id,
+                },
+            ) from exc
+
+
     async def list_tasks(
         self,
         *,
@@ -1036,6 +1069,36 @@ class SQLiteOperationStore:
             WHERE task_id = ?
             """,
             (task_id,),
+        ).fetchone()
+
+
+    def _read_task_terminal_event(
+        self,
+        operation_id: str,
+        task_id: str,
+    ) -> sqlite3.Row | None:
+        terminal_types = tuple(
+            event_type.value for event_type in _TERMINAL_TASK_EVENT_TYPES
+        )
+        return self._require_connection().execute(
+            """
+            SELECT
+                operation_id,
+                event_id,
+                type,
+                timestamp,
+                task_id,
+                task_name,
+                is_final,
+                data_json
+            FROM events
+            WHERE operation_id = ?
+              AND task_id = ?
+              AND type IN (?, ?, ?)
+            ORDER BY event_id DESC
+            LIMIT 1
+            """,
+            (operation_id, task_id, *terminal_types),
         ).fetchone()
 
 

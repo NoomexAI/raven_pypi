@@ -6,6 +6,7 @@ import asyncio
 import copy
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -22,6 +23,7 @@ import qdrant_client
 from llama_index.core.node_parser import SentenceSplitter
 from qdrant_client.http import models as qmodels
 
+from ..core.async_utils import await_completion, run_in_thread
 from ..core.config import DEFAULT_OPEN_KNOWLEDGE_LIMIT, PathConfig
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
@@ -164,7 +166,17 @@ class _KnowledgeFileStore:
     def file_exists(self, file_name: str) -> bool:
         with self._lock:
             row = self._require_connection().execute(
-                "SELECT 1 FROM files WHERE file_name = ? LIMIT 1",
+                """
+                SELECT 1
+                FROM files AS f
+                WHERE f.file_name = ?
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM pending_file_deletions AS p
+                      WHERE p.file_id = f.file_id
+                  )
+                LIMIT 1
+                """,
                 (file_name,),
             ).fetchone()
         return row is not None
@@ -176,7 +188,12 @@ class _KnowledgeFileStore:
                 """
                 SELECT file_id, file_name, section_count, chunk_count,
                        ingested_at, navigation_type
-                FROM files
+                FROM files AS f
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM pending_file_deletions AS p
+                    WHERE p.file_id = f.file_id
+                )
                 ORDER BY rowid
                 """
             ).fetchall()
@@ -205,6 +222,11 @@ class _KnowledgeFileStore:
                 FROM sections AS s
                 JOIN files AS f ON f.file_id = s.file_id
                 WHERE f.file_name = ?
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM pending_file_deletions AS p
+                      WHERE p.file_id = f.file_id
+                  )
                 ORDER BY s.section_index
                 """,
                 (file_name,),
@@ -220,6 +242,11 @@ class _KnowledgeFileStore:
                 FROM sections AS s
                 JOIN files AS f ON f.file_id = s.file_id
                 WHERE s.section_id = ?
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM pending_file_deletions AS p
+                      WHERE p.file_id = f.file_id
+                  )
                 """,
                 (section_id,),
             ).fetchone()
@@ -506,6 +533,8 @@ class Knowledge:
         self.files_path = self.dir_path / "file.sqlite3"
 
         self._qdrant: qdrant_client.QdrantClient | None = None
+        self._pending_qdrant_close: qdrant_client.QdrantClient | None = None
+        self._storage_cleanup_pending = False
         self._file_store = _KnowledgeFileStore(self.files_path)
         self._meta: dict[str, Any] = {}
         self._start_lock = asyncio.Lock()
@@ -592,16 +621,9 @@ class Knowledge:
                 cleanup_error = exc
 
         async with self._lifecycle_lock:
-            if self._closed:
-                return
-
-            qdrant = self._qdrant
-            self._qdrant = None
             self._closed = True
             self._started = False
-            await asyncio.to_thread(self._file_store.close)
-            if qdrant is not None:
-                await asyncio.to_thread(qdrant.close)
+            await run_in_thread(self._close_open_storage)
 
         if cleanup_error is not None:
             raise cleanup_error
@@ -615,12 +637,8 @@ class Knowledge:
             with self._usage_lock:
                 if self._active_uses:
                     return False
-                qdrant = self._qdrant
-                self._qdrant = None
                 self._started = False
-            await asyncio.to_thread(self._file_store.close)
-            if qdrant is not None:
-                await asyncio.to_thread(qdrant.close)
+            await run_in_thread(self._close_open_storage)
             return True
 
 
@@ -675,8 +693,8 @@ class Knowledge:
                         f"File '{file_name}' is already being ingested.",
                     )
 
-                if await asyncio.to_thread(self._file_store.file_exists, file_name):
-                    existing = await asyncio.to_thread(self._file_result_by_id, file_id)
+                if await run_in_thread(self._file_store.file_exists, file_name):
+                    existing = await run_in_thread(self._file_result_by_id, file_id)
                     if existing is None or existing["file"] != file_name:
                         raise RavenError(
                             ErrorCode.FILE_ALREADY_EXISTS,
@@ -705,7 +723,7 @@ class Knowledge:
         """Reject adapters that do not match this knowledge's vector space."""
         async def validate() -> None:
             async with self._mutation_lock:
-                await asyncio.to_thread(self._ensure_embedding_identity, embed_model)
+                await run_in_thread(self._ensure_embedding_identity, embed_model)
 
         await self._run_in_use(validate)
 
@@ -741,7 +759,7 @@ class Knowledge:
         async with self._mutation_lock:
             meta = copy.deepcopy(self._meta)
             meta["user_summary"] = summary
-            await asyncio.to_thread(self._write_json, self.meta_path, meta)
+            await run_in_thread(self._write_json, self.meta_path, meta)
             self._meta = meta
 
         await self._emit(
@@ -839,7 +857,7 @@ class Knowledge:
 
         try:
             async with self._mutation_lock:
-                committed = await asyncio.to_thread(
+                committed = await run_in_thread(
                     self._file_result_by_id,
                     file_id,
                 )
@@ -852,11 +870,11 @@ class Knowledge:
                         "ingestion": committed,
                     }
                 else:
-                    points_removed = await asyncio.to_thread(
+                    points_removed = await run_in_thread(
                         self._count_points_by_file_id,
                         file_id,
                     )
-                    await asyncio.to_thread(self._delete_points_by_file_id, file_id)
+                    await run_in_thread(self._delete_points_by_file_id, file_id)
                     self._pending_ingestions.discard(file_id)
                     result = {
                         "knowledge": self.name,
@@ -890,7 +908,7 @@ class Knowledge:
             results: list[dict[str, Any]] = []
             async with self._mutation_lock:
                 for file_id in tuple(self._pending_ingestions):
-                    committed = await asyncio.to_thread(
+                    committed = await run_in_thread(
                         self._file_result_by_id,
                         file_id,
                     )
@@ -906,11 +924,11 @@ class Knowledge:
                         )
                         continue
 
-                    points_removed = await asyncio.to_thread(
+                    points_removed = await run_in_thread(
                         self._count_points_by_file_id,
                         file_id,
                     )
-                    await asyncio.to_thread(self._delete_points_by_file_id, file_id)
+                    await run_in_thread(self._delete_points_by_file_id, file_id)
                     self._pending_ingestions.discard(file_id)
                     results.append(
                         {
@@ -934,23 +952,16 @@ class Knowledge:
         self._ensure_started()
         results: list[dict[str, Any]] = []
         async with self._mutation_lock:
-            pending = await asyncio.to_thread(
+            pending = await run_in_thread(
                 self._file_store.list_pending_file_deletions
             )
             for record in pending:
                 file_id = record["file_id"]
-                await asyncio.to_thread(self._delete_points_by_file_id, file_id)
-                finish_task = asyncio.create_task(
-                    asyncio.to_thread(
-                        self._file_store.finish_file_deletion,
-                        file_id,
-                    )
+                await run_in_thread(self._delete_points_by_file_id, file_id)
+                await run_in_thread(
+                    self._file_store.finish_file_deletion,
+                    file_id,
                 )
-                try:
-                    await asyncio.shield(finish_task)
-                except asyncio.CancelledError:
-                    await finish_task
-                    raise
                 results.append(
                     {
                         "knowledge": self.name,
@@ -1007,7 +1018,7 @@ class Knowledge:
             cleanup_completed = False
 
             try:
-                committed = await asyncio.to_thread(
+                committed = await run_in_thread(
                     self._file_result_by_id,
                     file_id,
                 )
@@ -1028,7 +1039,7 @@ class Knowledge:
                     )
                     return result
 
-                if await asyncio.to_thread(self._file_store.file_exists, file_name):
+                if await run_in_thread(self._file_store.file_exists, file_name):
                     raise RavenError(
                         ErrorCode.FILE_ALREADY_EXISTS,
                         f"File '{file_name}' already exists in knowledge '{self.name}'.",
@@ -1104,7 +1115,7 @@ class Knowledge:
                         "total": len(chunk_records),
                     },
                 )
-                await asyncio.to_thread(
+                await run_in_thread(
                     self._ensure_embedding_identity,
                     embed_model,
                 )
@@ -1112,11 +1123,10 @@ class Knowledge:
                 vectors = await embed_model.aget_text_embedding_batch(
                     [record[1] for record in chunk_records]
                 )
-                if len(vectors) != len(chunk_records):
-                    raise RavenError(
-                        ErrorCode.INVALID_EMBEDDING_RESULT,
-                        "Embedding model returned an invalid number of vectors.",
-                    )
+                vectors = self._validate_embedding_vectors(
+                    vectors,
+                    expected_count=len(chunk_records),
+                )
 
                 await self._emit(
                     operation,
@@ -1132,7 +1142,7 @@ class Knowledge:
                     },
                 )
 
-                await asyncio.to_thread(self._ensure_collection, len(vectors[0]))
+                await run_in_thread(self._ensure_collection, len(vectors[0]))
                 points = [
                     qmodels.PointStruct(
                         id=point_id,
@@ -1165,14 +1175,7 @@ class Knowledge:
                         "total": len(points),
                     },
                 )
-                upsert_task = asyncio.create_task(
-                    asyncio.to_thread(self._upsert_points, points)
-                )
-                try:
-                    await asyncio.shield(upsert_task)
-                except asyncio.CancelledError:
-                    await upsert_task
-                    raise
+                await run_in_thread(self._upsert_points, points)
                 await self._emit(
                     operation,
                     EventType.INGESTION_PROGRESS,
@@ -1242,13 +1245,10 @@ class Knowledge:
                         section_records,
                     )
                 )
-                try:
-                    await asyncio.shield(metadata_task)
-                except asyncio.CancelledError:
-                    await metadata_task
-                    metadata_written = True
-                    raise
+                _, cancellation_requested = await await_completion(metadata_task)
                 metadata_written = True
+                if cancellation_requested:
+                    raise asyncio.CancelledError
                 self._pending_ingestions.discard(file_id)
                 cleanup_completed = True
                 await self._emit(
@@ -1282,12 +1282,12 @@ class Knowledge:
                 }
             except asyncio.CancelledError:
                 if not metadata_written:
-                    await asyncio.to_thread(self._delete_points_by_file_id, file_id)
+                    await run_in_thread(self._delete_points_by_file_id, file_id)
                     cleanup_completed = True
                 raise
             except Exception as exc:
                 if not metadata_written:
-                    await asyncio.to_thread(self._delete_points_by_file_id, file_id)
+                    await run_in_thread(self._delete_points_by_file_id, file_id)
                     cleanup_completed = True
                 await self._emit(
                     operation,
@@ -1314,7 +1314,7 @@ class Knowledge:
 
         async def search_vectors() -> list[dict[str, Any]]:
             async with self._mutation_lock:
-                return await asyncio.to_thread(self._search, query_vector, top_k)
+                return await run_in_thread(self._search, query_vector, top_k)
 
         return await self._run_in_use(search_vectors)
 
@@ -1332,7 +1332,7 @@ class Knowledge:
             section_id = hit.get(KEY_SECTION_ID)
             if not isinstance(section_id, str) or section_id in seen:
                 continue
-            section = await asyncio.to_thread(self.get_section, section_id)
+            section = await run_in_thread(self.get_section, section_id)
             if section is None:
                 continue
             seen.add(section_id)
@@ -1352,7 +1352,7 @@ class Knowledge:
         """Return the number of indexed vector points."""
         async def count_vectors() -> int:
             async with self._mutation_lock:
-                return await asyncio.to_thread(self._count)
+                return await run_in_thread(self._count)
 
         return await self._run_in_use(count_vectors)
 
@@ -1392,14 +1392,11 @@ class Knowledge:
         )
 
         async with self._mutation_lock:
-            marker_task = asyncio.create_task(
-                asyncio.to_thread(self._file_store.begin_file_deletion, file_id)
-            )
             try:
-                marker = await asyncio.shield(marker_task)
-            except asyncio.CancelledError:
-                await marker_task
-                raise
+                marker = await run_in_thread(
+                    self._file_store.begin_file_deletion,
+                    file_id,
+                )
             except Exception as exc:
                 await self._emit(
                     operation,
@@ -1429,25 +1426,11 @@ class Knowledge:
             file_name = marker["file_name"]
 
             try:
-                delete_task = asyncio.create_task(
-                    asyncio.to_thread(self._delete_points_by_file_id, file_id)
+                await run_in_thread(self._delete_points_by_file_id, file_id)
+                await run_in_thread(
+                    self._file_store.finish_file_deletion,
+                    file_id,
                 )
-                try:
-                    await asyncio.shield(delete_task)
-                except asyncio.CancelledError:
-                    await delete_task
-                    raise
-                finish_task = asyncio.create_task(
-                    asyncio.to_thread(
-                        self._file_store.finish_file_deletion,
-                        file_id,
-                    )
-                )
-                try:
-                    await asyncio.shield(finish_task)
-                except asyncio.CancelledError:
-                    await finish_task
-                    raise
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -1524,33 +1507,31 @@ class Knowledge:
 
     async def _open_storage_safely(self) -> None:
         """Finish and roll back a threaded open before propagating cancellation."""
+        if self._storage_cleanup_pending:
+            await run_in_thread(self._close_open_storage)
         opening = asyncio.create_task(asyncio.to_thread(self._open_storage))
         try:
-            await asyncio.shield(opening)
-        except asyncio.CancelledError:
-            try:
-                await asyncio.shield(opening)
-            except BaseException:
-                pass
-            await self._rollback_open_storage()
-            raise
+            _, cancellation_requested = await await_completion(opening)
         except BaseException:
             await self._rollback_open_storage()
             raise
+        if cancellation_requested:
+            await self._rollback_open_storage()
+            raise asyncio.CancelledError
 
 
     async def _rollback_open_storage(self) -> None:
         cleanup = asyncio.create_task(asyncio.to_thread(self._close_open_storage))
-        try:
-            await asyncio.shield(cleanup)
-        except asyncio.CancelledError:
-            await asyncio.shield(cleanup)
-            raise
+        _, cancellation_requested = await await_completion(cleanup)
+        if cancellation_requested:
+            raise asyncio.CancelledError
 
 
     def _close_open_storage(self) -> None:
-        qdrant = self._qdrant
+        self._storage_cleanup_pending = True
+        qdrant = self._qdrant or self._pending_qdrant_close
         self._qdrant = None
+        self._pending_qdrant_close = qdrant
         cleanup_error: BaseException | None = None
         try:
             self._file_store.close()
@@ -1562,8 +1543,11 @@ class Knowledge:
             except BaseException as exc:
                 if cleanup_error is None:
                     cleanup_error = exc
+            else:
+                self._pending_qdrant_close = None
         if cleanup_error is not None:
             raise cleanup_error
+        self._storage_cleanup_pending = False
 
 
     def _load_meta(self) -> dict[str, Any]:
@@ -1646,6 +1630,107 @@ class Knowledge:
     def _split(self, text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
         splitter = SentenceSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         return splitter.split_text_metadata_aware(text, "")
+
+
+    @staticmethod
+    def _validate_embedding_vectors(
+        vectors: Any,
+        *,
+        expected_count: int,
+    ) -> list[list[float]]:
+        if isinstance(vectors, (str, bytes, bytearray)):
+            raise RavenError(
+                ErrorCode.INVALID_EMBEDDING_RESULT,
+                "Embedding model must return a sequence of vectors.",
+            )
+        try:
+            batch = list(vectors)
+        except TypeError as exc:
+            raise RavenError(
+                ErrorCode.INVALID_EMBEDDING_RESULT,
+                "Embedding model must return a sequence of vectors.",
+            ) from exc
+        if len(batch) != expected_count:
+            raise RavenError(
+                ErrorCode.INVALID_EMBEDDING_RESULT,
+                "Embedding model returned an invalid number of vectors.",
+                details={
+                    "expected_count": expected_count,
+                    "actual_count": len(batch),
+                },
+            )
+
+        normalized: list[list[float]] = []
+        dimension: int | None = None
+        for vector_index, vector in enumerate(batch):
+            if isinstance(vector, (str, bytes, bytearray)):
+                raise RavenError(
+                    ErrorCode.INVALID_EMBEDDING_RESULT,
+                    "Each embedding must be a sequence of numeric values.",
+                    details={"vector_index": vector_index},
+                )
+            try:
+                components = list(vector)
+            except TypeError as exc:
+                raise RavenError(
+                    ErrorCode.INVALID_EMBEDDING_RESULT,
+                    "Each embedding must be a sequence of numeric values.",
+                    details={"vector_index": vector_index},
+                ) from exc
+            if not components:
+                raise RavenError(
+                    ErrorCode.INVALID_EMBEDDING_RESULT,
+                    "Embedding vectors must have a non-zero dimension.",
+                    details={"vector_index": vector_index},
+                )
+            if dimension is None:
+                dimension = len(components)
+            elif len(components) != dimension:
+                raise RavenError(
+                    ErrorCode.INVALID_EMBEDDING_RESULT,
+                    "Embedding vectors must all have the same dimension.",
+                    details={
+                        "vector_index": vector_index,
+                        "expected_dimension": dimension,
+                        "actual_dimension": len(components),
+                    },
+                )
+
+            normalized_vector: list[float] = []
+            for component_index, component in enumerate(components):
+                if isinstance(component, (str, bytes, bytearray, bool)):
+                    raise RavenError(
+                        ErrorCode.INVALID_EMBEDDING_RESULT,
+                        "Embedding vectors must contain only finite numeric values.",
+                        details={
+                            "vector_index": vector_index,
+                            "component_index": component_index,
+                        },
+                    )
+                try:
+                    numeric = float(component)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise RavenError(
+                        ErrorCode.INVALID_EMBEDDING_RESULT,
+                        "Embedding vectors must contain only finite numeric values.",
+                        details={
+                            "vector_index": vector_index,
+                            "component_index": component_index,
+                        },
+                    ) from exc
+                if not math.isfinite(numeric):
+                    raise RavenError(
+                        ErrorCode.INVALID_EMBEDDING_RESULT,
+                        "Embedding vectors must contain only finite numeric values.",
+                        details={
+                            "vector_index": vector_index,
+                            "component_index": component_index,
+                        },
+                    )
+                normalized_vector.append(numeric)
+            normalized.append(normalized_vector)
+
+        return normalized
 
 
     def _file_result_by_id(self, file_id: str) -> dict[str, Any] | None:
@@ -1901,24 +1986,29 @@ class KnowledgeBase:
     async def close(self) -> None:
         """Close every knowledge database managed by this registry."""
         async with self._lifecycle_lock:
-            if self._closed:
+            if self._closed and not self._knowledges:
                 return
             self._closed = True
             self._started = False
-            knowledges = list(self._knowledges.values())
-            self._knowledges.clear()
-
-        results = await asyncio.gather(
-            *(knowledge.close() for knowledge in knowledges),
-            return_exceptions=True,
-        )
-        failures = [result for result in results if isinstance(result, BaseException)]
-        if failures:
-            raise RavenError(
-                ErrorCode.INTERNAL_ERROR,
-                "One or more knowledge databases could not be closed.",
-                details={"failure_count": len(failures)},
-            ) from failures[0]
+            resources = list(self._knowledges.items())
+            results = await asyncio.gather(
+                *(knowledge.close() for _, knowledge in resources),
+                return_exceptions=True,
+            )
+            failures = [
+                (name, knowledge, result)
+                for (name, knowledge), result in zip(resources, results)
+                if isinstance(result, BaseException)
+            ]
+            self._knowledges = OrderedDict(
+                (name, knowledge) for name, knowledge, _ in failures
+            )
+            if failures:
+                raise RavenError(
+                    ErrorCode.INTERNAL_ERROR,
+                    "One or more knowledge databases could not be closed.",
+                    details={"failure_count": len(failures)},
+                ) from failures[0][2]
 
 
     async def create(

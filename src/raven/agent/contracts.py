@@ -154,27 +154,8 @@ class AgentRun:
 
     async def events(self, after_event_id: int = 0) -> AsyncIterator[Event]:
         """Yield replayed and live events after the supplied cursor."""
-        if self._task.is_root:
-            async for event in self._task.operation.events(
-                after_event_id=after_event_id
-            ):
-                yield event
-                if event.is_final:
-                    return
-            return
-
-        terminal_task_events = {
-            EventType.OPERATION_TASK_COMPLETED,
-            EventType.OPERATION_TASK_FAILED,
-            EventType.OPERATION_TASK_CANCELLED,
-        }
         async for event in self._task.events(after_event_id=after_event_id):
             yield event
-            if (
-                event.task_id == self._task.task_id
-                and event.type in terminal_task_events
-            ):
-                return
 
 
     async def collect(self) -> AgentRunResult:

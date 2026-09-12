@@ -631,7 +631,15 @@ class Raven:
                 )
             close_task = self._close_task
 
-        await asyncio.shield(close_task)
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            async with self._lifecycle_lock:
+                if self._close_task is close_task and close_task.done():
+                    self._close_task = None
+            raise
 
 
     async def _close_owned_resources(self, sessions: list[Session]) -> None:

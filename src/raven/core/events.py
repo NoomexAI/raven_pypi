@@ -11,6 +11,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .async_utils import await_completion
 from .config import DEFAULT_EVENT_REPLAY_PAGE_SIZE
 from .errors import ErrorCode, RavenError
 
@@ -245,14 +246,10 @@ class EventStream:
                 }
             )
             commit = asyncio.create_task(self._commit(persisted))
-            try:
-                generation = await asyncio.shield(commit)
-            except asyncio.CancelledError:
-                generation = await asyncio.shield(commit)
-                self._apply_persisted_event(persisted, generation)
-                raise
-
+            generation, cancellation_requested = await await_completion(commit)
             self._apply_persisted_event(persisted, generation)
+            if cancellation_requested:
+                raise asyncio.CancelledError
             return persisted
 
 

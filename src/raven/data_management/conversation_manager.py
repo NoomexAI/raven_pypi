@@ -26,6 +26,7 @@ from llama_index.vector_stores.qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qdrant_models
 
+from ..core.async_utils import await_completion, run_in_thread
 from ..core.config import DEFAULT_OPEN_CONVERSATION_LIMIT, PathConfig
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
@@ -435,6 +436,8 @@ class Conversation:
         self.qdrant_dir = self.dir_path / "qdrant"
 
         self._qdrant: QdrantClient | None = None
+        self._pending_qdrant_close: QdrantClient | None = None
+        self._storage_cleanup_pending = False
         self._message_store = _ConversationMessageStore(self.messages_path)
         self._chat_store: SimpleChatStore | None = None
         self._chat_memory: ChatSummaryMemoryBuffer | None = None
@@ -532,20 +535,12 @@ class Conversation:
     async def close(self) -> None:
         """Close the conversation Qdrant database and memory resources."""
         async with self._lifecycle_lock:
-            if self._closed:
-                return
-
-            qdrant = self._qdrant
-            self._qdrant = None
             self._chat_store = None
             self._chat_memory = None
             self._vector_memory = None
             self._closed = True
             self._started = False
-
-            await asyncio.to_thread(self._message_store.close)
-            if qdrant is not None:
-                await asyncio.to_thread(qdrant.close)
+            await run_in_thread(self._close_open_storage)
 
 
     async def release_resources(self) -> bool:
@@ -556,15 +551,11 @@ class Conversation:
             with self._usage_lock:
                 if self.has_active_session or self._active_uses:
                     return False
-                qdrant = self._qdrant
-                self._qdrant = None
                 self._chat_store = None
                 self._chat_memory = None
                 self._vector_memory = None
                 self._started = False
-            await asyncio.to_thread(self._message_store.close)
-            if qdrant is not None:
-                await asyncio.to_thread(qdrant.close)
+            await run_in_thread(self._close_open_storage)
             return True
 
 
@@ -640,13 +631,13 @@ class Conversation:
                 return
 
             if self._qdrant is None:
-                await asyncio.to_thread(self._open_qdrant)
-            chat_store = await asyncio.to_thread(self._load_chat_store)
-            await asyncio.to_thread(
+                await run_in_thread(self._open_qdrant)
+            chat_store = await run_in_thread(self._load_chat_store)
+            await run_in_thread(
                 self._ensure_embedding_identity,
                 embed_model,
             )
-            await asyncio.to_thread(self._ensure_memory_collection, embed_model)
+            await run_in_thread(self._ensure_memory_collection, embed_model)
             qdrant = self._require_qdrant()
             vector_store = QdrantVectorStore(
                 collection_name=MEMORY_COLLECTION,
@@ -672,7 +663,7 @@ class Conversation:
             self._vector_memory = vector_memory
 
         try:
-            pending_turn_ids = await asyncio.to_thread(
+            pending_turn_ids = await run_in_thread(
                 self._message_store.list_unindexed_turn_ids
             )
             for turn_id in pending_turn_ids:
@@ -694,13 +685,13 @@ class Conversation:
             self._chat_memory = None
             self._vector_memory = None
         if qdrant is not None:
-            await asyncio.to_thread(qdrant.close)
+            await run_in_thread(qdrant.close)
 
 
     async def validate_embedding_model(self, embed_model: Any) -> None:
         """Reject an adapter that does not match persisted vector memory."""
         await self.start()
-        await asyncio.to_thread(self._ensure_embedding_identity, embed_model)
+        await run_in_thread(self._ensure_embedding_identity, embed_model)
 
 
     async def get_context_messages(
@@ -742,9 +733,9 @@ class Conversation:
                 },
             )
         async with self._mutation_lock, self._memory_lock:
-            messages_before = await asyncio.to_thread(memory.get_all)
+            messages_before = await run_in_thread(memory.get_all)
             message_count_before = len(messages_before)
-            compaction_needed = await asyncio.to_thread(
+            compaction_needed = await run_in_thread(
                 self._memory_compaction_needed,
                 memory,
                 messages_before,
@@ -764,7 +755,7 @@ class Conversation:
 
             try:
                 messages = await memory.aget(initial_token_count=initial_token_count)
-                await asyncio.to_thread(
+                await run_in_thread(
                     self._message_store.replace_context,
                     messages,
                 )
@@ -819,7 +810,7 @@ class Conversation:
     async def get_messages(self) -> list[ChatMessage]:
         """Return the complete stored chat history without applying a window."""
         return await self._run_in_use(
-            lambda: asyncio.to_thread(self._message_store.list_messages)
+            lambda: run_in_thread(self._message_store.list_messages)
         )
 
 
@@ -830,7 +821,7 @@ class Conversation:
         """Return only the canonical messages committed under ``turn_id``."""
         async def load_turn() -> list[ChatMessage]:
             normalized_turn_id = self._validate_turn_id(turn_id)
-            turn = await asyncio.to_thread(
+            turn = await run_in_thread(
                 self._message_store.get_turn,
                 normalized_turn_id,
             )
@@ -839,7 +830,7 @@ class Conversation:
                     ErrorCode.CONVERSATION_TURN_NOT_FOUND,
                     f"Turn '{normalized_turn_id}' does not exist.",
                 )
-            return await asyncio.to_thread(
+            return await run_in_thread(
                 self._message_store.get_turn_messages,
                 normalized_turn_id,
             )
@@ -938,27 +929,20 @@ class Conversation:
         try:
             async with self._mutation_lock:
                 operation.raise_if_cancelled()
-                commit_task = asyncio.create_task(
-                    asyncio.to_thread(
-                        self._message_store.commit_turn,
-                        turn_id=turn_id,
-                        operation_id=str(operation.operation_id),
-                        user_query=user_query,
-                        messages=messages,
-                        result=result,
-                    )
+                record, created = await run_in_thread(
+                    self._message_store.commit_turn,
+                    turn_id=turn_id,
+                    operation_id=str(operation.operation_id),
+                    user_query=user_query,
+                    messages=messages,
+                    result=result,
                 )
-                try:
-                    record, created = await asyncio.shield(commit_task)
-                except asyncio.CancelledError:
-                    await commit_task
-                    raise
 
                 await self._reload_context_memory()
                 if index_in_vector_memory:
                     await self._ensure_turn_indexed(turn_id, operation=operation)
                 elif not record["memory_indexed"]:
-                    await asyncio.to_thread(
+                    await run_in_thread(
                         self._message_store.mark_memory_indexed,
                         turn_id,
                     )
@@ -977,7 +961,7 @@ class Conversation:
                     "message_count": len(messages),
                 },
             )
-            updated = await asyncio.to_thread(self._message_store.get_turn, turn_id)
+            updated = await run_in_thread(self._message_store.get_turn, turn_id)
             if updated is None:
                 raise RavenError(
                     ErrorCode.CONVERSATION_TURN_NOT_FOUND,
@@ -1004,7 +988,7 @@ class Conversation:
         normalized_turn_id = self._validate_turn_id(turn_id)
 
         return await self._run_in_use(
-            lambda: asyncio.to_thread(
+            lambda: run_in_thread(
                 self._message_store.get_turn,
                 normalized_turn_id,
             )
@@ -1040,7 +1024,7 @@ class Conversation:
         operation: Operation,
     ) -> dict[str, Any]:
         async with self._mutation_lock:
-            record = await asyncio.to_thread(
+            record = await run_in_thread(
                 self._message_store.get_turn,
                 turn_id,
             )
@@ -1051,7 +1035,7 @@ class Conversation:
                 )
             await self._reload_context_memory()
             await self._ensure_turn_indexed(turn_id, operation=operation)
-            updated = await asyncio.to_thread(
+            updated = await run_in_thread(
                 self._message_store.get_turn,
                 turn_id,
             )
@@ -1075,11 +1059,11 @@ class Conversation:
                 "Conversation memory has not been initialized.",
             )
         async with self._memory_lock:
-            messages = await asyncio.to_thread(
+            messages = await run_in_thread(
                 chat_store.get_messages,
                 "messages",
             )
-            await asyncio.to_thread(
+            await run_in_thread(
                 self._message_store.replace_context,
                 messages,
             )
@@ -1087,11 +1071,11 @@ class Conversation:
 
     async def _reload_context_memory(self) -> None:
         memory = self._require_chat_memory()
-        messages = await asyncio.to_thread(
+        messages = await run_in_thread(
             self._message_store.get_context_messages
         )
         async with self._memory_lock:
-            await asyncio.to_thread(memory.set, messages)
+            await run_in_thread(memory.set, messages)
 
 
     async def _ensure_turn_indexed(
@@ -1100,7 +1084,7 @@ class Conversation:
         *,
         operation: Operation | None = None,
     ) -> None:
-        record = await asyncio.to_thread(self._message_store.get_turn, turn_id)
+        record = await run_in_thread(self._message_store.get_turn, turn_id)
         if record is None:
             raise RavenError(
                 ErrorCode.CONVERSATION_TURN_NOT_FOUND,
@@ -1118,7 +1102,7 @@ class Conversation:
             },
         )
         try:
-            messages = await asyncio.to_thread(
+            messages = await run_in_thread(
                 self._message_store.get_turn_messages,
                 turn_id,
             )
@@ -1130,13 +1114,13 @@ class Conversation:
             if indexed_messages:
                 vector_memory = self._require_vector_memory()
                 async with self._memory_lock:
-                    await asyncio.to_thread(
+                    await run_in_thread(
                         self._index_turn,
                         vector_memory,
                         turn_id,
                         indexed_messages,
                     )
-            await asyncio.to_thread(
+            await run_in_thread(
                 self._message_store.mark_memory_indexed,
                 turn_id,
             )
@@ -1277,14 +1261,7 @@ class Conversation:
             preference = {"preference_id": str(uuid4()), "text": value}
             self._preferences.append(preference)
             try:
-                write_task = asyncio.create_task(
-                    asyncio.to_thread(self._persist_preferences)
-                )
-                try:
-                    await asyncio.shield(write_task)
-                except asyncio.CancelledError:
-                    await write_task
-                    raise
+                await run_in_thread(self._persist_preferences)
             except Exception:
                 self._preferences.pop()
                 raise
@@ -1337,14 +1314,7 @@ class Conversation:
 
             removed = self._preferences.pop(index)
             try:
-                write_task = asyncio.create_task(
-                    asyncio.to_thread(self._persist_preferences)
-                )
-                try:
-                    await asyncio.shield(write_task)
-                except asyncio.CancelledError:
-                    await write_task
-                    raise
+                await run_in_thread(self._persist_preferences)
             except Exception:
                 self._preferences.insert(index, removed)
                 raise
@@ -1405,14 +1375,7 @@ class Conversation:
                     self.pinned = pinned
 
                 try:
-                    write_task = asyncio.create_task(
-                        asyncio.to_thread(self.write_metadata)
-                    )
-                    try:
-                        await asyncio.shield(write_task)
-                    except asyncio.CancelledError:
-                        await write_task
-                        raise
+                    await run_in_thread(self.write_metadata)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -1558,33 +1521,31 @@ class Conversation:
 
     async def _open_storage_safely(self) -> None:
         """Finish and roll back a threaded open before propagating cancellation."""
+        if self._storage_cleanup_pending:
+            await run_in_thread(self._close_open_storage)
         opening = asyncio.create_task(asyncio.to_thread(self._open_storage))
         try:
-            await asyncio.shield(opening)
-        except asyncio.CancelledError:
-            try:
-                await asyncio.shield(opening)
-            except BaseException:
-                pass
-            await self._rollback_open_storage()
-            raise
+            _, cancellation_requested = await await_completion(opening)
         except BaseException:
             await self._rollback_open_storage()
             raise
+        if cancellation_requested:
+            await self._rollback_open_storage()
+            raise asyncio.CancelledError
 
 
     async def _rollback_open_storage(self) -> None:
         cleanup = asyncio.create_task(asyncio.to_thread(self._close_open_storage))
-        try:
-            await asyncio.shield(cleanup)
-        except asyncio.CancelledError:
-            await asyncio.shield(cleanup)
-            raise
+        _, cancellation_requested = await await_completion(cleanup)
+        if cancellation_requested:
+            raise asyncio.CancelledError
 
 
     def _close_open_storage(self) -> None:
-        qdrant = self._qdrant
+        self._storage_cleanup_pending = True
+        qdrant = self._qdrant or self._pending_qdrant_close
         self._qdrant = None
+        self._pending_qdrant_close = qdrant
         self._chat_store = None
         self._chat_memory = None
         self._vector_memory = None
@@ -1599,8 +1560,11 @@ class Conversation:
             except BaseException as exc:
                 if cleanup_error is None:
                     cleanup_error = exc
+            else:
+                self._pending_qdrant_close = None
         if cleanup_error is not None:
             raise cleanup_error
+        self._storage_cleanup_pending = False
 
 
     def _open_qdrant(self) -> None:
@@ -2095,24 +2059,30 @@ class ConversationManager:
     async def close(self) -> None:
         """Close every loaded conversation and release the registry."""
         async with self._lifecycle_lock:
-            if self._closed:
+            if self._closed and not self._conversations:
                 return
             self._closed = True
             self._started = False
-            conversations = list(self._conversations.values())
-            self._conversations.clear()
-
-        results = await asyncio.gather(
-            *(conversation.close() for conversation in conversations),
-            return_exceptions=True,
-        )
-        failures = [result for result in results if isinstance(result, BaseException)]
-        if failures:
-            raise RavenError(
-                ErrorCode.INTERNAL_ERROR,
-                "One or more conversations could not be closed.",
-                details={"failure_count": len(failures)},
-            ) from failures[0]
+            resources = list(self._conversations.items())
+            results = await asyncio.gather(
+                *(conversation.close() for _, conversation in resources),
+                return_exceptions=True,
+            )
+            failures = [
+                (conversation_id, conversation, result)
+                for (conversation_id, conversation), result in zip(resources, results)
+                if isinstance(result, BaseException)
+            ]
+            self._conversations = OrderedDict(
+                (conversation_id, conversation)
+                for conversation_id, conversation, _ in failures
+            )
+            if failures:
+                raise RavenError(
+                    ErrorCode.INTERNAL_ERROR,
+                    "One or more conversations could not be closed.",
+                    details={"failure_count": len(failures)},
+                ) from failures[0][2]
 
 
     async def create(

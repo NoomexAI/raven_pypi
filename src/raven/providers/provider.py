@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from ..core.errors import ErrorCode, RavenError
 from ..core.operations import Operation, OperationManager, OperationTask
@@ -124,12 +126,56 @@ class Provider:
 
     @staticmethod
     def _reject_secret_options(spec: ModelSpec) -> None:
-        secret_markers = ("api_key", "token", "secret", "password", "authorization")
-        fields = sorted(
-            key
-            for key in spec.options
-            if any(marker in key.lower() for marker in secret_markers)
+        credential_fields = {
+            "access_token",
+            "api_key",
+            "apikey",
+            "api_token",
+            "auth_token",
+            "authorization",
+            "bearer_token",
+            "client_secret",
+            "credential",
+            "credentials",
+            "password",
+            "refresh_token",
+            "secret",
+            "secret_key",
+            "session_token",
+            "token",
+        }
+        credential_suffixes = (
+            "_access_key",
+            "_access_token",
+            "_api_key",
+            "_auth_token",
+            "_password",
+            "_secret_key",
         )
+        fields: list[str] = []
+
+        def inspect(value: Any, path: str = "") -> None:
+            if isinstance(value, Mapping):
+                for raw_key, nested in value.items():
+                    key = str(raw_key)
+                    field_path = f"{path}.{key}" if path else key
+                    normalized = key.strip().lower().replace("-", "_")
+                    if (
+                        normalized in credential_fields
+                        or normalized.endswith(credential_suffixes)
+                    ):
+                        fields.append(field_path)
+                    else:
+                        inspect(nested, field_path)
+            elif isinstance(value, Sequence) and not isinstance(
+                value,
+                (str, bytes, bytearray),
+            ):
+                for index, nested in enumerate(value):
+                    inspect(nested, f"{path}[{index}]")
+
+        inspect(spec.options)
+        fields.sort()
         if fields:
             raise RavenError(
                 ErrorCode.INVALID_MODEL_SPEC,

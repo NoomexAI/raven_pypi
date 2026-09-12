@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .async_utils import await_completion
 from .config import (
     DEFAULT_FINISHED_OPERATION_CACHE_SIZE,
     DEFAULT_OPERATION_CLEANUP_BATCH_SIZE,
@@ -264,6 +265,13 @@ _TERMINAL_STATUSES = frozenset(
         OperationStatus.CANCELLED,
     }
 )
+_TERMINAL_TASK_EVENT_TYPES = frozenset(
+    {
+        EventType.OPERATION_TASK_COMPLETED,
+        EventType.OPERATION_TASK_FAILED,
+        EventType.OPERATION_TASK_CANCELLED,
+    }
+)
 _CURRENT_TASK: ContextVar[tuple[UUID, str] | None] = ContextVar(
     "raven_current_operation_task",
     default=None,
@@ -439,6 +447,8 @@ class Operation:
                     ErrorCode.OPERATION_FINISHED,
                     f"Operation '{self.operation_id}' is already finished.",
                 )
+            if self._cancellation_requested:
+                raise asyncio.CancelledError
 
             is_root = self._task is None
             if is_root:
@@ -464,40 +474,51 @@ class Operation:
                     retry_of_operation_id=retry_of_operation_id,
                     retry_of_task_id=retry_of_task_id,
                 )
-                await task._persist()
+                registration_cancelled = await task._persist()
                 self._register_task(task)
-                self._task = asyncio.create_task(
-                    self._run(task._run_root),
-                    name=f"raven-operation-{self.operation_id}",
-                )
-                return task
+                if registration_cancelled:
+                    self._cancellation_requested = True
+                else:
+                    self._task = asyncio.create_task(
+                        self._run(task._run_root),
+                        name=f"raven-operation-{self.operation_id}",
+                    )
+                    return task
 
-            if self._status != OperationStatus.RUNNING:
-                raise RavenError(
-                    ErrorCode.OPERATION_FINISHED,
-                    f"Operation '{self.operation_id}' is not accepting child tasks.",
-                )
+            else:
+                if self._status != OperationStatus.RUNNING:
+                    raise RavenError(
+                        ErrorCode.OPERATION_FINISHED,
+                        f"Operation '{self.operation_id}' is not accepting child tasks.",
+                    )
 
-            task = OperationTask(
-                self,
-                name,
-                worker,
-                root=False,
-                parent_task_id=(
-                    _CURRENT_TASK.get()[0]
-                    if _CURRENT_TASK.get() is not None
-                    else None
-                ),
-                retry_policy=retry_policy,
-                retry_input=normalized_retry_input,
-                attempt=attempt,
-                retry_of_operation_id=retry_of_operation_id,
-                retry_of_task_id=retry_of_task_id,
-            )
-            await task._persist()
-            self._register_task(task)
-            await task.start()
-            return task
+                task = OperationTask(
+                    self,
+                    name,
+                    worker,
+                    root=False,
+                    parent_task_id=(
+                        _CURRENT_TASK.get()[0]
+                        if _CURRENT_TASK.get() is not None
+                        else None
+                    ),
+                    retry_policy=retry_policy,
+                    retry_input=normalized_retry_input,
+                    attempt=attempt,
+                    retry_of_operation_id=retry_of_operation_id,
+                    retry_of_task_id=retry_of_task_id,
+                )
+                registration_cancelled = await task._persist()
+                self._register_task(task)
+                if not registration_cancelled:
+                    await task.start()
+                    return task
+
+        await task._finalize_cancelled()
+        if is_root:
+            finalization = asyncio.create_task(self._finish_cancelled())
+            await await_completion(finalization)
+        raise asyncio.CancelledError
 
 
     @staticmethod
@@ -890,6 +911,13 @@ class Operation:
         return False
 
 
+    async def _read_task_terminal_event(self, task_id: UUID) -> Event | None:
+        return await self._store.read_task_terminal_event(
+            str(self.operation_id),
+            str(task_id),
+        )
+
+
     async def _persist_task(self, task: "OperationTask") -> None:
         """Persist one owned task before its worker starts."""
         await self._store.register_task(
@@ -1078,8 +1106,10 @@ class OperationTask:
         return self._retry_of_task_id
 
 
-    async def _persist(self) -> None:
-        await self.operation._persist_task(self)
+    async def _persist(self) -> bool:
+        persistence = asyncio.create_task(self.operation._persist_task(self))
+        _, cancellation_requested = await await_completion(persistence)
+        return cancellation_requested
 
 
     async def start(self) -> None:
@@ -1088,7 +1118,12 @@ class OperationTask:
             raise RuntimeError("root operation tasks are started by Operation.start")
         if self._task is not None:
             raise RuntimeError(f"task '{self.task_id}' has already started")
-        await self._publish_lifecycle(EventType.OPERATION_TASK_QUEUED)
+        cancellation_requested = await self._publish_lifecycle(
+            EventType.OPERATION_TASK_QUEUED
+        )
+        if cancellation_requested:
+            await self._finalize_cancelled()
+            raise asyncio.CancelledError
         self._task = asyncio.create_task(
             self._run(),
             name=f"raven-operation-task-{self.task_id}",
@@ -1096,7 +1131,12 @@ class OperationTask:
 
 
     async def _run_root(self, operation: Operation) -> Any:
-        await self._publish_lifecycle(EventType.OPERATION_TASK_QUEUED)
+        cancellation_requested = await self._publish_lifecycle(
+            EventType.OPERATION_TASK_QUEUED
+        )
+        if cancellation_requested:
+            await self._finalize_cancelled()
+            raise asyncio.CancelledError
         return await self._run()
 
 
@@ -1105,13 +1145,21 @@ class OperationTask:
             (self.task_id, self.name)
         )
         try:
-            await self._publish_lifecycle(EventType.OPERATION_TASK_STARTED)
+            cancellation_requested = await self._publish_lifecycle(
+                EventType.OPERATION_TASK_STARTED
+            )
             self._status = OperationStatus.RUNNING
+            if cancellation_requested:
+                raise asyncio.CancelledError
             self.operation.raise_if_cancelled()
             result = await self._worker(self.operation)
-            await self._publish_lifecycle(EventType.OPERATION_TASK_COMPLETED)
+            cancellation_requested = await self._publish_lifecycle(
+                EventType.OPERATION_TASK_COMPLETED
+            )
             self._result = result
             self._status = OperationStatus.COMPLETED
+            if cancellation_requested:
+                raise asyncio.CancelledError
             return self._result
         except asyncio.CancelledError as exc:
             await self._finalize_cancelled(exc)
@@ -1119,14 +1167,17 @@ class OperationTask:
                 raise
             return None
         except Exception as exc:
+            cancellation_requested = False
             try:
-                await self._publish_lifecycle(
+                cancellation_requested = await self._publish_lifecycle(
                     EventType.OPERATION_TASK_FAILED,
                     {"error": error_payload(exc)},
                 )
             finally:
                 self._status = OperationStatus.FAILED
                 self._error = exc
+            if cancellation_requested:
+                raise asyncio.CancelledError
             if self._root:
                 raise
             return None
@@ -1185,9 +1236,31 @@ class OperationTask:
 
     async def events(self, after_event_id: int = 0) -> AsyncIterator[Event]:
         """Yield events belonging to this task and its descendants."""
+        if self._root:
+            async for event in self.operation.events(
+                after_event_id=after_event_id
+            ):
+                yield event
+                if event.is_final:
+                    return
+            return
+
+        terminal_event = await self.operation._read_task_terminal_event(self.task_id)
+        if (
+            terminal_event is not None
+            and terminal_event.event_id is not None
+            and terminal_event.event_id <= after_event_id
+        ):
+            return
+
         async for event in self.operation.events(after_event_id=after_event_id):
             if self.operation._event_belongs_to_task(event, self.task_id):
                 yield event
+                if (
+                    event.task_id == self.task_id
+                    and event.type in _TERMINAL_TASK_EVENT_TYPES
+                ):
+                    return
 
 
     async def _wait_for_worker(self) -> None:
@@ -1214,15 +1287,19 @@ class OperationTask:
         self,
         event_type: EventType,
         data: dict[str, Any] | None = None,
-    ) -> None:
-        await self.operation.publish(
-            Event(
-                type=event_type,
-                data={"name": self.name, **(data or {})},
-                task_id=self.task_id,
-                task_name=self.name,
+    ) -> bool:
+        publication = asyncio.create_task(
+            self.operation.publish(
+                Event(
+                    type=event_type,
+                    data={"name": self.name, **(data or {})},
+                    task_id=self.task_id,
+                    task_name=self.name,
+                )
             )
         )
+        _, cancellation_requested = await await_completion(publication)
+        return cancellation_requested
 
 
 
