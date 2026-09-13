@@ -81,6 +81,11 @@ class ErrorCode(StrEnum):
     INVALID_METADATA = "invalid_metadata"
     UNSUPPORTED_METADATA_VERSION = "unsupported_metadata_version"
     PERSISTENCE_FAILED = "persistence_failed"
+    INVALID_SYSTEM_CONFIG = "invalid_system_config"
+    UNSUPPORTED_SYSTEM_CONFIG_VERSION = "unsupported_system_config_version"
+    INVALID_RUNTIME_CONFIG = "invalid_runtime_config"
+    UNSUPPORTED_RUNTIME_CONFIG_VERSION = "unsupported_runtime_config_version"
+    RUNTIME_CONFIG_CONFLICT = "runtime_config_conflict"
 
     EVENT_STREAM_CLOSED = "event_stream_closed"
     EVENT_STREAM_FINISHED = "event_stream_finished"

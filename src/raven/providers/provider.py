@@ -7,6 +7,10 @@ import os
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from ..core.config import (
+    DEFAULT_EMBEDDING_ADAPTER_CACHE_SIZE,
+    DEFAULT_LLM_ADAPTER_CACHE_SIZE,
+)
 from ..core.errors import ErrorCode, RavenError
 from ..core.operations import Operation, OperationManager, OperationTask
 from .litellm_manager import LiteLLMManager
@@ -23,13 +27,19 @@ class Provider:
         operation_manager: OperationManager,
         ollama_manager: OllamaManager | None = None,
         litellm_manager: LiteLLMManager | None = None,
+        max_cached_llms: int = DEFAULT_LLM_ADAPTER_CACHE_SIZE,
+        max_cached_embeddings: int = DEFAULT_EMBEDDING_ADAPTER_CACHE_SIZE,
     ) -> None:
         self._operation_manager = operation_manager
         self.ollama = ollama_manager or OllamaManager(
             operation_manager=operation_manager,
+            max_cached_llms=max_cached_llms,
+            max_cached_embeddings=max_cached_embeddings,
         )
         self.litellm = litellm_manager or LiteLLMManager(
             operation_manager=operation_manager,
+            max_cached_llms=max_cached_llms,
+            max_cached_embeddings=max_cached_embeddings,
         )
 
 

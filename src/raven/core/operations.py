@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .async_utils import await_completion
 from .config import (
+    DEFAULT_EVENT_REPLAY_PAGE_SIZE,
     DEFAULT_FINISHED_OPERATION_CACHE_SIZE,
     DEFAULT_OPERATION_CLEANUP_BATCH_SIZE,
     DEFAULT_OPERATION_PAGE_SIZE,
@@ -48,6 +49,8 @@ class OperationType(StrEnum):
     """Stable names for operations provided by Raven's built-in components."""
 
     RAVEN_LOAD_MODELS = "raven.load_models"
+    RUNTIME_SETTINGS_UPDATE = "runtime.settings.update"
+    RUNTIME_SETTINGS_RESET = "runtime.settings.reset"
 
     MODEL_CHECK_CONNECTION = "model.check_connection"
     MODEL_LIST = "model.list"
@@ -1314,6 +1317,7 @@ class OperationManager:
         max_cached_finished_operations: int = (
             DEFAULT_FINISHED_OPERATION_CACHE_SIZE
         ),
+        event_replay_page_size: int = DEFAULT_EVENT_REPLAY_PAGE_SIZE,
     ) -> None:
         if (
             isinstance(sync_interval, bool)
@@ -1334,10 +1338,12 @@ class OperationManager:
                 ErrorCode.INVALID_OPERATION_CACHE_SIZE,
                 "Finished operation cache size must be a non-negative integer.",
             )
+        EventStream._validate_page_size(event_replay_page_size)
         self.storage_dir = paths.operation_storage_dir
         self.database_path = paths.operation_database_path
         self.sync_interval = float(sync_interval)
         self.max_cached_finished_operations = max_cached_finished_operations
+        self.event_replay_page_size = event_replay_page_size
         self._store = SQLiteOperationStore(self.database_path)
         self._operations: OrderedDict[str, Operation] = OrderedDict()
         self._sync_service = OperationSyncService(self, self.sync_interval)
@@ -1648,6 +1654,7 @@ class OperationManager:
             store=self._store,
             health_check=self._ensure_sync_healthy,
             sync_failure=self._record_sync_failure,
+            replay_page_size=self.event_replay_page_size,
         )
 
 

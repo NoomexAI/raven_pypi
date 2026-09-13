@@ -202,11 +202,14 @@ class EventStream:
         store: EventStore,
         health_check: Callable[[], None] | None = None,
         sync_failure: Callable[[RavenError, str | None], Awaitable[None]] | None = None,
+        replay_page_size: int = DEFAULT_EVENT_REPLAY_PAGE_SIZE,
     ) -> None:
+        self._validate_page_size(replay_page_size)
         self.operation_id = operation_id
         self._store = store
         self._health_check = health_check
         self._sync_failure = sync_failure
+        self._replay_page_size = replay_page_size
         self._condition = asyncio.Condition()
         self._last_event_id = 0
         self._last_write_generation = 0
@@ -303,7 +306,7 @@ class EventStream:
                     events = await self._store.read_after(
                         self.operation_id,
                         cursor,
-                        limit=DEFAULT_EVENT_REPLAY_PAGE_SIZE,
+                        limit=self._replay_page_size,
                     )
 
                     if not events:

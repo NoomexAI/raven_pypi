@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -141,6 +141,7 @@ class Session:
         embed_model: Any,
         memory_token_limit: int = 4000,
         memory_top_k: int = 5,
+        on_idle: Callable[["Session"], None] | None = None,
     ) -> None:
         if llm is None:
             raise ValueError("llm is required")
@@ -158,6 +159,7 @@ class Session:
         self._embed_model = embed_model
         self._memory_token_limit = memory_token_limit
         self._memory_top_k = memory_top_k
+        self._on_idle = on_idle
         self._session_id = uuid4()
         self._owns_conversation = False
         self._turn_lock = asyncio.Lock()
@@ -182,6 +184,11 @@ class Session:
     @property
     def is_closed(self) -> bool:
         return self._closed
+
+
+    @property
+    def has_active_runs(self) -> bool:
+        return bool(self._active_runs)
 
 
     def matches_configuration(
@@ -468,6 +475,8 @@ class Session:
         self._active_runs.discard(run)
         if self._turn_lock.locked():
             self._turn_lock.release()
+        if not self._active_runs and self._on_idle is not None:
+            self._on_idle(self)
 
 
     def _ensure_started(self) -> None:

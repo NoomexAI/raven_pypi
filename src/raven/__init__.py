@@ -1,6 +1,7 @@
 """RAVEN's public library API."""
 
 from .agent import AgentHarness, AgentPolicy
+from .core.config import PathConfig, RuntimeConfig, SystemConfig
 from .core.events import Event, EventStream, EventType
 from .core.operations import (
     Operation,
@@ -73,17 +74,20 @@ __all__ = [
     "OperationTask",
     "OperationTaskRecord",
     "OperationType",
+    "PathConfig",
     "ParsedDocument",
     "ParsedElement",
     "Provider",
     "ProvenanceAwareSemanticSplitter",
     "Raven",
     "RetryPolicy",
+    "RuntimeConfig",
     "Reconstructor",
     "RetrievalPipeline",
     "SemanticSection",
     "SemanticUnit",
     "Session",
     "SessionRun",
+    "SystemConfig",
     "VectorConditionedRetrievalPipeline",
 ]

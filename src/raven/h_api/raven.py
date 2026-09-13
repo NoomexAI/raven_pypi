@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -17,7 +17,13 @@ from llama_index.core.llms import ChatMessage
 from ..agent.contracts import RetrievalPipelines
 from ..agent.harness import AgentHarness
 from ..agent.policy import GLOBAL_RETRIEVAL_MODES, LOCAL_RETRIEVAL_MODES, RetrievalMode
-from ..core.config import DEFAULT_OPERATION_PAGE_SIZE, PathConfig
+from ..core.async_utils import await_completion
+from ..core.config import (
+    DEFAULT_USER_ID,
+    PathConfig,
+    RuntimeConfig,
+    SystemConfig,
+)
 from ..core.errors import ErrorCode, RavenError
 from ..core.events import Event
 from ..core.operations import (
@@ -53,23 +59,46 @@ class Raven:
 
     def __init__(
         self,
-        raven_home: str | Path | PathConfig,
+        raven_home: str | Path,
+        user_id: UUID | str = DEFAULT_USER_ID,
+        *,
+        system_config: SystemConfig | None = None,
     ) -> None:
-        self.paths = (
-            raven_home
-            if isinstance(raven_home, PathConfig)
-            else PathConfig(Path(raven_home))
+        self.system_config = system_config or SystemConfig()
+        self.paths = PathConfig(
+            Path(raven_home),
+            user_id=user_id,
         )
+        self._runtime_config = RuntimeConfig()
+        self._runtime_config.validate_against(self.system_config)
         self.llm: Any | None = None
         self.embed_model: Any | None = None
 
-        self.operation_manager = OperationManager(self.paths)
-        self.provider = Provider(operation_manager=self.operation_manager)
-        self.knowledge_base = KnowledgeBase(self.paths, self.operation_manager)
+        self.operation_manager = OperationManager(
+            self.paths,
+            sync_interval=self.system_config.operation_sync_interval_seconds,
+            max_cached_finished_operations=(
+                self.system_config.finished_operation_cache_size
+            ),
+            event_replay_page_size=self.system_config.event_replay_page_size,
+        )
+        self.provider = Provider(
+            operation_manager=self.operation_manager,
+            max_cached_llms=self.system_config.llm_adapter_cache_size,
+            max_cached_embeddings=(
+                self.system_config.embedding_adapter_cache_size
+            ),
+        )
+        self.knowledge_base = KnowledgeBase(
+            self.paths,
+            self.operation_manager,
+            max_open_knowledges=self.system_config.open_knowledge_limit,
+        )
         self.conversation_manager = ConversationManager(
             self.paths,
             self.knowledge_base,
             self.operation_manager,
+            max_open_conversations=self.system_config.open_conversation_limit,
         )
         self.reconstructor = Reconstructor(
             self.knowledge_base,
@@ -82,10 +111,14 @@ class Raven:
         self.vector_conditioned_retrieval: VectorConditionedRetrievalPipeline | None = None
         self.retrieval_pipelines: RetrievalPipelines | None = None
         self._sessions: dict[str, Session] = {}
+        self._stale_sessions: set[str] = set()
+        self._retired_sessions: dict[str, Session] = {}
+        self._session_maintenance_tasks: set[asyncio.Task[None]] = set()
         self._session_registry_lock = threading.RLock()
         self._lifecycle_lock = asyncio.Lock()
         self._model_lock = asyncio.Lock()
         self._retry_lock = asyncio.Lock()
+        self._runtime_config_lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
         self._llm_spec: ModelSpec | None = None
         self._embedding_spec: ModelSpec | None = None
@@ -104,6 +137,12 @@ class Raven:
         return self.llm is not None and self.embed_model is not None
 
 
+    @property
+    def runtime_config(self) -> RuntimeConfig:
+        """Return the current immutable per-user configuration snapshot."""
+        return self._runtime_config
+
+
     def runtime_status(self) -> dict[str, Any]:
         """Return a transport-safe snapshot of this user-scoped runtime."""
         return {
@@ -112,6 +151,7 @@ class Raven:
             "closed": self._closed,
             "models_loaded": self.models_loaded,
             "operation_store_healthy": self.operation_manager.is_healthy,
+            "runtime_config_revision": self._runtime_config.revision,
             "models": {
                 "llm": (
                     self._model_result(self._llm_spec)
@@ -125,6 +165,187 @@ class Raven:
                 ),
             },
         }
+
+
+    def get_runtime_settings(self) -> dict[str, Any]:
+        """Return the current per-user runtime defaults as JSON-safe data."""
+        return self._runtime_config.to_dict()
+
+
+    async def update_runtime_settings(
+        self,
+        changes: Mapping[str, Any],
+        *,
+        expected_revision: int | None = None,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        """Atomically validate, persist, and install a runtime configuration."""
+        active_operation = operation or await self.operation_manager.create(
+            OperationType.RUNTIME_SETTINGS_UPDATE
+        )
+        return await active_operation.run(
+            OperationType.RUNTIME_SETTINGS_UPDATE,
+            lambda _operation: self._update_runtime_settings(
+                changes,
+                expected_revision=expected_revision,
+            ),
+        )
+
+
+    async def _update_runtime_settings(
+        self,
+        changes: Mapping[str, Any],
+        *,
+        expected_revision: int | None,
+    ) -> dict[str, Any]:
+        payload = dict(changes)
+        async with self._runtime_config_lock:
+            current = self._runtime_config
+            self._check_runtime_revision(expected_revision, current.revision)
+            updated = current.updated(payload)
+            updated.validate_against(self.system_config)
+            changed_fields = {
+                name
+                for name in payload
+                if getattr(current, name) != getattr(updated, name)
+            }
+            if not changed_fields:
+                return current.to_dict()
+            await self._commit_runtime_config(updated, changed_fields)
+            return updated.to_dict()
+
+
+    async def reset_runtime_settings(
+        self,
+        *,
+        expected_revision: int | None = None,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        """Restore built-in runtime defaults as a new persisted revision."""
+        active_operation = operation or await self.operation_manager.create(
+            OperationType.RUNTIME_SETTINGS_RESET
+        )
+        return await active_operation.run(
+            OperationType.RUNTIME_SETTINGS_RESET,
+            lambda _operation: self._reset_runtime_settings(expected_revision),
+        )
+
+
+    async def _reset_runtime_settings(
+        self,
+        expected_revision: int | None,
+    ) -> dict[str, Any]:
+        async with self._runtime_config_lock:
+            current = self._runtime_config
+            self._check_runtime_revision(expected_revision, current.revision)
+            defaults = RuntimeConfig.from_dict(
+                {**RuntimeConfig().to_dict(), "revision": current.revision + 1}
+            )
+            defaults.validate_against(self.system_config)
+            changed_fields = {
+                field_name
+                for field_name, value in defaults.to_dict().items()
+                if field_name not in {"schema_version", "revision"}
+                and getattr(current, field_name) != value
+            }
+            await self._commit_runtime_config(defaults, changed_fields)
+            return defaults.to_dict()
+
+
+    async def _commit_runtime_config(
+        self,
+        config: RuntimeConfig,
+        changed_fields: set[str],
+    ) -> None:
+        async def commit() -> None:
+            await asyncio.to_thread(config.save, self.paths.runtime_settings_path)
+            self._runtime_config = config
+            await self._invalidate_runtime_sessions(changed_fields)
+
+        commit_task = asyncio.create_task(commit())
+        _, cancellation_requested = await await_completion(commit_task)
+        if cancellation_requested:
+            raise asyncio.CancelledError
+
+
+    @staticmethod
+    def _check_runtime_revision(expected: int | None, current: int) -> None:
+        if expected is None:
+            return
+        if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
+            raise RavenError(
+                ErrorCode.INVALID_RUNTIME_CONFIG,
+                "expected_revision must be a non-negative integer.",
+            )
+        if expected != current:
+            raise RavenError(
+                ErrorCode.RUNTIME_CONFIG_CONFLICT,
+                "The runtime configuration changed before this update was applied.",
+                details={
+                    "expected_revision": expected,
+                    "current_revision": current,
+                },
+            )
+
+
+    async def _invalidate_runtime_sessions(self, changed_fields: set[str]) -> None:
+        session_fields = {
+            "retrieval_top_k",
+            "agent_max_iterations",
+            "memory_token_limit",
+            "memory_top_k",
+        }
+        if not changed_fields.intersection(session_fields):
+            return
+        sessions: list[Session] = []
+        with self._session_registry_lock:
+            for conversation_id, session in list(self._sessions.items()):
+                if session.has_active_runs:
+                    self._stale_sessions.add(conversation_id)
+                    continue
+                self._sessions.pop(conversation_id, None)
+                sessions.append(session)
+        results = await asyncio.gather(
+            *(session.close() for session in sessions),
+            return_exceptions=True,
+        )
+        with self._session_registry_lock:
+            self._retired_sessions.update(
+                {
+                    session.conversation_id: session
+                    for session, result in zip(sessions, results)
+                    if isinstance(result, BaseException)
+                }
+            )
+
+
+    def _session_became_idle(self, session: Session) -> None:
+        conversation_id = session.conversation_id
+        with self._session_registry_lock:
+            if conversation_id not in self._stale_sessions:
+                return
+            if self._sessions.get(conversation_id) is not session:
+                self._stale_sessions.discard(conversation_id)
+                return
+            self._sessions.pop(conversation_id, None)
+            self._stale_sessions.discard(conversation_id)
+            self._retired_sessions[conversation_id] = session
+        task = asyncio.create_task(
+            self._retire_session(session),
+            name=f"raven-stale-session-close-{conversation_id}",
+        )
+        self._session_maintenance_tasks.add(task)
+        task.add_done_callback(self._session_maintenance_tasks.discard)
+
+
+    async def _retire_session(self, session: Session) -> None:
+        try:
+            await session.close()
+        except BaseException:
+            return
+        with self._session_registry_lock:
+            if self._retired_sessions.get(session.conversation_id) is session:
+                self._retired_sessions.pop(session.conversation_id, None)
 
 
     async def submit_operation(
@@ -166,12 +387,12 @@ class Raven:
         self,
         *,
         status: OperationStatus | str | None = None,
-        limit: int = DEFAULT_OPERATION_PAGE_SIZE,
+        limit: int | None = None,
         after_operation_id: UUID | str | None = None,
     ) -> list[OperationRecord]:
         return await self.operation_manager.list_operations(
             status=status,
-            limit=limit,
+            limit=self.system_config.operation_page_size if limit is None else limit,
             after_operation_id=after_operation_id,
         )
 
@@ -181,13 +402,13 @@ class Raven:
         operation_id: UUID | str,
         *,
         status: OperationStatus | str | None = None,
-        limit: int = DEFAULT_OPERATION_PAGE_SIZE,
+        limit: int | None = None,
         after_task_id: UUID | str | None = None,
     ) -> list[OperationTaskRecord]:
         operation = await self.operation_manager.get(operation_id)
         return await operation.list_tasks(
             status=status,
-            limit=limit,
+            limit=self.system_config.operation_page_size if limit is None else limit,
             after_task_id=after_task_id,
         )
 
@@ -195,11 +416,11 @@ class Raven:
     async def list_retryable_tasks(
         self,
         *,
-        limit: int = DEFAULT_OPERATION_PAGE_SIZE,
+        limit: int | None = None,
         after_task_id: UUID | str | None = None,
     ) -> list[OperationTaskRecord]:
         return await self.operation_manager.list_retryable_tasks(
-            limit=limit,
+            limit=self.system_config.operation_page_size if limit is None else limit,
             after_task_id=after_task_id,
         )
 
@@ -600,6 +821,13 @@ class Raven:
                 )
 
             try:
+                loaded_runtime_config = await asyncio.to_thread(
+                    RuntimeConfig.load_or_create,
+                    self.paths.runtime_settings_path,
+                    self.system_config,
+                )
+                async with self._runtime_config_lock:
+                    self._runtime_config = loaded_runtime_config
                 await self.operation_manager.recover()
                 await self.knowledge_base.start()
                 await self.conversation_manager.start()
@@ -624,8 +852,17 @@ class Raven:
                 self._closed = True
                 self._started = False
                 with self._session_registry_lock:
-                    sessions = list(self._sessions.values())
+                    sessions = list(
+                        dict.fromkeys(
+                            [
+                                *self._sessions.values(),
+                                *self._retired_sessions.values(),
+                            ]
+                        )
+                    )
                     self._sessions.clear()
+                    self._stale_sessions.clear()
+                    self._retired_sessions.clear()
                 self._close_task = asyncio.create_task(
                     self._close_owned_resources(sessions)
                 )
@@ -660,6 +897,15 @@ class Raven:
             for result in session_results
             if isinstance(result, BaseException)
         )
+        maintenance_results = await asyncio.gather(
+            *tuple(self._session_maintenance_tasks),
+            return_exceptions=True,
+        )
+        failures.extend(
+            ("session maintenance", result)
+            for result in maintenance_results
+            if isinstance(result, BaseException)
+        )
         await attempt("active operations", self.operation_manager.cancel_active())
         if self.knowledge_base.is_started:
             await attempt(
@@ -690,8 +936,14 @@ class Raven:
 
     async def _close_sessions(self) -> None:
         with self._session_registry_lock:
-            sessions = list(self._sessions.values())
+            sessions = list(
+                dict.fromkeys(
+                    [*self._sessions.values(), *self._retired_sessions.values()]
+                )
+            )
             self._sessions.clear()
+            self._stale_sessions.clear()
+            self._retired_sessions.clear()
         results = await asyncio.gather(
             *(session.close() for session in sessions),
             return_exceptions=True,
@@ -817,24 +1069,63 @@ class Raven:
         knowledge_name: str,
         source_path: str | Path,
         *,
-        breakpoint_percentile_threshold: int = 95,
-        buffer_size: int = 1,
-        max_extraction_retries: int = 3,
-        chunk_size: int = 512,
-        chunk_overlap: int = 50,
-        max_source_size_bytes: int = 100 * 1024 * 1024,
-        max_document_pages: int = 1_000,
+        breakpoint_percentile_threshold: int | None = None,
+        buffer_size: int | None = None,
+        max_extraction_retries: int | None = None,
+        chunk_size: int | None = None,
+        chunk_overlap: int | None = None,
+        max_source_size_bytes: int | None = None,
+        max_document_pages: int | None = None,
         operation: Operation | None = None,
     ) -> OperationTask:
         self._ensure_models_loaded()
         assert self.llm is not None
         assert self.embed_model is not None
+        settings = self._runtime_config
+        effective_breakpoint = (
+            settings.breakpoint_percentile_threshold
+            if breakpoint_percentile_threshold is None
+            else breakpoint_percentile_threshold
+        )
+        effective_buffer_size = (
+            settings.buffer_size if buffer_size is None else buffer_size
+        )
+        effective_retries = (
+            settings.max_extraction_retries
+            if max_extraction_retries is None
+            else max_extraction_retries
+        )
+        effective_chunk_size = (
+            settings.chunk_size if chunk_size is None else chunk_size
+        )
+        effective_chunk_overlap = (
+            settings.chunk_overlap if chunk_overlap is None else chunk_overlap
+        )
+        effective_source_limit = (
+            self.system_config.max_source_file_bytes
+            if max_source_size_bytes is None
+            else max_source_size_bytes
+        )
+        effective_page_limit = (
+            self.system_config.max_document_pages
+            if max_document_pages is None
+            else max_document_pages
+        )
+        self._validate_ingestion_overrides(
+            breakpoint_percentile_threshold=effective_breakpoint,
+            buffer_size=effective_buffer_size,
+            max_extraction_retries=effective_retries,
+            chunk_size=effective_chunk_size,
+            chunk_overlap=effective_chunk_overlap,
+            max_source_size_bytes=effective_source_limit,
+            max_document_pages=effective_page_limit,
+        )
         pipeline = IngestionPipeline(
             self.knowledge_base,
             self.operation_manager,
-            breakpoint_percentile_threshold=breakpoint_percentile_threshold,
-            buffer_size=buffer_size,
-            max_extraction_retries=max_extraction_retries,
+            breakpoint_percentile_threshold=effective_breakpoint,
+            buffer_size=effective_buffer_size,
+            max_extraction_retries=effective_retries,
             document_parser=self._document_parser,
         )
         return await pipeline.run(
@@ -842,10 +1133,10 @@ class Raven:
             source_path,
             llm=self.llm,
             embed_model=self.embed_model,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            max_source_size_bytes=max_source_size_bytes,
-            max_document_pages=max_document_pages,
+            chunk_size=effective_chunk_size,
+            chunk_overlap=effective_chunk_overlap,
+            max_source_size_bytes=effective_source_limit,
+            max_document_pages=effective_page_limit,
             operation=operation,
         )
 
@@ -856,7 +1147,7 @@ class Raven:
         user_query: str,
         *,
         knowledge_name: str | None = None,
-        top_k: int = 3,
+        top_k: int | None = None,
         operation: Operation | None = None,
     ) -> OperationTask:
         """Run one retrieval strategy while preserving its operation events."""
@@ -869,6 +1160,9 @@ class Raven:
                 f"Unknown retrieval mode '{mode}'.",
             ) from exc
 
+        effective_top_k = self._runtime_config.retrieval_top_k if top_k is None else top_k
+        self._validate_retrieval_top_k(effective_top_k)
+
         if selected in LOCAL_RETRIEVAL_MODES:
             if not knowledge_name:
                 raise RavenError(
@@ -880,7 +1174,7 @@ class Raven:
             return await pipeline.retrieve_local_context(
                 knowledge_name,
                 user_query,
-                top_k,
+                effective_top_k,
                 operation=operation,
             )
 
@@ -889,7 +1183,7 @@ class Raven:
             pipeline = getattr(self, f"{method_name}_retrieval")
             return await pipeline.retrieve_global_context(
                 user_query,
-                top_k,
+                effective_top_k,
                 operation=operation,
             )
 
@@ -1127,6 +1421,7 @@ class Raven:
     ) -> OperationTask:
         with self._session_registry_lock:
             session = self._sessions.pop(conversation_id, None)
+            self._stale_sessions.discard(conversation_id)
         if session is not None:
             await session.close()
         return await self.conversation_manager.delete(
@@ -1139,16 +1434,37 @@ class Raven:
         self,
         conversation: Conversation,
         *,
-        max_iterations: int = 10,
-        top_k: int = 3,
-        memory_token_limit: int = 4000,
-        memory_top_k: int = 5,
+        max_iterations: int | None = None,
+        top_k: int | None = None,
+        memory_token_limit: int | None = None,
+        memory_top_k: int | None = None,
     ) -> Session:
         """Return the managed session for a conversation object."""
         self._ensure_models_loaded()
         assert self.llm is not None
         assert self.embed_model is not None
         assert self.retrieval_pipelines is not None
+        settings = self._runtime_config
+        effective_max_iterations = (
+            settings.agent_max_iterations
+            if max_iterations is None
+            else max_iterations
+        )
+        effective_top_k = settings.retrieval_top_k if top_k is None else top_k
+        effective_memory_token_limit = (
+            settings.memory_token_limit
+            if memory_token_limit is None
+            else memory_token_limit
+        )
+        effective_memory_top_k = (
+            settings.memory_top_k if memory_top_k is None else memory_top_k
+        )
+        self._validate_session_overrides(
+            max_iterations=effective_max_iterations,
+            top_k=effective_top_k,
+            memory_token_limit=effective_memory_token_limit,
+            memory_top_k=effective_memory_top_k,
+        )
         if not self.conversation_manager.owns(conversation):
             raise RavenError(
                 ErrorCode.FOREIGN_CONVERSATION,
@@ -1168,10 +1484,10 @@ class Raven:
                 elif existing.matches_configuration(
                     llm=self.llm,
                     embed_model=self.embed_model,
-                    max_iterations=max_iterations,
-                    top_k=top_k,
-                    memory_token_limit=memory_token_limit,
-                    memory_top_k=memory_top_k,
+                    max_iterations=effective_max_iterations,
+                    top_k=effective_top_k,
+                    memory_token_limit=effective_memory_token_limit,
+                    memory_top_k=effective_memory_top_k,
                 ):
                     return existing
                 else:
@@ -1187,8 +1503,9 @@ class Raven:
                 retrieval_pipelines=self.retrieval_pipelines,
                 operation_manager=self.operation_manager,
                 reconstructor=self.reconstructor,
-                max_iterations=max_iterations,
-                top_k=top_k,
+                max_iterations=effective_max_iterations,
+                top_k=effective_top_k,
+                max_cached_prompts=self.system_config.prompt_cache_size,
             )
             session = Session(
                 conversation,
@@ -1196,11 +1513,102 @@ class Raven:
                 self.operation_manager,
                 llm=self.llm,
                 embed_model=self.embed_model,
-                memory_token_limit=memory_token_limit,
-                memory_top_k=memory_top_k,
+                memory_token_limit=effective_memory_token_limit,
+                memory_top_k=effective_memory_top_k,
+                on_idle=self._session_became_idle,
             )
             self._sessions[conversation_id] = session
             return session
+
+
+    def _validate_ingestion_overrides(
+        self,
+        *,
+        breakpoint_percentile_threshold: int,
+        buffer_size: int,
+        max_extraction_retries: int,
+        chunk_size: int,
+        chunk_overlap: int,
+        max_source_size_bytes: int,
+        max_document_pages: int,
+    ) -> None:
+        current = self._runtime_config
+        RuntimeConfig(
+            revision=current.revision,
+            breakpoint_percentile_threshold=breakpoint_percentile_threshold,
+            buffer_size=buffer_size,
+            max_extraction_retries=max_extraction_retries,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            retrieval_top_k=current.retrieval_top_k,
+            agent_max_iterations=current.agent_max_iterations,
+            memory_token_limit=current.memory_token_limit,
+            memory_top_k=current.memory_top_k,
+        ).validate_against(self.system_config)
+        self._validate_system_bounded_int(
+            max_source_size_bytes,
+            "max_source_size_bytes",
+            self.system_config.max_source_file_bytes,
+        )
+        self._validate_system_bounded_int(
+            max_document_pages,
+            "max_document_pages",
+            self.system_config.max_document_pages,
+        )
+
+
+    def _validate_retrieval_top_k(self, top_k: int) -> None:
+        self._validate_system_bounded_int(
+            top_k,
+            "top_k",
+            self.system_config.max_retrieval_top_k,
+        )
+
+
+    def _validate_session_overrides(
+        self,
+        *,
+        max_iterations: int,
+        top_k: int,
+        memory_token_limit: int,
+        memory_top_k: int,
+    ) -> None:
+        self._validate_retrieval_top_k(top_k)
+        self._validate_system_bounded_int(
+            max_iterations,
+            "max_iterations",
+            self.system_config.max_agent_iterations,
+        )
+        for field_name, value in (
+            ("memory_token_limit", memory_token_limit),
+            ("memory_top_k", memory_top_k),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise RavenError(
+                    ErrorCode.INVALID_RUNTIME_CONFIG,
+                    f"{field_name} must be a positive integer.",
+                    details={"field": field_name},
+                )
+
+
+    @staticmethod
+    def _validate_system_bounded_int(
+        value: int,
+        field_name: str,
+        maximum: int,
+    ) -> None:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise RavenError(
+                ErrorCode.INVALID_RUNTIME_CONFIG,
+                f"{field_name} must be a positive integer.",
+                details={"field": field_name},
+            )
+        if value > maximum:
+            raise RavenError(
+                ErrorCode.INVALID_RUNTIME_CONFIG,
+                f"{field_name} cannot exceed the system maximum of {maximum}.",
+                details={"field": field_name, "maximum": maximum},
+            )
 
 
     def _ensure_models_loaded(self) -> None:
