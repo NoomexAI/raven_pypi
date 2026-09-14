@@ -383,6 +383,22 @@ class Raven:
         return await self.operation_manager.get(operation_id)
 
 
+    async def get_operation_record(
+        self,
+        operation_id: UUID | str,
+    ) -> OperationRecord:
+        return await self.operation_manager.get_record(operation_id)
+
+
+    async def get_operation_task(
+        self,
+        operation_id: UUID | str,
+        task_id: UUID | str,
+    ) -> OperationTaskRecord:
+        operation = await self.operation_manager.get(operation_id)
+        return await operation.get_task(task_id)
+
+
     async def list_operations(
         self,
         *,
@@ -569,6 +585,20 @@ class Raven:
             after_event_id=after_event_id,
         ):
             yield event
+
+
+    async def read_operation_events(
+        self,
+        operation_id: UUID | str,
+        *,
+        after_event_id: int = 0,
+        limit: int | None = None,
+    ) -> list[Event]:
+        return await self.operation_manager.read_events(
+            operation_id,
+            after_event_id=after_event_id,
+            limit=limit,
+        )
 
 
     async def check_ollama_connection(

@@ -621,6 +621,16 @@ class Operation:
             yield event
 
 
+    async def read_events(
+        self,
+        after_event_id: int = 0,
+        *,
+        limit: int | None = None,
+    ) -> list[Event]:
+        """Read a bounded event page without opening a live reader."""
+        return await self._stream.read(after_event_id, limit=limit)
+
+
     async def _run(self, worker: OperationWorker) -> None:
         try:
             await self._mark_running()
@@ -633,6 +643,12 @@ class Operation:
         except asyncio.CancelledError as exc:
             await self._cancel_children()
             try:
+                root_handle = next(
+                    (task for task in self._child_tasks.values() if task.is_root),
+                    None,
+                )
+                if root_handle is not None and not root_handle.is_finished:
+                    await root_handle._finalize_cancelled(exc)
                 await self._finish_cancelled()
             except BaseException as finish_error:
                 self._set_local_terminal_failure(finish_error)
@@ -1467,6 +1483,20 @@ class OperationManager:
         return await self._remember_operation(operation)
 
 
+    async def get_record(self, operation_id: UUID | str) -> OperationRecord:
+        """Load one durable operation record without replaying its events."""
+        self._ensure_open()
+        await self.start()
+        parsed_id = self._parse_operation_id(operation_id)
+        stored = await self._store.read_operation(str(parsed_id))
+        if stored is None:
+            raise RavenError(
+                ErrorCode.OPERATION_NOT_FOUND,
+                f"Operation '{parsed_id}' was not found.",
+            )
+        return OperationRecord.model_validate(stored)
+
+
     async def wait(self, operation_id: UUID | str) -> Operation:
         operation = await self.get(operation_id)
         return await operation.wait()
@@ -1486,6 +1516,20 @@ class OperationManager:
         operation = await self.get(operation_id)
         async for event in operation.events(after_event_id=after_event_id):
             yield event
+
+
+    async def read_events(
+        self,
+        operation_id: UUID | str,
+        *,
+        after_event_id: int = 0,
+        limit: int | None = None,
+    ) -> list[Event]:
+        operation = await self.get(operation_id)
+        return await operation.read_events(
+            after_event_id=after_event_id,
+            limit=limit,
+        )
 
 
     async def list_operations(
