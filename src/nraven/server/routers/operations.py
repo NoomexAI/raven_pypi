@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 
 from ...core.errors import ErrorCode, RavenError
 from ...core.events import Event
-from ...core.operations import OperationStatus, OperationTask
+from ...core.operations import OperationStatus
 from ...h_api.raven import Raven
 from ..dependencies import lease_raven
 from ..schemas import (
@@ -238,7 +238,7 @@ async def retry_operation_task(
     raven: Annotated[Raven, Depends(lease_raven)],
 ) -> OperationTaskReference:
     task = await raven.retry_task(operation_id, task_id)
-    return _task_reference(task)
+    return OperationTaskReference.from_task(task)
 
 
 def _page_size(raven: Raven, requested: int | None) -> int:
@@ -263,17 +263,6 @@ def _event_cursor(value: str | None) -> int:
             "Last-Event-ID must be a non-negative integer.",
         )
     return int(value)
-
-
-def _task_reference(task: OperationTask) -> OperationTaskReference:
-    return OperationTaskReference(
-        operation_id=task.operation_id,
-        task_id=task.task_id,
-        status=task.status,
-        events_url=f"/api/v1/operations/{task.operation_id}/events",
-        retry_of_operation_id=task.retry_of_operation_id,
-        retry_of_task_id=task.retry_of_task_id,
-    )
 
 
 async def _prepend_event(

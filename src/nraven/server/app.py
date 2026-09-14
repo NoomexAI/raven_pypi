@@ -11,7 +11,9 @@ from fastapi import FastAPI
 from ..core.config import DEFAULT_USER_ID, SystemConfig, load_system_config
 from .errors import install_error_handling
 from .routers.health import router as health_router
+from .routers.models import router as models_router
 from .routers.operations import router as operations_router
+from .routers.runtime import router as runtime_router
 from .runtime import UserRuntimeRegistry
 
 
@@ -44,4 +46,6 @@ def create_app(
     install_error_handling(app)
     app.include_router(health_router)
     app.include_router(operations_router)
+    app.include_router(runtime_router)
+    app.include_router(models_router)
     return app
