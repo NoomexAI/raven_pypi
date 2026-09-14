@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -479,7 +479,7 @@ class OllamaManager:
     async def _keyed_lock(
         registry: dict[str, _KeyedLock],
         key: str,
-    ) -> AsyncIterator[None]:
+    ) -> AsyncGenerator[None, None]:
         entry = registry.get(key)
         if entry is None:
             entry = _KeyedLock()

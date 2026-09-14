@@ -16,19 +16,19 @@ import asyncio
 import json
 from uuid import uuid4
 
-from raven.chat_session import ChatSession
-from raven.conversation_manager import ConversationManager
-from raven.events import EventBus, EventType
-from raven.knowledge import KnowledgeBase
-from raven.model import DEFAULT_BASE_MODEL, DEFAULT_EMBED_MODEL, ModelManager
-from raven.pipeline import (
+from nraven.chat_session import ChatSession
+from nraven.conversation_manager import ConversationManager
+from nraven.events import EventBus, EventType
+from nraven.knowledge import KnowledgeBase
+from nraven.model import DEFAULT_BASE_MODEL, DEFAULT_EMBED_MODEL, ModelManager
+from nraven.pipeline import (
     AgreementBasedRetrievalPipeline,
     EmbeddedRetrievalPipeline,
     HierarchicalRetrievalPipeline,
     VectorConditionedRetrievalPipeline,
     LOCAL_EMBEDDED_RETRIEVAL,
 )
-from raven.reconstructor import Reconstructor
+from nraven.reconstructor import Reconstructor
 
 KNOWLEDGE_NAME = "engineering"
 

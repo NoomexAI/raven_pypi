@@ -7,9 +7,9 @@ already exists raises ValueError.
 
 import asyncio
 
-from raven.events import EventBus
-from raven.knowledge import KnowledgeBase
-from raven.model import DEFAULT_EMBED_MODEL, ModelManager
+from nraven.events import EventBus
+from nraven.knowledge import KnowledgeBase
+from nraven.model import DEFAULT_EMBED_MODEL, ModelManager
 
 KNOWLEDGE_NAME = "clinical"
 

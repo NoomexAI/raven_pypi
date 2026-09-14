@@ -48,7 +48,7 @@ class OperationStatus(StrEnum):
 class OperationType(StrEnum):
     """Stable names for operations provided by Raven's built-in components."""
 
-    RAVEN_LOAD_MODELS = "raven.load_models"
+    RAVEN_LOAD_MODELS = "nraven.load_models"
     RUNTIME_SETTINGS_UPDATE = "runtime.settings.update"
     RUNTIME_SETTINGS_RESET = "runtime.settings.reset"
 
@@ -276,7 +276,7 @@ _TERMINAL_TASK_EVENT_TYPES = frozenset(
     }
 )
 _CURRENT_TASK: ContextVar[tuple[UUID, str] | None] = ContextVar(
-    "raven_current_operation_task",
+    "nraven_current_operation_task",
     default=None,
 )
 
@@ -484,7 +484,7 @@ class Operation:
                 else:
                     self._task = asyncio.create_task(
                         self._run(task._run_root),
-                        name=f"raven-operation-{self.operation_id}",
+                        name=f"nraven-operation-{self.operation_id}",
                     )
                     return task
 
@@ -1129,7 +1129,7 @@ class OperationTask:
             raise asyncio.CancelledError
         self._task = asyncio.create_task(
             self._run(),
-            name=f"raven-operation-task-{self.task_id}",
+            name=f"nraven-operation-task-{self.task_id}",
         )
 
 
@@ -1819,7 +1819,7 @@ class OperationSyncService:
             return
         self._task = asyncio.create_task(
             self._run(),
-            name="raven-operation-sync",
+            name="nraven-operation-sync",
         )
 
 

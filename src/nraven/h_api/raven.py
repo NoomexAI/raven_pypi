@@ -332,7 +332,7 @@ class Raven:
             self._retired_sessions[conversation_id] = session
         task = asyncio.create_task(
             self._retire_session(session),
-            name=f"raven-stale-session-close-{conversation_id}",
+            name=f"nraven-stale-session-close-{conversation_id}",
         )
         self._session_maintenance_tasks.add(task)
         task.add_done_callback(self._session_maintenance_tasks.discard)

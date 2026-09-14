@@ -86,6 +86,9 @@ class ErrorCode(StrEnum):
     INVALID_RUNTIME_CONFIG = "invalid_runtime_config"
     UNSUPPORTED_RUNTIME_CONFIG_VERSION = "unsupported_runtime_config_version"
     RUNTIME_CONFIG_CONFLICT = "runtime_config_conflict"
+    INVALID_USER_ID = "invalid_user_id"
+    RUNTIME_REGISTRY_CLOSED = "runtime_registry_closed"
+    RUNTIME_CAPACITY_EXCEEDED = "runtime_capacity_exceeded"
 
     EVENT_STREAM_CLOSED = "event_stream_closed"
     EVENT_STREAM_FINISHED = "event_stream_finished"

@@ -24,11 +24,11 @@ from typing import Any, AsyncIterator
 
 import httpx
 
-from raven.events import EventType
-from raven.high_level_api import Raven
-from raven.local_ollama import LocalOllama
-from raven.pipeline import GLOBAL_EMBEDDED_RETRIEVAL, LOCAL_EMBEDDED_RETRIEVAL
-from raven.server import ServerSettings, create_app
+from nraven.events import EventType
+from nraven.high_level_api import Raven
+from nraven.local_ollama import LocalOllama
+from nraven.pipeline import GLOBAL_EMBEDDED_RETRIEVAL, LOCAL_EMBEDDED_RETRIEVAL
+from nraven.server import ServerSettings, create_app
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

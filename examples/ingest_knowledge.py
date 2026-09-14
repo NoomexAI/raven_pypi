@@ -11,10 +11,10 @@ events an ingest task already published before we subscribed.
 import asyncio
 from pathlib import Path
 
-from raven.events import EventBus, EventType
-from raven.knowledge import KnowledgeBase
-from raven.model import DEFAULT_BASE_MODEL, DEFAULT_EMBED_MODEL, ModelManager
-from raven.pipeline import IngestionPipeline
+from nraven.events import EventBus, EventType
+from nraven.knowledge import KnowledgeBase
+from nraven.model import DEFAULT_BASE_MODEL, DEFAULT_EMBED_MODEL, ModelManager
+from nraven.pipeline import IngestionPipeline
 
 KNOWLEDGE_NAME = "story"
 FILE_PATH = Path(__file__).resolve().parent.parent / "test_docs" / "short_story.txt"

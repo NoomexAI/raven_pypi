@@ -10,6 +10,14 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE.txt"]
 requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries",
+]
 dependencies = [
     "llama-index-core>=0.14,<0.15",
     "llama-index-llms-ollama>=0.10,<0.11",
@@ -39,23 +47,18 @@ dev = [
     "pytest-asyncio>=0.23",
     "httpx>=0.27",
 ]
-classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Developers",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "Topic :: Software Development :: Libraries",
-]
 
 [project.urls]
 Homepage = "https://github.com/NoomexAI/raven_pypi"
 Repository = "https://github.com/NoomexAI/raven_pypi"
 Issues = "https://github.com/NoomexAI/raven_pypi/issues"
 
+[project.scripts]
+nraven = "nraven.server.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["raven*"]
+include = ["nraven*"]
 
 [tool.ruff]
 target-version = "py311"

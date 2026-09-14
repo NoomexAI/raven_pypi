@@ -17,8 +17,8 @@ import asyncio
 import sys
 from pathlib import Path
 
-from raven import Raven
-from raven.events import EventType
+from nraven import Raven
+from nraven.events import EventType
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")

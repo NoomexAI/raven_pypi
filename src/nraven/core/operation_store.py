@@ -52,7 +52,7 @@ class SQLiteOperationStore:
         self._ownership_handle: BinaryIO | None = None
         self._executor = ThreadPoolExecutor(
             max_workers=1,
-            thread_name_prefix="raven-operation-store",
+            thread_name_prefix="nraven-operation-store",
         )
         self._lock = asyncio.Lock()
         self._start_lock = asyncio.Lock()

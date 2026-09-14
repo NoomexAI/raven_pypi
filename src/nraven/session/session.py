@@ -251,7 +251,7 @@ class Session:
                 active_runs = list(self._active_runs)
                 self._close_task = asyncio.create_task(
                     self._finish_close(active_runs),
-                    name=f"raven-session-close-{self.conversation_id}",
+                    name=f"nraven-session-close-{self.conversation_id}",
                 )
             close_task = self._close_task
 
