@@ -128,7 +128,7 @@ def _status_for_raven_error(code: ErrorCode) -> int:
         return HTTPStatus.CONFLICT
     if code in _UNAVAILABLE_CODES:
         return HTTPStatus.SERVICE_UNAVAILABLE
-    if code == ErrorCode.EVENT_HISTORY_GAP:
+    if code in {ErrorCode.EVENT_HISTORY_GAP, ErrorCode.UPLOAD_RETRY_EXPIRED}:
         return HTTPStatus.GONE
     if code in {ErrorCode.OPERATION_CANCELLED, ErrorCode.OPERATION_INTERRUPTED}:
         return HTTPStatus.CONFLICT

@@ -37,6 +37,7 @@ from ..core.operations import (
     OperationWorker,
     TaskWorker,
 )
+from ..core.upload_retention import check_upload_retry
 from ..data_management.conversation_manager import Conversation, ConversationManager
 from ..data_management.discovery import DiscoveryIssue
 from ..data_management.knowledge_base import Knowledge, KnowledgeBase
@@ -499,6 +500,11 @@ class Raven:
                     ErrorCode.INVALID_RETRY_INPUT,
                     "The ingestion retry input is invalid.",
                 ) from exc
+            await asyncio.to_thread(
+                check_upload_retry,
+                Path(retry_input.source_path),
+                self.paths.uploads_dir,
+            )
             pipeline = IngestionPipeline(
                 self.knowledge_base,
                 self.operation_manager,
@@ -1013,6 +1019,15 @@ class Raven:
         return await self.knowledge_base.list()
 
 
+    async def list_knowledges_page(
+        self,
+        *,
+        limit: int,
+        after_name: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return await self.knowledge_base.list_page(limit, after_name)
+
+
     async def update_knowledge(
         self,
         name: str,
@@ -1032,6 +1047,21 @@ class Raven:
         return await asyncio.to_thread(knowledge.list_files)
 
 
+    async def list_knowledge_files_page(
+        self,
+        knowledge_name: str,
+        *,
+        limit: int,
+        after_file_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        knowledge = self.knowledge_base.get(knowledge_name)
+        return await asyncio.to_thread(
+            knowledge.list_files_page,
+            limit,
+            after_file_id,
+        )
+
+
     async def list_file_sections(
         self,
         knowledge_name: str,
@@ -1039,6 +1069,32 @@ class Raven:
     ) -> list[dict[str, Any]]:
         knowledge = self.knowledge_base.get(knowledge_name)
         sections = await asyncio.to_thread(knowledge.list_sections, file_name)
+        if not sections and not await asyncio.to_thread(
+            knowledge.file_exists,
+            file_name,
+        ):
+            raise RavenError(
+                ErrorCode.FILE_NOT_FOUND,
+                f"File '{file_name}' does not exist in knowledge '{knowledge_name}'.",
+            )
+        return sections
+
+
+    async def list_file_sections_page(
+        self,
+        knowledge_name: str,
+        file_name: str,
+        *,
+        limit: int,
+        after_section_index: int = 0,
+    ) -> list[dict[str, Any]]:
+        knowledge = self.knowledge_base.get(knowledge_name)
+        sections = await asyncio.to_thread(
+            knowledge.list_sections_page,
+            file_name,
+            limit,
+            after_section_index,
+        )
         if not sections and not await asyncio.to_thread(
             knowledge.file_exists,
             file_name,
@@ -1072,6 +1128,11 @@ class Raven:
     async def count_knowledge_vectors(self, knowledge_name: str) -> int:
         knowledge = self.knowledge_base.get(knowledge_name)
         return await knowledge.count()
+
+
+    async def count_knowledge_files(self, knowledge_name: str) -> int:
+        knowledge = self.knowledge_base.get(knowledge_name)
+        return await asyncio.to_thread(knowledge.file_count)
 
 
     async def delete_knowledge_file(

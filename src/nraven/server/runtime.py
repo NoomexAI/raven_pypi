@@ -14,6 +14,8 @@ from uuid import UUID
 from ..core.async_utils import await_completion
 from ..core.config import SystemConfig
 from ..core.errors import ErrorCode, RavenError
+from ..core.operations import OperationTask
+from ..core.upload_retention import cleanup_expired_uploads, remove_upload_source
 from ..h_api.raven import Raven
 
 
@@ -48,6 +50,7 @@ class UserRuntimeRegistry:
         self._initializing: dict[UUID, asyncio.Task[Raven]] = {}
         self._lock = asyncio.Lock()
         self._maintenance_task: asyncio.Task[None] | None = None
+        self._upload_monitors: dict[asyncio.Task[None], Path] = {}
         self._started = False
         self._closed = False
 
@@ -113,6 +116,41 @@ class UserRuntimeRegistry:
         return len(selected)
 
 
+    def track_upload(
+        self,
+        user_id: UUID,
+        task: OperationTask,
+        source: Path,
+        uploads_dir: Path,
+    ) -> None:
+        """Own outcome cleanup independently of the submitting HTTP request."""
+        monitor = asyncio.create_task(
+            self._observe_upload(user_id, task, source, uploads_dir),
+            name=f"nraven-upload-{task.task_id}",
+        )
+        self._upload_monitors[monitor] = source.resolve()
+        monitor.add_done_callback(lambda finished: self._upload_monitors.pop(finished, None))
+
+
+    async def _observe_upload(
+        self,
+        user_id: UUID,
+        task: OperationTask,
+        source: Path,
+        uploads_dir: Path,
+    ) -> None:
+        try:
+            async with self.lease(user_id):
+                try:
+                    await task.result()
+                except (Exception, asyncio.CancelledError):
+                    return
+                await asyncio.to_thread(remove_upload_source, source, uploads_dir)
+        except (Exception, asyncio.CancelledError):
+            # Preserve the source for a bounded retry if monitoring is interrupted.
+            return
+
+
     async def close(self) -> None:
         """Stop maintenance and close every runtime owned or being initialized."""
         async with self._lock:
@@ -126,10 +164,16 @@ class UserRuntimeRegistry:
             self._initializing.clear()
             runtimes = [entry.raven for entry in self._entries.values()]
             self._entries.clear()
+            monitors = tuple(self._upload_monitors)
+            self._upload_monitors.clear()
 
         if maintenance is not None:
             maintenance.cancel()
             await asyncio.gather(maintenance, return_exceptions=True)
+
+        for monitor in monitors:
+            monitor.cancel()
+        await asyncio.gather(*monitors, return_exceptions=True)
 
         initialized = await asyncio.gather(
             *initialization_tasks,
@@ -252,13 +296,36 @@ class UserRuntimeRegistry:
         interval = min(
             60.0,
             max(1.0, self.system_config.runtime_idle_seconds / 2),
+            self.system_config.operation_cleanup_interval_seconds,
         )
         try:
             while True:
                 await asyncio.sleep(interval)
                 await self.evict_idle()
+                await self.cleanup_uploads()
         except asyncio.CancelledError:
             return
+
+
+    async def cleanup_uploads(self) -> int:
+        """Sweep expired private sources across users without opening runtimes."""
+        active = frozenset(self._upload_monitors.values())
+        return await asyncio.to_thread(self._cleanup_uploads_sync, active)
+
+
+    def _cleanup_uploads_sync(self, active: frozenset[Path]) -> int:
+        total = 0
+        if not self.raven_home.is_dir():
+            return 0
+        for directory in self.raven_home.iterdir():
+            if not directory.is_dir():
+                continue
+            try:
+                UUID(directory.name)
+            except ValueError:
+                continue
+            total += cleanup_expired_uploads(directory / "temp" / "uploads", active)
+        return total
 
 
     async def _close_runtimes(self, runtimes: list[Raven]) -> None:

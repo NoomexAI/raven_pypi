@@ -182,6 +182,21 @@ class _KnowledgeFileStore:
         return row is not None
 
 
+    def file_count(self) -> int:
+        with self._lock:
+            row = self._require_connection().execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM files AS f
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM pending_file_deletions AS p
+                    WHERE p.file_id = f.file_id
+                )
+                """
+            ).fetchone()
+        return int(row["total"])
+
+
     def list_files(self) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._require_connection().execute(
@@ -196,6 +211,44 @@ class _KnowledgeFileStore:
                 )
                 ORDER BY rowid
                 """
+            ).fetchall()
+        return [self._file_from_row(row) for row in rows]
+
+
+    def list_files_page(
+        self,
+        limit: int,
+        after_file_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Read one bounded file page in stable insertion order."""
+        with self._lock:
+            connection = self._require_connection()
+            cursor_rowid = 0
+            if after_file_id is not None:
+                cursor = connection.execute(
+                    "SELECT rowid FROM files WHERE file_id = ?",
+                    (after_file_id,),
+                ).fetchone()
+                if cursor is None:
+                    raise RavenError(
+                        ErrorCode.FILE_NOT_FOUND,
+                        f"File cursor '{after_file_id}' does not exist.",
+                    )
+                cursor_rowid = int(cursor["rowid"])
+            rows = connection.execute(
+                """
+                SELECT f.file_id, f.file_name, f.section_count, f.chunk_count,
+                       f.ingested_at, f.navigation_type
+                FROM files AS f
+                WHERE f.rowid > ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM pending_file_deletions AS p
+                      WHERE p.file_id = f.file_id
+                  )
+                ORDER BY f.rowid
+                LIMIT ?
+                """,
+                (cursor_rowid, limit),
             ).fetchall()
         return [self._file_from_row(row) for row in rows]
 
@@ -230,6 +283,32 @@ class _KnowledgeFileStore:
                 ORDER BY s.section_index
                 """,
                 (file_name,),
+            ).fetchall()
+        return [self._section_from_row(row) for row in rows]
+
+
+    def list_sections_page(
+        self,
+        file_name: str,
+        limit: int,
+        after_section_index: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Read one bounded section page in document order."""
+        with self._lock:
+            rows = self._require_connection().execute(
+                """
+                SELECT s.*, f.file_name
+                FROM sections AS s
+                JOIN files AS f ON f.file_id = s.file_id
+                WHERE f.file_name = ? AND s.section_index > ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM pending_file_deletions AS p
+                      WHERE p.file_id = f.file_id
+                  )
+                ORDER BY s.section_index
+                LIMIT ?
+                """,
+                (file_name, after_section_index, limit),
             ).fetchall()
         return [self._section_from_row(row) for row in rows]
 
@@ -777,12 +856,38 @@ class Knowledge:
         return self._read_file_store("file_exists", file_name)
 
 
+    def file_count(self) -> int:
+        return self._read_file_store("file_count")
+
+
     def list_files(self) -> list[dict[str, Any]]:
         return self._read_file_store("list_files")
 
 
+    def list_files_page(
+        self,
+        limit: int,
+        after_file_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._read_file_store("list_files_page", limit, after_file_id)
+
+
     def list_sections(self, file_name: str) -> list[dict[str, Any]]:
         return self._read_file_store("list_sections", file_name)
+
+
+    def list_sections_page(
+        self,
+        file_name: str,
+        limit: int,
+        after_section_index: int = 0,
+    ) -> list[dict[str, Any]]:
+        return self._read_file_store(
+            "list_sections_page",
+            file_name,
+            limit,
+            after_section_index,
+        )
 
 
     def get_section(self, section_id: str) -> dict[str, Any] | None:
@@ -2121,6 +2226,33 @@ class KnowledgeBase:
                 "created_at": knowledge.meta.get("created_at"),
             }
             for knowledge in tuple(self._knowledges.values())
+        ]
+
+
+    async def list_page(
+        self,
+        limit: int,
+        after_name: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Count only knowledges selected for a bounded name-ordered page."""
+        self._ensure_started()
+        names = sorted(self._knowledges)
+        if after_name is not None:
+            if after_name not in self._knowledges:
+                raise RavenError(
+                    ErrorCode.KNOWLEDGE_NOT_FOUND,
+                    f"Knowledge cursor '{after_name}' does not exist.",
+                )
+            names = [name for name in names if name > after_name]
+        selected = names[:limit]
+        return [
+            {
+                "name": name,
+                "user_summary": self._knowledges[name].get_summary(),
+                "count": await self._knowledges[name].count(),
+                "created_at": self._knowledges[name].meta.get("created_at"),
+            }
+            for name in selected
         ]
 
 

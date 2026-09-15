@@ -43,6 +43,7 @@ class SystemConfig:
     log_level: str = "info"
     operation_sync_interval_seconds: float = OPERATION_SYNC_INTERVAL_SECONDS
     operation_retention_seconds: float = 86_400.0
+    upload_retry_retention_seconds: float = 86_400.0
     operation_cleanup_interval_seconds: float = 300.0
     operation_cleanup_batch_size: int = DEFAULT_OPERATION_CLEANUP_BATCH_SIZE
     event_replay_page_size: int = DEFAULT_EVENT_REPLAY_PAGE_SIZE
@@ -104,6 +105,11 @@ class SystemConfig:
         _require_nonnegative_number(
             self.operation_retention_seconds,
             "operation_retention_seconds",
+            ErrorCode.INVALID_SYSTEM_CONFIG,
+        )
+        _require_positive_number(
+            self.upload_retry_retention_seconds,
+            "upload_retry_retention_seconds",
             ErrorCode.INVALID_SYSTEM_CONFIG,
         )
 

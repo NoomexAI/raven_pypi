@@ -229,6 +229,142 @@ class OllamaModelInspectionResponse(BaseModel):
 
 
 
+class KnowledgeCreateRequest(BaseModel):
+    """Create a knowledge database with a user-facing summary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1)
+    user_summary: str = ""
+
+
+
+
+class KnowledgeUpdateRequest(BaseModel):
+    """Replace a knowledge database's user-facing summary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_summary: str
+
+
+
+
+class IngestPathRequest(BaseModel):
+    """An administrator-trusted local source path; browser clients use uploads."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_path: str = Field(min_length=1)
+
+
+
+
+class KnowledgeDetailsResponse(BaseModel):
+    """Persisted metadata of one knowledge database."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int
+    name: str
+    created_at: datetime
+    user_summary: str
+
+
+
+
+class KnowledgeSummaryResponse(BaseModel):
+    """Bounded list representation of one knowledge database."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    user_summary: str
+    count: int = Field(ge=0)
+    created_at: datetime
+
+
+
+
+class KnowledgePageResponse(BaseModel):
+    """One bounded page of knowledge summaries."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[KnowledgeSummaryResponse]
+    next_cursor: str | None = None
+
+
+
+
+class KnowledgeFileResponse(BaseModel):
+    """Metadata of an ingested file, including file-level navigation type."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    file_id: str
+    file_name: str
+    section_count: int = Field(ge=0)
+    chunk_count: int = Field(ge=0)
+    ingested_at: datetime
+    navigation_type: str
+
+
+
+
+class KnowledgeFilePageResponse(BaseModel):
+    """One bounded page of files belonging to a knowledge database."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[KnowledgeFileResponse]
+    next_cursor: str | None = None
+
+
+
+
+class KnowledgeSectionResponse(BaseModel):
+    """Full stored section evidence and provenance metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    section_id: str
+    file_id: str
+    file_name: str
+    section_index: int = Field(ge=1)
+    summary: str
+    keywords: list[str]
+    conditions: list[str]
+    definitions: list[str]
+    raw_content: str
+    source_element_ids: list[str]
+    source_range: list[int] | None
+
+
+
+
+class KnowledgeSectionsResponse(BaseModel):
+    """Sections of one named file."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[KnowledgeSectionResponse]
+    next_cursor: int | None = None
+
+
+
+
+class KnowledgeStatsResponse(BaseModel):
+    """Vector and file counts for a knowledge database."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    vector_count: int = Field(ge=0)
+    file_count: int = Field(ge=0)
+
+
+
+
 class ErrorBody(BaseModel):
     """Machine-readable error information safe for API consumers."""
 

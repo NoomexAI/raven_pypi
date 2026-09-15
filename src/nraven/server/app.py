@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from ..core.config import DEFAULT_USER_ID, SystemConfig, load_system_config
 from .errors import install_error_handling
 from .routers.health import router as health_router
+from .routers.knowledges import router as knowledges_router
 from .routers.models import router as models_router
 from .routers.operations import router as operations_router
 from .routers.runtime import router as runtime_router
@@ -29,6 +30,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await registry.start()
+        await registry.cleanup_uploads()
         try:
             yield
         finally:
@@ -48,4 +50,5 @@ def create_app(
     app.include_router(operations_router)
     app.include_router(runtime_router)
     app.include_router(models_router)
+    app.include_router(knowledges_router)
     return app

@@ -5,17 +5,18 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncGenerator, AsyncIterator
+from pathlib import Path
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Query, status
+from fastapi import APIRouter, Depends, Header, Query, Request, status
 from fastapi.responses import StreamingResponse
 
 from ...core.errors import ErrorCode, RavenError
 from ...core.events import Event
-from ...core.operations import OperationStatus
+from ...core.operations import OperationStatus, OperationType
 from ...h_api.raven import Raven
-from ..dependencies import lease_raven
+from ..dependencies import get_runtime_registry, lease_raven, resolve_user_id
 from ..schemas import (
     ErrorResponse,
     OperationPageResponse,
@@ -236,8 +237,22 @@ async def retry_operation_task(
     operation_id: UUID,
     task_id: UUID,
     raven: Annotated[Raven, Depends(lease_raven)],
+    request: Request,
 ) -> OperationTaskReference:
+    failed = await raven.get_operation_task(operation_id, task_id)
     task = await raven.retry_task(operation_id, task_id)
+    if failed.name == OperationType.INGESTION_RUN.value:
+        source_value = (failed.retry_input or {}).get("source_path")
+        if isinstance(source_value, str):
+            source = Path(source_value).resolve()
+            root = (raven.paths.uploads_dir / "browser").resolve()
+            if source.is_relative_to(root):
+                get_runtime_registry(request).track_upload(
+                    resolve_user_id(request),
+                    task,
+                    source,
+                    raven.paths.uploads_dir,
+                )
     return OperationTaskReference.from_task(task)
 
 
