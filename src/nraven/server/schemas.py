@@ -122,8 +122,8 @@ class ModelSpecRequest(BaseModel):
 
 
 
-class ModelLoadRequest(BaseModel):
-    """LLM and embedding model pair loaded into one Raven runtime."""
+class ModelConfigureRequest(BaseModel):
+    """LLM and embedding model pair configured for one Raven runtime."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -132,7 +132,7 @@ class ModelLoadRequest(BaseModel):
 
 
     @model_validator(mode="after")
-    def validate_roles(self) -> "ModelLoadRequest":
+    def validate_roles(self) -> "ModelConfigureRequest":
         if self.llm.role != ModelRole.LLM:
             raise ValueError("llm must use role='llm'")
         if self.embedding.role != ModelRole.EMBEDDING:
@@ -157,14 +157,6 @@ class OllamaModelRequest(BaseModel):
         if not value:
             raise ValueError("model cannot be empty")
         return value
-
-
-
-
-class OllamaModelUnloadRequest(OllamaModelRequest):
-    """Ollama model and adapter role to unload from memory."""
-
-    role: ModelRole
 
 
 

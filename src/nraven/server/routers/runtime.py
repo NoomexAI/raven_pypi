@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
 
@@ -17,7 +17,7 @@ from ..schemas import (
 
 
 router = APIRouter(prefix="/api/v1/runtime", tags=["runtime"])
-_ERROR_RESPONSES = {
+_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {"model": ErrorResponse},
     422: {"model": ErrorResponse},
     503: {"model": ErrorResponse},

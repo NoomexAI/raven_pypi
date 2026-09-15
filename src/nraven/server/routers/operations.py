@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncGenerator, AsyncIterator
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Query, status
@@ -28,7 +28,7 @@ from ..schemas import (
 
 
 router = APIRouter(tags=["operations"])
-_ERROR_RESPONSES = {
+_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {"model": ErrorResponse},
     404: {"model": ErrorResponse},
     409: {"model": ErrorResponse},
@@ -282,6 +282,11 @@ async def _empty_events() -> AsyncGenerator[Event, None]:
         yield event
 
 
+async def _next_event(iterator: AsyncIterator[Event]) -> Event:
+    """Give asyncio a coroutine instead of an arbitrary awaitable."""
+    return await anext(iterator)
+
+
 async def _sse_frames(
     events: AsyncIterator[Event],
     *,
@@ -292,7 +297,7 @@ async def _sse_frames(
     try:
         while True:
             if pending is None:
-                pending = asyncio.create_task(anext(iterator))
+                pending = asyncio.create_task(_next_event(iterator))
             done, _pending = await asyncio.wait(
                 {pending},
                 timeout=heartbeat_interval,
@@ -316,9 +321,8 @@ async def _sse_frames(
             if not pending.done():
                 pending.cancel()
             await asyncio.gather(pending, return_exceptions=True)
-        close = getattr(iterator, "aclose", None)
-        if callable(close):
-            await close()
+        if isinstance(iterator, AsyncGenerator):
+            await iterator.aclose()
 
 
 def _serialize_sse_event(event: Event) -> str:

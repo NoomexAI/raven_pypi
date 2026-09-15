@@ -1,4 +1,4 @@
-"""Provider-neutral model loading and Ollama management endpoints."""
+"""Provider-neutral model configuration and Ollama management endpoints."""
 
 from __future__ import annotations
 
@@ -7,24 +7,23 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, status
 
 from ...h_api.raven import Raven
-from ...providers import ModelRole
 from ..dependencies import lease_raven
 from ..schemas import (
     ErrorResponse,
-    ModelLoadRequest,
+    ModelConfigureRequest,
     OllamaModelDetailsResponse,
     OllamaModelInspectionResponse,
     OllamaModelRequest,
     OllamaModelsResponse,
     OllamaModelResponse,
-    OllamaModelUnloadRequest,
     OllamaProviderStatusResponse,
     OperationTaskReference,
+    RuntimeModelsResponse,
 )
 
 
 router = APIRouter(tags=["models"])
-_ERROR_RESPONSES = {
+_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {"model": ErrorResponse},
     404: {"model": ErrorResponse},
     409: {"model": ErrorResponse},
@@ -33,14 +32,25 @@ _ERROR_RESPONSES = {
 }
 
 
+@router.get(
+    "/api/v1/provider/models/configured",
+    response_model=RuntimeModelsResponse,
+    responses=_ERROR_RESPONSES,
+)
+async def get_configured_models(
+    raven: Annotated[Raven, Depends(lease_raven)],
+) -> RuntimeModelsResponse:
+    return RuntimeModelsResponse.model_validate(raven.runtime_status()["models"])
+
+
 @router.post(
-    "/api/v1/models/load",
+    "/api/v1/provider/models/configure",
     response_model=OperationTaskReference,
     status_code=status.HTTP_202_ACCEPTED,
     responses=_ERROR_RESPONSES,
 )
-async def load_models(
-    request: ModelLoadRequest,
+async def configure_models(
+    request: ModelConfigureRequest,
     raven: Annotated[Raven, Depends(lease_raven)],
 ) -> OperationTaskReference:
     task = await raven.load(
@@ -117,23 +127,6 @@ async def delete_ollama_model(
     raven: Annotated[Raven, Depends(lease_raven)],
 ) -> OperationTaskReference:
     task = await raven.delete_ollama_model(request.model)
-    return OperationTaskReference.from_task(task)
-
-
-@router.post(
-    "/api/v1/providers/ollama/models/unload",
-    response_model=OperationTaskReference,
-    status_code=status.HTTP_202_ACCEPTED,
-    responses=_ERROR_RESPONSES,
-)
-async def unload_ollama_model(
-    request: OllamaModelUnloadRequest,
-    raven: Annotated[Raven, Depends(lease_raven)],
-) -> OperationTaskReference:
-    if request.role == ModelRole.LLM:
-        task = await raven.unload_ollama_llm(request.model)
-    else:
-        task = await raven.unload_ollama_embedding(request.model)
     return OperationTaskReference.from_task(task)
 
 
