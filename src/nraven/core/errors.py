@@ -92,6 +92,7 @@ class ErrorCode(StrEnum):
     UNSUPPORTED_RUNTIME_CONFIG_VERSION = "unsupported_runtime_config_version"
     RUNTIME_CONFIG_CONFLICT = "runtime_config_conflict"
     INVALID_USER_ID = "invalid_user_id"
+    AUTHENTICATION_REQUIRED = "authentication_required"
     RUNTIME_REGISTRY_CLOSED = "runtime_registry_closed"
     RUNTIME_CAPACITY_EXCEEDED = "runtime_capacity_exceeded"
 

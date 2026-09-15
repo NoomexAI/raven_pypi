@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, replace
+from ipaddress import IPv6Address, ip_address
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -62,6 +64,7 @@ class SystemConfig:
     runtime_idle_seconds: float = 1_800.0
     max_user_runtimes: int = 100
     cors_origins: tuple[str, ...] = ("http://localhost:3000",)
+    allowed_hosts: tuple[str, ...] = ("localhost", "127.0.0.1", "[::1]")
     trusted_ingestion_enabled: bool = False
     allowed_ingestion_roots: tuple[Path, ...] = ()
 
@@ -140,6 +143,7 @@ class SystemConfig:
         )
 
         origins = _normalize_origins(self.cors_origins)
+        hosts = _normalize_hosts(self.allowed_hosts)
         roots = _normalize_paths(self.allowed_ingestion_roots, "allowed_ingestion_roots")
         if not isinstance(self.trusted_ingestion_enabled, bool):
             _invalid_config(
@@ -154,6 +158,7 @@ class SystemConfig:
                 "must contain at least one path when trusted ingestion is enabled",
             )
         object.__setattr__(self, "cors_origins", origins)
+        object.__setattr__(self, "allowed_hosts", hosts)
         object.__setattr__(self, "allowed_ingestion_roots", roots)
 
 
@@ -165,6 +170,8 @@ class SystemConfig:
                 if field.name == "allowed_ingestion_roots"
                 else list(self.cors_origins)
                 if field.name == "cors_origins"
+                else list(self.allowed_hosts)
+                if field.name == "allowed_hosts"
                 else getattr(self, field.name)
             )
             for field in fields(self)
@@ -588,6 +595,37 @@ def _normalize_paths(value: Any, field_name: str) -> tuple[Path, ...]:
                 "must contain only filesystem paths",
             )
         normalized.append(Path(path).expanduser().resolve())
+    return tuple(dict.fromkeys(normalized))
+
+
+def _normalize_hosts(value: Any) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, (tuple, list)) or not value:
+        _invalid_config(
+            ErrorCode.INVALID_SYSTEM_CONFIG,
+            "allowed_hosts",
+            "must be a non-empty list of hostnames without ports",
+        )
+    normalized: list[str] = []
+    for host in value:
+        valid_ipv6 = False
+        if isinstance(host, str) and host.startswith("[") and host.endswith("]"):
+            try:
+                valid_ipv6 = isinstance(ip_address(host[1:-1]), IPv6Address)
+            except ValueError:
+                pass
+        valid_name = (
+            isinstance(host, str)
+            and len(host) <= 253
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", host) is not None
+            and ".." not in host
+        )
+        if not (valid_ipv6 or valid_name):
+            _invalid_config(
+                ErrorCode.INVALID_SYSTEM_CONFIG,
+                "allowed_hosts",
+                "must contain only hostnames without ports",
+            )
+        normalized.append(host.lower())
     return tuple(dict.fromkeys(normalized))
 
 

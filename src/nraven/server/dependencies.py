@@ -24,8 +24,13 @@ def get_runtime_registry(request: Request) -> UserRuntimeRegistry:
 
 
 def resolve_user_id(request: Request) -> UUID:
-    """Resolve the trusted desktop identity until authentication is added."""
-    value = getattr(request.app.state, "default_user_id", None)
+    """Use the identity verified for this request by the desktop or host boundary."""
+    value = getattr(request.state, "user_id", None)
+    if value is None:
+        raise RavenError(
+            ErrorCode.AUTHENTICATION_REQUIRED,
+            "The request has no verified user identity.",
+        )
     try:
         return value if isinstance(value, UUID) else UUID(str(value))
     except (AttributeError, TypeError, ValueError) as exc:
