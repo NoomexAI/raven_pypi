@@ -15,7 +15,7 @@ from ...core.upload_retention import (
     remove_upload_source,
 )
 from ...h_api.raven import Raven
-from ..dependencies import get_runtime_registry, lease_raven, resolve_user_id
+from ..dependencies import get_runtime_registry, lease_raven, resolve_user_id, retain_task
 from ..runtime import UserRuntimeRegistry
 from ..schemas import (
     ErrorResponse,
@@ -118,9 +118,11 @@ async def update_knowledge(
 async def delete_knowledge(
     name: str,
     raven: Annotated[Raven, Depends(lease_raven)],
+    request: Request,
 ) -> OperationTaskReference:
     raven.get_knowledge(name)
     task = await raven.delete_knowledge(name)
+    await retain_task(request, raven, task)
     return OperationTaskReference.from_task(task)
 
 
@@ -200,6 +202,7 @@ async def upload_file(
             source,
             raven.paths.uploads_dir,
         )
+        await retain_task(request, raven, task)
         return OperationTaskReference.from_task(task)
     finally:
         await file.close()
@@ -221,6 +224,7 @@ async def ingest_trusted_path(
     name: str,
     request: IngestPathRequest,
     raven: Annotated[Raven, Depends(lease_raven)],
+    http_request: Request,
 ) -> OperationTaskReference:
     config = raven.system_config
     if not config.trusted_ingestion_enabled:
@@ -249,6 +253,7 @@ async def ingest_trusted_path(
         )
     raven.get_knowledge(name)
     task = await raven.ingest(name, source)
+    await retain_task(http_request, raven, task)
     return OperationTaskReference.from_task(task)
 
 
@@ -262,8 +267,10 @@ async def delete_file(
     name: str,
     file_id: str,
     raven: Annotated[Raven, Depends(lease_raven)],
+    request: Request,
 ) -> OperationTaskReference:
     task = await raven.delete_knowledge_file(name, file_id)
+    await retain_task(request, raven, task)
     return OperationTaskReference.from_task(task)
 
 

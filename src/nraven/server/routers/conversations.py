@@ -5,12 +5,12 @@ from __future__ import annotations
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, status
 
 from ...agent.policy import LOCAL_RETRIEVAL_MODES, RetrievalMode
 from ...core.errors import ErrorCode, RavenError
 from ...h_api.raven import Raven
-from ..dependencies import lease_raven
+from ..dependencies import lease_raven, retain_task
 from ..schemas import (
     ConversationCreateRequest,
     ConversationMessagePageResponse,
@@ -119,9 +119,11 @@ async def update_conversation(
 async def delete_conversation(
     conversation_id: str,
     raven: Annotated[Raven, Depends(lease_raven)],
+    request: Request,
 ) -> OperationTaskReference:
     raven.get_conversation(conversation_id)
     task = await raven.delete_conversation(conversation_id)
+    await retain_task(request, raven, task)
     return OperationTaskReference.from_task(task)
 
 
@@ -191,6 +193,7 @@ async def submit_turn(
     conversation_id: str,
     request: TurnCreateRequest,
     raven: Annotated[Raven, Depends(lease_raven)],
+    http_request: Request,
 ) -> TurnAcceptedResponse:
     conversation = raven.get_conversation(conversation_id)
     selected_mode = request.retrieval_mode
@@ -209,6 +212,7 @@ async def submit_turn(
         request.user_query,
         retrieval_mode=request.retrieval_mode,
     )
+    await retain_task(http_request, raven, run.task)
     return TurnAcceptedResponse(
         conversation_id=conversation_id,
         turn_id=run.turn_id,
@@ -229,9 +233,11 @@ async def reconstruct_turn(
     conversation_id: str,
     turn_id: UUID,
     raven: Annotated[Raven, Depends(lease_raven)],
+    request: Request,
 ) -> OperationTaskReference:
     await raven.get_conversation_turn(conversation_id, turn_id)
     task = await raven.reconstruct_from_turn(conversation_id, turn_id)
+    await retain_task(request, raven, task)
     return OperationTaskReference.from_task(task)
 
 

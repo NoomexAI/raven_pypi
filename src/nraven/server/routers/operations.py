@@ -16,7 +16,7 @@ from ...core.errors import ErrorCode, RavenError
 from ...core.events import Event
 from ...core.operations import OperationStatus, OperationType
 from ...h_api.raven import Raven
-from ..dependencies import get_runtime_registry, lease_raven, resolve_user_id
+from ..dependencies import get_runtime_registry, lease_raven, resolve_user_id, retain_task
 from ..schemas import (
     ErrorResponse,
     OperationPageResponse,
@@ -241,6 +241,7 @@ async def retry_operation_task(
 ) -> OperationTaskReference:
     failed = await raven.get_operation_task(operation_id, task_id)
     task = await raven.retry_task(operation_id, task_id)
+    await retain_task(request, raven, task)
     if failed.name == OperationType.INGESTION_RUN.value:
         source_value = (failed.retry_input or {}).get("source_path")
         if isinstance(source_value, str):

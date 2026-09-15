@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, Request
 
+from ..core.async_utils import await_completion
 from ..core.errors import ErrorCode, RavenError
+from ..core.operations import OperationTask
 from ..h_api.raven import Raven
 from .runtime import UserRuntimeRegistry
 
@@ -47,3 +50,21 @@ async def lease_raven(
     """Lease the user's Raven runtime for the complete request lifetime."""
     async with registry.lease(user_id) as raven:
         yield raven
+
+
+async def retain_task(
+    request: Request,
+    raven: Raven,
+    task: OperationTask,
+) -> None:
+    """Transfer ownership of an accepted background task to the registry."""
+    retention = asyncio.create_task(
+        get_runtime_registry(request).retain_task(
+            resolve_user_id(request),
+            raven,
+            task,
+        )
+    )
+    _, cancellation_requested = await await_completion(retention)
+    if cancellation_requested:
+        raise asyncio.CancelledError

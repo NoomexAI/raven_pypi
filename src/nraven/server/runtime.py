@@ -50,6 +50,7 @@ class UserRuntimeRegistry:
         self._initializing: dict[UUID, asyncio.Task[Raven]] = {}
         self._lock = asyncio.Lock()
         self._maintenance_task: asyncio.Task[None] | None = None
+        self._job_monitors: set[asyncio.Task[None]] = set()
         self._upload_monitors: dict[asyncio.Task[None], Path] = {}
         self._started = False
         self._closed = False
@@ -116,6 +117,48 @@ class UserRuntimeRegistry:
         return len(selected)
 
 
+    async def retain_task(
+        self,
+        user_id: UUID,
+        raven: Raven,
+        task: OperationTask,
+    ) -> None:
+        """Pin the submitting runtime until an accepted task reaches terminal state."""
+        async with self._lock:
+            self._ensure_open()
+            entry = self._entries.get(user_id)
+            if entry is None or entry.raven is not raven:
+                raise RavenError(
+                    ErrorCode.RUNTIME_REGISTRY_CLOSED,
+                    "The submitting user runtime is no longer available.",
+                )
+            entry.leases += 1
+            try:
+                monitor = asyncio.create_task(
+                    self._await_task_terminal(user_id, raven, task),
+                    name=f"nraven-runtime-job-{task.task_id}",
+                )
+            except BaseException:
+                entry.leases -= 1
+                raise
+            self._job_monitors.add(monitor)
+            monitor.add_done_callback(self._job_monitors.discard)
+
+
+    async def _await_task_terminal(
+        self,
+        user_id: UUID,
+        raven: Raven,
+        task: OperationTask,
+    ) -> None:
+        try:
+            await task.result()
+        except (Exception, asyncio.CancelledError):
+            pass
+        finally:
+            await self._release(user_id, raven)
+
+
     def track_upload(
         self,
         user_id: UUID,
@@ -166,6 +209,8 @@ class UserRuntimeRegistry:
             self._entries.clear()
             monitors = tuple(self._upload_monitors)
             self._upload_monitors.clear()
+            job_monitors = tuple(self._job_monitors)
+            self._job_monitors.clear()
 
         if maintenance is not None:
             maintenance.cancel()
@@ -173,7 +218,9 @@ class UserRuntimeRegistry:
 
         for monitor in monitors:
             monitor.cancel()
-        await asyncio.gather(*monitors, return_exceptions=True)
+        for monitor in job_monitors:
+            monitor.cancel()
+        await asyncio.gather(*monitors, *job_monitors, return_exceptions=True)
 
         initialized = await asyncio.gather(
             *initialization_tasks,
