@@ -1327,16 +1327,6 @@ class Raven:
         conversation = self.get_conversation(conversation_id)
         messages = await conversation.get_turn_messages(turn_id)
         evidence = self._reconstruction_evidence(messages)
-        if not evidence:
-            raise RavenError(
-                ErrorCode.RECONSTRUCTION_EVIDENCE_NOT_FOUND,
-                f"Turn '{turn_id}' contains no reconstructable source evidence.",
-                details={
-                    "conversation_id": conversation_id,
-                    "turn_id": str(turn_id),
-                },
-            )
-
         reconstruction_task = await self.reconstructor.reconstruct(
             evidence,
             operation=operation,
@@ -1415,12 +1405,32 @@ class Raven:
         return self.conversation_manager.list()
 
 
+    def list_conversations_page(
+        self,
+        *,
+        limit: int,
+        after_conversation_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self.conversation_manager.list_page(limit, after_conversation_id)
+
+
     async def get_conversation_messages(
         self,
         conversation_id: str,
     ) -> list[ChatMessage]:
         conversation = self.conversation_manager.get(conversation_id)
         return await conversation.get_messages()
+
+
+    async def get_conversation_messages_page(
+        self,
+        conversation_id: str,
+        *,
+        limit: int,
+        after_message_id: int = 0,
+    ) -> list[dict[str, Any]]:
+        conversation = self.conversation_manager.get(conversation_id)
+        return await conversation.get_messages_page(limit, after_message_id)
 
 
     async def get_conversation_turn(
@@ -1445,6 +1455,22 @@ class Raven:
     ) -> list[ChatMessage]:
         conversation = self.conversation_manager.get(conversation_id)
         return await conversation.get_turn_messages(turn_id)
+
+
+    async def get_conversation_turn_messages_page(
+        self,
+        conversation_id: str,
+        turn_id: UUID | str,
+        *,
+        limit: int,
+        after_message_id: int = 0,
+    ) -> list[dict[str, Any]]:
+        conversation = self.conversation_manager.get(conversation_id)
+        return await conversation.get_turn_messages_page(
+            turn_id,
+            limit,
+            after_message_id,
+        )
 
 
     async def get_conversation_preferences(

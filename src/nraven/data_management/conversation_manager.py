@@ -179,6 +179,34 @@ class _ConversationMessageStore:
         return [self._message_from_json(row["message_json"]) for row in rows]
 
 
+    def list_messages_page(
+        self,
+        limit: int,
+        after_message_id: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Read one canonical transcript page by durable message ID."""
+        with self._lock:
+            rows = self._require_connection().execute(
+                """
+                SELECT message_id, turn_id, message_order, message_json
+                FROM messages
+                WHERE message_id > ?
+                ORDER BY message_id
+                LIMIT ?
+                """,
+                (after_message_id, limit),
+            ).fetchall()
+        return [
+            {
+                "message_id": int(row["message_id"]),
+                "turn_id": str(row["turn_id"]),
+                "message_order": int(row["message_order"]),
+                "message": self._message_from_json(row["message_json"]),
+            }
+            for row in rows
+        ]
+
+
     def get_turn_messages(self, turn_id: str) -> list[ChatMessage]:
         """Return the canonical messages belonging to one committed turn."""
         with self._lock:
@@ -192,6 +220,35 @@ class _ConversationMessageStore:
                 (turn_id,),
             ).fetchall()
         return [self._message_from_json(row["message_json"]) for row in rows]
+
+
+    def list_turn_messages_page(
+        self,
+        turn_id: str,
+        limit: int,
+        after_message_id: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Read one committed turn's transcript without loading other turns."""
+        with self._lock:
+            rows = self._require_connection().execute(
+                """
+                SELECT message_id, turn_id, message_order, message_json
+                FROM messages
+                WHERE turn_id = ? AND message_id > ?
+                ORDER BY message_id
+                LIMIT ?
+                """,
+                (turn_id, after_message_id, limit),
+            ).fetchall()
+        return [
+            {
+                "message_id": int(row["message_id"]),
+                "turn_id": str(row["turn_id"]),
+                "message_order": int(row["message_order"]),
+                "message": self._message_from_json(row["message_json"]),
+            }
+            for row in rows
+        ]
 
 
     def get_context_messages(self) -> list[ChatMessage]:
@@ -814,6 +871,21 @@ class Conversation:
         )
 
 
+    async def get_messages_page(
+        self,
+        limit: int,
+        after_message_id: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Return a bounded page of canonical, uncompacted messages."""
+        return await self._run_in_use(
+            lambda: run_in_thread(
+                self._message_store.list_messages_page,
+                limit,
+                after_message_id,
+            )
+        )
+
+
     async def get_turn_messages(
         self,
         turn_id: UUID | str,
@@ -836,6 +908,31 @@ class Conversation:
             )
 
         return await self._run_in_use(load_turn)
+
+
+    async def get_turn_messages_page(
+        self,
+        turn_id: UUID | str,
+        limit: int,
+        after_message_id: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Return a bounded page after checking that the turn exists."""
+        async def load_page() -> list[dict[str, Any]]:
+            normalized = self._validate_turn_id(turn_id)
+            turn = await run_in_thread(self._message_store.get_turn, normalized)
+            if turn is None:
+                raise RavenError(
+                    ErrorCode.CONVERSATION_TURN_NOT_FOUND,
+                    f"Turn '{normalized}' does not exist.",
+                )
+            return await run_in_thread(
+                self._message_store.list_turn_messages_page,
+                normalized,
+                limit,
+                after_message_id,
+            )
+
+        return await self._run_in_use(load_page)
 
 
     async def search_memory(self, query: str) -> list[ChatMessage]:
@@ -2199,6 +2296,36 @@ class ConversationManager:
             conversation.to_dict()
             for conversation in self._conversations.values()
         ]
+
+
+    def list_page(
+        self,
+        limit: int,
+        after_conversation_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return newest-first metadata with a stable conversation cursor."""
+        self._ensure_started()
+        records = sorted(
+            (conversation.to_dict() for conversation in self._conversations.values()),
+            key=lambda item: (item["created_at"], item["conversation_id"]),
+            reverse=True,
+        )
+        start = 0
+        if after_conversation_id is not None:
+            start = next(
+                (
+                    index + 1
+                    for index, item in enumerate(records)
+                    if item["conversation_id"] == after_conversation_id
+                ),
+                -1,
+            )
+            if start < 0:
+                raise RavenError(
+                    ErrorCode.CONVERSATION_NOT_FOUND,
+                    f"Conversation cursor '{after_conversation_id}' does not exist.",
+                )
+        return records[start:start + limit]
 
 
     async def update(

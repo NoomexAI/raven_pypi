@@ -7,7 +7,10 @@ from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from llama_index.core.base.llms.types import ToolCallBlock
+from llama_index.core.llms import ChatMessage
 
+from ..agent.policy import RetrievalMode
 from ..core.errors import ErrorCode
 from ..core.events import Event, EventType
 from ..core.operations import (
@@ -361,6 +364,276 @@ class KnowledgeStatsResponse(BaseModel):
 
     vector_count: int = Field(ge=0)
     file_count: int = Field(ge=0)
+
+
+
+
+class ConversationCreateRequest(BaseModel):
+    """Create a global chat, or a local chat scoped to one knowledge."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    knowledge_name: str | None = None
+
+
+
+
+class ConversationUpdateRequest(BaseModel):
+    """Update one or both user-editable conversation fields."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = None
+    pinned: bool | None = None
+
+
+    @model_validator(mode="after")
+    def require_change(self) -> "ConversationUpdateRequest":
+        if self.title is None and self.pinned is None:
+            raise ValueError("title or pinned must be supplied")
+        return self
+
+
+
+
+class ConversationResponse(BaseModel):
+    """Persisted conversation metadata with backend-computed scope type."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int
+    conversation_id: str
+    type: Literal["local", "global"]
+    knowledge_name: str | None
+    title: str
+    is_titled: bool
+    pinned: bool
+    created_at: datetime
+
+
+
+
+class ConversationPageResponse(BaseModel):
+    """Newest-first page of conversation metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ConversationResponse]
+    next_cursor: str | None = None
+
+
+
+
+class MessageToolCallResponse(BaseModel):
+    """A tool call persisted as an assistant message block."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    call_id: str
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+
+
+class ConversationMessageResponse(BaseModel):
+    """One canonical, uncompacted transcript message."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    message_id: int = Field(ge=1)
+    turn_id: UUID
+    message_order: int = Field(ge=0)
+    role: str
+    content: str | None
+    tool_calls: list[MessageToolCallResponse] = Field(default_factory=list)
+    tool_call_id: str | None = None
+    tool_name: str | None = None
+
+
+    @classmethod
+    def from_record(cls, record: dict[str, Any]) -> "ConversationMessageResponse":
+        message: ChatMessage = record["message"]
+        kwargs = message.additional_kwargs
+        return cls(
+            message_id=record["message_id"],
+            turn_id=record["turn_id"],
+            message_order=record["message_order"],
+            role=message.role.value,
+            content=message.content if isinstance(message.content, str) else None,
+            tool_calls=[
+                MessageToolCallResponse(
+                    call_id=block.tool_call_id,
+                    name=block.tool_name,
+                    arguments=block.tool_kwargs,
+                )
+                for block in message.blocks
+                if isinstance(block, ToolCallBlock)
+            ],
+            tool_call_id=(
+                kwargs.get("tool_call_id")
+                if isinstance(kwargs.get("tool_call_id"), str)
+                else None
+            ),
+            tool_name=(
+                kwargs.get("tool_name")
+                if isinstance(kwargs.get("tool_name"), str)
+                else None
+            ),
+        )
+
+
+
+
+class ConversationMessagePageResponse(BaseModel):
+    """A cursor page of canonical transcript messages."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ConversationMessageResponse]
+    next_cursor: int | None = None
+
+
+
+
+class TurnCreateRequest(BaseModel):
+    """Submit a user query and optional retrieval-tool restriction."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_query: str = Field(min_length=1)
+    retrieval_mode: RetrievalMode | Literal["auto"] | None = None
+
+
+
+
+class TurnAcceptedResponse(BaseModel):
+    """Reference returned immediately for one streamed conversation turn."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    conversation_id: str
+    turn_id: UUID
+    operation_id: UUID
+    task_id: UUID
+    status: OperationStatus
+    events_url: str
+
+
+
+
+class EvidenceReferenceResponse(BaseModel):
+    """One verifiable section reference in a completed turn."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    knowledge_name: str
+    file_name: str
+    section_id: str
+
+
+
+
+class ReconstructedSectionResponse(BaseModel):
+    """One stored section in a highlighted reconstructed source view."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    section_id: str
+    highlighted: bool
+    raw_content: str
+    source_range: list[int] | None = None
+
+
+
+
+class ReconstructedFileResponse(BaseModel):
+    """A file view emitted by the reconstructor."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    knowledge_name: str
+    file_name: str
+    navigation_type: str
+    sections: list[ReconstructedSectionResponse]
+
+
+
+
+class TurnToolCallResponse(BaseModel):
+    """A correlated tool call and its bounded UI-visible outcome."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    call_id: str
+    step: int | None = None
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    ok: bool | None = None
+    ui_summary: dict[str, Any] = Field(default_factory=dict)
+    error: dict[str, Any] | None = None
+
+
+
+
+class TurnResultResponse(BaseModel):
+    """Completed turn projection derived from the operation event stream."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    operation_id: UUID
+    thinking: str = ""
+    response: str
+    iteration_limit_reached: bool = False
+    evidence: list[EvidenceReferenceResponse] = Field(default_factory=list)
+    tool_calls: list[TurnToolCallResponse] = Field(default_factory=list)
+    reconstructed_sources: list[ReconstructedFileResponse] = Field(default_factory=list)
+
+
+
+
+class TurnResponse(BaseModel):
+    """One durable canonical turn, distinct from an in-flight operation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    turn_id: UUID
+    operation_id: UUID | None
+    user_query: str
+    result: TurnResultResponse | None
+    memory_indexed: bool
+    committed_at: datetime
+
+
+
+
+class PreferenceCreateRequest(BaseModel):
+    """One explicit conversation-scoped user preference."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1)
+
+
+
+
+class PreferenceResponse(BaseModel):
+    """Persisted preference with an exact deletion identity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    preference_id: UUID
+    text: str
+
+
+
+
+class PreferencesResponse(BaseModel):
+    """All bounded explicit preferences of one conversation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[PreferenceResponse]
 
 
 
