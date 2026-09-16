@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import hmac
-import inspect
 import logging
-from ipaddress import ip_address
 from collections.abc import Awaitable, Callable
 from http import HTTPStatus
 from typing import Any
-from uuid import uuid4
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -23,6 +20,7 @@ from .schemas import ErrorBody, ErrorResponse
 
 LOGGER = logging.getLogger("nraven.server")
 REQUEST_ID_HEADER = "X-Request-ID"
+USER_ID_HEADER = "X-Raven-User-ID"
 
 
 _NOT_FOUND_CODES = {
@@ -129,6 +127,8 @@ def install_error_handling(app: FastAPI) -> None:
 
 
 def _status_for_raven_error(code: ErrorCode) -> int:
+    if code == ErrorCode.SOURCE_FILE_TOO_LARGE:
+        return HTTPStatus.REQUEST_ENTITY_TOO_LARGE
     if code == ErrorCode.AUTHENTICATION_REQUIRED:
         return HTTPStatus.UNAUTHORIZED
     if code in _NOT_FOUND_CODES:
@@ -186,13 +186,8 @@ def _request_id(request: Request) -> str:
 async def _reject_untrusted_request(request: Request) -> JSONResponse | None:
     """Verify one request's host, origin, and identity before body parsing."""
     host = request.headers.get("host", "")
-    resolver = request.app.state.identity_resolver
-    allowed_host = (
-        _host_in_allowlist(host, request.app.state.system_config.allowed_hosts)
-        if resolver is not None
-        else _is_local_host(host)
-    )
-    if not allowed_host:
+    config = request.app.state.system_config
+    if not _host_in_allowlist(host, config.allowed_hosts):
         return _error_response(
             request,
             status_code=HTTPStatus.FORBIDDEN,
@@ -219,41 +214,38 @@ async def _reject_untrusted_request(request: Request) -> JSONResponse | None:
             message="The request origin is not allowed.",
         )
 
-    if resolver is not None:
-        try:
-            identity = resolver(request)
-            if inspect.isawaitable(identity):
-                identity = await identity
-        except RavenError as error:
-            return _error_response(
-                request,
-                status_code=_status_for_raven_error(error.code),
-                code=error.code.value,
-                message=error.message,
-                details=error.details,
-            )
-        except Exception as error:
-            LOGGER.error(
-                "Hosted identity resolver failed request_id=%s type=%s",
-                _request_id(request),
-                type(error).__name__,
-            )
-            return _error_response(
-                request,
-                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-                code=ErrorCode.INTERNAL_ERROR.value,
-                message="The hosted identity could not be resolved.",
-            )
-        if not isinstance(identity, UUID):
-            return _unauthorized_response(request)
-        request.state.user_id = identity
+    if (
+        request.method == "OPTIONS"
+        and request.headers.get("access-control-request-method") is not None
+    ):
         return None
 
     scheme, separator, candidate = request.headers.get("authorization", "").partition(" ")
     expected = request.app.state.bearer_token
     if not separator or scheme.lower() != "bearer" or not hmac.compare_digest(candidate, expected):
         return _unauthorized_response(request)
-    request.state.user_id = request.app.state.default_user_id
+
+    raw_user_id = request.headers.get(USER_ID_HEADER)
+    if raw_user_id is None:
+        if config.require_user_id_header:
+            return _error_response(
+                request,
+                status_code=HTTPStatus.UNAUTHORIZED,
+                code=ErrorCode.AUTHENTICATION_REQUIRED.value,
+                message=f"The {USER_ID_HEADER} header is required.",
+            )
+        request.state.user_id = request.app.state.default_user_id
+        return None
+
+    try:
+        request.state.user_id = UUID(raw_user_id)
+    except (AttributeError, TypeError, ValueError):
+        return _error_response(
+            request,
+            status_code=HTTPStatus.BAD_REQUEST,
+            code=ErrorCode.INVALID_USER_ID.value,
+            message=f"The {USER_ID_HEADER} header must contain a valid UUID.",
+        )
     return None
 
 
@@ -264,8 +256,7 @@ def _unauthorized_response(request: Request) -> JSONResponse:
         code=ErrorCode.AUTHENTICATION_REQUIRED.value,
         message="A verified identity is required.",
     )
-    if request.app.state.identity_resolver is None:
-        response.headers["WWW-Authenticate"] = "Bearer"
+    response.headers["WWW-Authenticate"] = "Bearer"
     return response
 
 
@@ -285,27 +276,3 @@ def _host_in_allowlist(value: str, allowed_hosts: tuple[str, ...]) -> bool:
         if separator and not port.isdigit():
             return False
     return hostname.lower() in allowed_hosts
-
-
-def _is_local_host(value: str) -> bool:
-    """Accept only literal loopback hosts, with an optional numeric port."""
-    if not value or any(char in value for char in "/\\@?# \t\r\n"):
-        return False
-    if value.startswith("["):
-        closing = value.find("]")
-        if closing == -1:
-            return False
-        hostname = value[1:closing]
-        suffix = value[closing + 1:]
-        if suffix and (not suffix.startswith(":") or not suffix[1:].isdigit()):
-            return False
-    else:
-        hostname, separator, port = value.partition(":")
-        if separator and not port.isdigit():
-            return False
-    if hostname == "localhost":
-        return True
-    try:
-        return ip_address(hostname).is_loopback
-    except ValueError:
-        return False

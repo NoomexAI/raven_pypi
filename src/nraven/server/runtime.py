@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 from uuid import UUID
 
 from ..core.async_utils import await_completion
@@ -20,6 +20,7 @@ from ..h_api.raven import Raven
 
 
 RavenFactory = Callable[..., Raven]
+LOGGER = logging.getLogger("nraven.server.runtime")
 
 
 @dataclass(slots=True)
@@ -48,7 +49,9 @@ class UserRuntimeRegistry:
         self._clock = clock
         self._entries: dict[UUID, _RuntimeEntry] = {}
         self._initializing: dict[UUID, asyncio.Task[Raven]] = {}
+        self._pending_cleanup: dict[int, Raven] = {}
         self._lock = asyncio.Lock()
+        self._cleanup_lock = asyncio.Lock()
         self._maintenance_task: asyncio.Task[None] | None = None
         self._job_monitors: set[asyncio.Task[None]] = set()
         self._upload_monitors: dict[asyncio.Task[None], Path] = {}
@@ -58,7 +61,13 @@ class UserRuntimeRegistry:
 
     @property
     def is_ready(self) -> bool:
-        return self._started and not self._closed
+        maintenance = self._maintenance_task
+        return (
+            self._started
+            and not self._closed
+            and maintenance is not None
+            and not maintenance.done()
+        )
 
 
     @property
@@ -75,7 +84,16 @@ class UserRuntimeRegistry:
                     "The user runtime registry is closed.",
                 )
             if self._started:
-                return
+                maintenance = self._maintenance_task
+                if maintenance is not None and not maintenance.done():
+                    return
+                if maintenance is not None and not maintenance.cancelled():
+                    error = maintenance.exception()
+                    if error is not None:
+                        LOGGER.error(
+                            "Restarting terminated runtime maintenance type=%s",
+                            type(error).__name__,
+                        )
             self._started = True
             self._maintenance_task = asyncio.create_task(
                 self._maintain(),
@@ -100,6 +118,7 @@ class UserRuntimeRegistry:
 
     async def evict_idle(self, *, now: float | None = None) -> int:
         """Close runtimes that have remained unleased beyond the idle limit."""
+        await self._retry_pending_cleanup()
         current = self._clock() if now is None else now
         cutoff = current - self.system_config.runtime_idle_seconds
         async with self._lock:
@@ -112,8 +131,13 @@ class UserRuntimeRegistry:
             ]
             for user_id, _raven in selected:
                 self._entries.pop(user_id, None)
+            self._retain_cleanup_ownership(
+                raven for _user_id, raven in selected
+            )
 
-        await self._close_runtimes([raven for _user_id, raven in selected])
+        await self._close_owned_runtimes(
+            [raven for _user_id, raven in selected]
+        )
         return len(selected)
 
 
@@ -197,20 +221,25 @@ class UserRuntimeRegistry:
     async def close(self) -> None:
         """Stop maintenance and close every runtime owned or being initialized."""
         async with self._lock:
-            if self._closed:
-                return
-            self._closed = True
-            self._started = False
-            maintenance = self._maintenance_task
-            self._maintenance_task = None
-            initialization_tasks = tuple(self._initializing.values())
-            self._initializing.clear()
-            runtimes = [entry.raven for entry in self._entries.values()]
-            self._entries.clear()
-            monitors = tuple(self._upload_monitors)
-            self._upload_monitors.clear()
-            job_monitors = tuple(self._job_monitors)
-            self._job_monitors.clear()
+            if not self._closed:
+                self._closed = True
+                self._started = False
+                maintenance = self._maintenance_task
+                self._maintenance_task = None
+                initialization_tasks = tuple(self._initializing.values())
+                self._initializing.clear()
+                runtimes = [entry.raven for entry in self._entries.values()]
+                self._entries.clear()
+                self._retain_cleanup_ownership(runtimes)
+                monitors = tuple(self._upload_monitors)
+                self._upload_monitors.clear()
+                job_monitors = tuple(self._job_monitors)
+                self._job_monitors.clear()
+            else:
+                maintenance = None
+                initialization_tasks = ()
+                monitors = ()
+                job_monitors = ()
 
         if maintenance is not None:
             maintenance.cancel()
@@ -226,35 +255,43 @@ class UserRuntimeRegistry:
             *initialization_tasks,
             return_exceptions=True,
         )
-        runtimes.extend(
+        initialized_runtimes = [
             value
             for value in initialized
             if not isinstance(value, BaseException)
-        )
-        await self._close_runtimes(runtimes)
+        ]
+        async with self._lock:
+            self._retain_cleanup_ownership(initialized_runtimes)
+            pending = list(self._pending_cleanup.values())
+        await self._close_owned_runtimes(pending)
 
 
     async def _acquire(self, user_id: UUID) -> Raven:
         await self.start()
-        evicted: Raven | None = None
-        async with self._lock:
-            self._ensure_open()
-            existing = self._entries.get(user_id)
-            if existing is not None:
-                existing.leases += 1
-                return existing.raven
+        await self._retry_pending_cleanup()
+        while True:
+            async with self._lock:
+                self._ensure_open()
+                existing = self._entries.get(user_id)
+                if existing is not None:
+                    existing.leases += 1
+                    return existing.raven
 
-            initialization = self._initializing.get(user_id)
-            if initialization is None:
-                evicted = self._reserve_capacity()
-                initialization = asyncio.create_task(
-                    self._create_runtime(user_id),
-                    name=f"nraven-user-runtime-start-{user_id}",
-                )
-                self._initializing[user_id] = initialization
+                initialization = self._initializing.get(user_id)
+                evicted: Raven | None = None
+                if initialization is None:
+                    evicted = self._reserve_capacity()
+                    if evicted is None:
+                        initialization = asyncio.create_task(
+                            self._create_runtime(user_id),
+                            name=f"nraven-user-runtime-start-{user_id}",
+                        )
+                        self._initializing[user_id] = initialization
 
-        if evicted is not None:
-            await evicted.close()
+            if evicted is None:
+                assert initialization is not None
+                break
+            await self._close_owned_runtimes([evicted])
 
         try:
             raven, cancellation_requested = await await_completion(initialization)
@@ -284,7 +321,9 @@ class UserRuntimeRegistry:
                 raven = entry.raven
 
         if close_after_acquire:
-            await raven.close()
+            async with self._lock:
+                self._retain_cleanup_ownership([raven])
+            await self._close_owned_runtimes([raven])
             raise RavenError(
                 ErrorCode.RUNTIME_REGISTRY_CLOSED,
                 "The user runtime registry closed while the runtime was starting.",
@@ -306,7 +345,11 @@ class UserRuntimeRegistry:
 
 
     def _reserve_capacity(self) -> Raven | None:
-        occupied = len(self._entries) + len(self._initializing)
+        occupied = (
+            len(self._entries)
+            + len(self._initializing)
+            + len(self._pending_cleanup)
+        )
         if occupied < self.system_config.max_user_runtimes:
             return None
         idle = [
@@ -322,6 +365,7 @@ class UserRuntimeRegistry:
             )
         _idle_since, user_id, raven = min(idle, key=lambda item: item[0])
         self._entries.pop(user_id, None)
+        self._retain_cleanup_ownership([raven])
         return raven
 
 
@@ -334,7 +378,12 @@ class UserRuntimeRegistry:
         try:
             await raven.start()
         except BaseException:
-            await asyncio.gather(raven.close(), return_exceptions=True)
+            async with self._lock:
+                self._retain_cleanup_ownership([raven])
+            await asyncio.gather(
+                self._close_owned_runtimes([raven]),
+                return_exceptions=True,
+            )
             raise
         return raven
 
@@ -348,8 +397,14 @@ class UserRuntimeRegistry:
         try:
             while True:
                 await asyncio.sleep(interval)
-                await self.evict_idle()
-                await self.cleanup_uploads()
+                try:
+                    await self.evict_idle()
+                except Exception:
+                    LOGGER.exception("Runtime idle eviction failed; it will be retried.")
+                try:
+                    await self.cleanup_uploads()
+                except Exception:
+                    LOGGER.exception("Upload cleanup failed; it will be retried.")
         except asyncio.CancelledError:
             return
 
@@ -375,12 +430,34 @@ class UserRuntimeRegistry:
         return total
 
 
-    async def _close_runtimes(self, runtimes: list[Raven]) -> None:
-        unique: dict[int, Raven] = {id(raven): raven for raven in runtimes}
-        results = await asyncio.gather(
-            *(raven.close() for raven in unique.values()),
-            return_exceptions=True,
-        )
+    def _retain_cleanup_ownership(self, runtimes: Iterable[Raven]) -> None:
+        for raven in runtimes:
+            self._pending_cleanup[id(raven)] = raven
+
+
+    async def _close_owned_runtimes(self, runtimes: list[Raven]) -> None:
+        async with self._cleanup_lock:
+            requested = {id(raven): raven for raven in runtimes}
+            async with self._lock:
+                unique = {
+                    runtime_id: raven
+                    for runtime_id, raven in requested.items()
+                    if self._pending_cleanup.get(runtime_id) is raven
+                }
+            if not unique:
+                return
+            results = await asyncio.gather(
+                *(raven.close() for raven in unique.values()),
+                return_exceptions=True,
+            )
+            successful = [
+                runtime_id
+                for runtime_id, result in zip(unique, results, strict=True)
+                if not isinstance(result, BaseException)
+            ]
+            async with self._lock:
+                for runtime_id in successful:
+                    self._pending_cleanup.pop(runtime_id, None)
         failures = [result for result in results if isinstance(result, BaseException)]
         if failures:
             raise RavenError(
@@ -388,6 +465,12 @@ class UserRuntimeRegistry:
                 "One or more user runtimes could not be closed.",
                 details={"failure_count": len(failures)},
             ) from failures[0]
+
+
+    async def _retry_pending_cleanup(self) -> None:
+        async with self._lock:
+            pending = list(self._pending_cleanup.values())
+        await self._close_owned_runtimes(pending)
 
 
     def _ensure_open(self) -> None:

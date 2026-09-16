@@ -29,6 +29,7 @@ from ..schemas import (
 
 
 router = APIRouter(tags=["operations"])
+_MAX_EVENT_CURSOR = 1 << 63
 _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {"model": ErrorResponse},
     404: {"model": ErrorResponse},
@@ -273,12 +274,18 @@ def _page_size(raven: Raven, requested: int | None) -> int:
 def _event_cursor(value: str | None) -> int:
     if value is None:
         return 0
-    if not value.isascii() or not value.isdecimal():
+    if not value.isascii() or not value.isdecimal() or len(value) > 19:
         raise RavenError(
             ErrorCode.INVALID_EVENT_CURSOR,
-            "Last-Event-ID must be a non-negative integer.",
+            "Last-Event-ID must be a supported non-negative integer.",
         )
-    return int(value)
+    cursor = int(value)
+    if cursor > _MAX_EVENT_CURSOR:
+        raise RavenError(
+            ErrorCode.INVALID_EVENT_CURSOR,
+            "Last-Event-ID must be a supported non-negative integer.",
+        )
+    return cursor
 
 
 async def _prepend_event(

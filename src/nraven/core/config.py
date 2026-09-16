@@ -32,6 +32,7 @@ DEFAULT_LLM_ADAPTER_CACHE_SIZE = 8
 DEFAULT_EMBEDDING_ADAPTER_CACHE_SIZE = 8
 DEFAULT_PROMPT_CACHE_SIZE = 32
 DEFAULT_MAX_SOURCE_FILE_BYTES = 100 * 1024 * 1024
+DEFAULT_MAX_UPLOAD_REQUEST_OVERHEAD_BYTES = 64 * 1024
 DEFAULT_MAX_DOCUMENT_PAGES = 1_000
 
 
@@ -58,6 +59,7 @@ class SystemConfig:
     prompt_cache_size: int = DEFAULT_PROMPT_CACHE_SIZE
     sse_heartbeat_interval_seconds: float = 30.0
     max_source_file_bytes: int = DEFAULT_MAX_SOURCE_FILE_BYTES
+    max_upload_request_overhead_bytes: int = DEFAULT_MAX_UPLOAD_REQUEST_OVERHEAD_BYTES
     max_document_pages: int = DEFAULT_MAX_DOCUMENT_PAGES
     max_retrieval_top_k: int = 25
     max_agent_iterations: int = 50
@@ -65,6 +67,7 @@ class SystemConfig:
     max_user_runtimes: int = 100
     cors_origins: tuple[str, ...] = ("http://localhost:3000",)
     allowed_hosts: tuple[str, ...] = ("localhost", "127.0.0.1", "[::1]")
+    require_user_id_header: bool = False
     trusted_ingestion_enabled: bool = False
     allowed_ingestion_roots: tuple[Path, ...] = ()
 
@@ -126,6 +129,7 @@ class SystemConfig:
             "embedding_adapter_cache_size",
             "prompt_cache_size",
             "max_source_file_bytes",
+            "max_upload_request_overhead_bytes",
             "max_document_pages",
             "max_retrieval_top_k",
             "max_agent_iterations",
@@ -145,12 +149,13 @@ class SystemConfig:
         origins = _normalize_origins(self.cors_origins)
         hosts = _normalize_hosts(self.allowed_hosts)
         roots = _normalize_paths(self.allowed_ingestion_roots, "allowed_ingestion_roots")
-        if not isinstance(self.trusted_ingestion_enabled, bool):
-            _invalid_config(
-                ErrorCode.INVALID_SYSTEM_CONFIG,
-                "trusted_ingestion_enabled",
-                "must be a boolean",
-            )
+        for field_name in ("require_user_id_header", "trusted_ingestion_enabled"):
+            if not isinstance(getattr(self, field_name), bool):
+                _invalid_config(
+                    ErrorCode.INVALID_SYSTEM_CONFIG,
+                    field_name,
+                    "must be a boolean",
+                )
         if self.trusted_ingestion_enabled and not roots:
             _invalid_config(
                 ErrorCode.INVALID_SYSTEM_CONFIG,
