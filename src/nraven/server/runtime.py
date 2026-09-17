@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import AsyncGenerator, Callable, Iterable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar, cast
 from uuid import UUID
 
 from ..core.async_utils import await_completion
@@ -20,6 +21,8 @@ from ..h_api.raven import Raven
 
 
 RavenFactory = Callable[..., Raven]
+SubmittedValue = TypeVar("SubmittedValue")
+TaskSubmitter = Callable[[], Awaitable[SubmittedValue]]
 LOGGER = logging.getLogger("nraven.server.runtime")
 
 
@@ -54,6 +57,8 @@ class UserRuntimeRegistry:
         self._cleanup_lock = asyncio.Lock()
         self._maintenance_task: asyncio.Task[None] | None = None
         self._job_monitors: set[asyncio.Task[None]] = set()
+        self._active_jobs_by_user: dict[UUID, int] = {}
+        self._active_job_count = 0
         self._upload_monitors: dict[asyncio.Task[None], Path] = {}
         self._started = False
         self._closed = False
@@ -73,6 +78,11 @@ class UserRuntimeRegistry:
     @property
     def runtime_count(self) -> int:
         return len(self._entries)
+
+
+    @property
+    def active_job_count(self) -> int:
+        return self._active_job_count
 
 
     async def start(self) -> None:
@@ -118,7 +128,6 @@ class UserRuntimeRegistry:
 
     async def evict_idle(self, *, now: float | None = None) -> int:
         """Close runtimes that have remained unleased beyond the idle limit."""
-        await self._retry_pending_cleanup()
         current = self._clock() if now is None else now
         cutoff = current - self.system_config.runtime_idle_seconds
         async with self._lock:
@@ -138,7 +147,26 @@ class UserRuntimeRegistry:
         await self._close_owned_runtimes(
             [raven for _user_id, raven in selected]
         )
+        await self._retry_pending_cleanup()
         return len(selected)
+
+
+    async def submit_task(
+        self,
+        user_id: UUID,
+        raven: Raven,
+        submitter: TaskSubmitter[SubmittedValue],
+    ) -> SubmittedValue:
+        """Reserve capacity before creating and retaining an accepted task."""
+        await self._reserve_task_slot(user_id)
+        try:
+            submitted = await submitter()
+            task = _submitted_operation_task(submitted)
+            await self.retain_task(user_id, raven, task)
+            return submitted
+        except BaseException:
+            await self._release_task_slot(user_id)
+            raise
 
 
     async def retain_task(
@@ -181,6 +209,44 @@ class UserRuntimeRegistry:
             pass
         finally:
             await self._release(user_id, raven)
+            await self._release_task_slot(user_id)
+
+
+    async def _reserve_task_slot(self, user_id: UUID) -> None:
+        async with self._lock:
+            self._ensure_open()
+            user_count = self._active_jobs_by_user.get(user_id, 0)
+            if user_count >= self.system_config.max_active_operations_per_user:
+                raise RavenError(
+                    ErrorCode.OPERATION_CAPACITY_EXCEEDED,
+                    "The user has reached the active operation limit.",
+                    details={
+                        "scope": "user",
+                        "limit": self.system_config.max_active_operations_per_user,
+                    },
+                )
+            if self._active_job_count >= self.system_config.max_active_operations:
+                raise RavenError(
+                    ErrorCode.OPERATION_CAPACITY_EXCEEDED,
+                    "The server has reached the active operation limit.",
+                    details={
+                        "scope": "server",
+                        "limit": self.system_config.max_active_operations,
+                    },
+                )
+            self._active_jobs_by_user[user_id] = user_count + 1
+            self._active_job_count += 1
+
+
+    async def _release_task_slot(self, user_id: UUID) -> None:
+        async with self._lock:
+            user_count = self._active_jobs_by_user.get(user_id, 0)
+            if user_count <= 1:
+                self._active_jobs_by_user.pop(user_id, None)
+            else:
+                self._active_jobs_by_user[user_id] = user_count - 1
+            if self._active_job_count > 0:
+                self._active_job_count -= 1
 
 
     def track_upload(
@@ -268,7 +334,6 @@ class UserRuntimeRegistry:
 
     async def _acquire(self, user_id: UUID) -> Raven:
         await self.start()
-        await self._retry_pending_cleanup()
         while True:
             async with self._lock:
                 self._ensure_open()
@@ -279,15 +344,39 @@ class UserRuntimeRegistry:
 
                 initialization = self._initializing.get(user_id)
                 evicted: Raven | None = None
+                cleanup_required = False
                 if initialization is None:
-                    evicted = self._reserve_capacity()
-                    if evicted is None:
+                    occupied = (
+                        len(self._entries)
+                        + len(self._initializing)
+                        + len(self._pending_cleanup)
+                    )
+                    cleanup_required = (
+                        bool(self._pending_cleanup)
+                        and occupied >= self.system_config.max_user_runtimes
+                    )
+                    if not cleanup_required:
+                        evicted = self._reserve_capacity()
+                    if not cleanup_required and evicted is None:
                         initialization = asyncio.create_task(
                             self._create_runtime(user_id),
                             name=f"nraven-user-runtime-start-{user_id}",
                         )
                         self._initializing[user_id] = initialization
 
+            if cleanup_required:
+                try:
+                    await self._retry_pending_cleanup()
+                except RavenError as error:
+                    raise RavenError(
+                        ErrorCode.RUNTIME_CAPACITY_EXCEEDED,
+                        "Runtime capacity is waiting for failed cleanup to recover.",
+                        details={
+                            "limit": self.system_config.max_user_runtimes,
+                            "pending_cleanup": len(self._pending_cleanup),
+                        },
+                    ) from error
+                continue
             if evicted is None:
                 assert initialization is not None
                 break
@@ -352,6 +441,15 @@ class UserRuntimeRegistry:
         )
         if occupied < self.system_config.max_user_runtimes:
             return None
+        if self._pending_cleanup:
+            raise RavenError(
+                ErrorCode.RUNTIME_CAPACITY_EXCEEDED,
+                "Runtime capacity is waiting for failed cleanup to recover.",
+                details={
+                    "limit": self.system_config.max_user_runtimes,
+                    "pending_cleanup": len(self._pending_cleanup),
+                },
+            )
         idle = [
             (entry.idle_since, user_id, entry.raven)
             for user_id, entry in self._entries.items()
@@ -397,6 +495,10 @@ class UserRuntimeRegistry:
         try:
             while True:
                 await asyncio.sleep(interval)
+                try:
+                    await self._retry_pending_cleanup()
+                except Exception:
+                    LOGGER.exception("Runtime cleanup retry failed; it will be retried.")
                 try:
                     await self.evict_idle()
                 except Exception:
@@ -479,3 +581,11 @@ class UserRuntimeRegistry:
                 ErrorCode.RUNTIME_REGISTRY_CLOSED,
                 "The user runtime registry is closed.",
             )
+
+
+
+
+def _submitted_operation_task(value: object) -> OperationTask:
+    if isinstance(value, OperationTask):
+        return value
+    return cast(OperationTask, getattr(value, "task", value))

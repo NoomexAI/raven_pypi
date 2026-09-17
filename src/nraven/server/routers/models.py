@@ -7,7 +7,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Request, status
 
 from ...h_api.raven import Raven
-from ..dependencies import lease_raven, retain_task
+from ..dependencies import lease_raven, submit_task
 from ..schemas import (
     ErrorResponse,
     ModelConfigureRequest,
@@ -27,7 +27,10 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {"model": ErrorResponse},
     404: {"model": ErrorResponse},
     409: {"model": ErrorResponse},
+    413: {"model": ErrorResponse},
+    414: {"model": ErrorResponse},
     422: {"model": ErrorResponse},
+    429: {"model": ErrorResponse},
     503: {"model": ErrorResponse},
 }
 
@@ -54,11 +57,14 @@ async def configure_models(
     raven: Annotated[Raven, Depends(lease_raven)],
     http_request: Request,
 ) -> OperationTaskReference:
-    task = await raven.load(
-        request.llm.to_domain(),
-        request.embedding.to_domain(),
+    task = await submit_task(
+        http_request,
+        raven,
+        lambda: raven.load(
+            request.llm.to_domain(),
+            request.embedding.to_domain(),
+        ),
     )
-    await retain_task(http_request, raven, task)
     return OperationTaskReference.from_task(task)
 
 
@@ -115,8 +121,11 @@ async def pull_ollama_model(
     raven: Annotated[Raven, Depends(lease_raven)],
     http_request: Request,
 ) -> OperationTaskReference:
-    task = await raven.pull_ollama_model(request.model)
-    await retain_task(http_request, raven, task)
+    task = await submit_task(
+        http_request,
+        raven,
+        lambda: raven.pull_ollama_model(request.model),
+    )
     return OperationTaskReference.from_task(task)
 
 
@@ -131,8 +140,11 @@ async def delete_ollama_model(
     raven: Annotated[Raven, Depends(lease_raven)],
     http_request: Request,
 ) -> OperationTaskReference:
-    task = await raven.delete_ollama_model(request.model)
-    await retain_task(http_request, raven, task)
+    task = await submit_task(
+        http_request,
+        raven,
+        lambda: raven.delete_ollama_model(request.model),
+    )
     return OperationTaskReference.from_task(task)
 
 

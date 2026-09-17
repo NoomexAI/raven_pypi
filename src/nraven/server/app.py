@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from ..core.config import DEFAULT_USER_ID, SystemConfig, load_system_config
 from .errors import install_error_handling
-from .middleware import UploadBodyLimitMiddleware
+from .middleware import RequestLimitMiddleware
 from .routers.conversations import router as conversations_router
 from .routers.health import router as health_router
 from .routers.knowledges import router as knowledges_router
@@ -51,9 +51,11 @@ def create_app(
     app.state.runtime_registry = registry
     app.state.bearer_token = token_urlsafe(32)
     app.add_middleware(
-        UploadBodyLimitMiddleware,
+        RequestLimitMiddleware,
+        maximum_body_bytes=config.max_request_body_bytes,
         maximum_file_bytes=config.max_source_file_bytes,
         maximum_overhead_bytes=config.max_upload_request_overhead_bytes,
+        maximum_query_string_bytes=config.max_query_string_bytes,
     )
     app.add_middleware(
         CORSMiddleware,

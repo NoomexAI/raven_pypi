@@ -6,12 +6,11 @@ import json
 import math
 import os
 import re
-import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, replace
 from ipaddress import IPv6Address, ip_address
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
@@ -33,6 +32,10 @@ DEFAULT_EMBEDDING_ADAPTER_CACHE_SIZE = 8
 DEFAULT_PROMPT_CACHE_SIZE = 32
 DEFAULT_MAX_SOURCE_FILE_BYTES = 100 * 1024 * 1024
 DEFAULT_MAX_UPLOAD_REQUEST_OVERHEAD_BYTES = 64 * 1024
+DEFAULT_MAX_REQUEST_BODY_BYTES = 1024 * 1024
+DEFAULT_MAX_QUERY_STRING_BYTES = 8 * 1024
+DEFAULT_MAX_ACTIVE_OPERATIONS_PER_USER = 8
+DEFAULT_MAX_ACTIVE_OPERATIONS = 64
 DEFAULT_MAX_DOCUMENT_PAGES = 1_000
 
 
@@ -60,6 +63,10 @@ class SystemConfig:
     sse_heartbeat_interval_seconds: float = 30.0
     max_source_file_bytes: int = DEFAULT_MAX_SOURCE_FILE_BYTES
     max_upload_request_overhead_bytes: int = DEFAULT_MAX_UPLOAD_REQUEST_OVERHEAD_BYTES
+    max_request_body_bytes: int = DEFAULT_MAX_REQUEST_BODY_BYTES
+    max_query_string_bytes: int = DEFAULT_MAX_QUERY_STRING_BYTES
+    max_active_operations_per_user: int = DEFAULT_MAX_ACTIVE_OPERATIONS_PER_USER
+    max_active_operations: int = DEFAULT_MAX_ACTIVE_OPERATIONS
     max_document_pages: int = DEFAULT_MAX_DOCUMENT_PAGES
     max_retrieval_top_k: int = 25
     max_agent_iterations: int = 50
@@ -130,6 +137,10 @@ class SystemConfig:
             "prompt_cache_size",
             "max_source_file_bytes",
             "max_upload_request_overhead_bytes",
+            "max_request_body_bytes",
+            "max_query_string_bytes",
+            "max_active_operations_per_user",
+            "max_active_operations",
             "max_document_pages",
             "max_retrieval_top_k",
             "max_agent_iterations",
@@ -145,6 +156,12 @@ class SystemConfig:
             "finished_operation_cache_size",
             ErrorCode.INVALID_SYSTEM_CONFIG,
         )
+        if self.max_active_operations_per_user > self.max_active_operations:
+            _invalid_config(
+                ErrorCode.INVALID_SYSTEM_CONFIG,
+                "max_active_operations_per_user",
+                "cannot exceed max_active_operations",
+            )
 
         origins = _normalize_origins(self.cors_origins)
         hosts = _normalize_hosts(self.allowed_hosts)
@@ -426,18 +443,14 @@ class PathConfig:
 
 
 def resolve_raven_home(
-    explicit_home: str | Path | None = None,
-    *,
-    environment: Mapping[str, str] | None = None,
+    raven_home: str | Path,
 ) -> Path:
-    """Resolve CLI value, environment value, then the platform default."""
-    if explicit_home is not None:
-        return Path(explicit_home).expanduser().resolve()
-    env = os.environ if environment is None else environment
-    configured = env.get("RAVEN_HOME")
-    if configured:
-        return Path(configured).expanduser().resolve()
-    return _platform_default_home(env).resolve()
+    """Normalize the Raven home explicitly supplied by the caller."""
+    if raven_home is None:
+        raise ValueError("raven_home is required.")
+    if isinstance(raven_home, str) and not raven_home.strip():
+        raise ValueError("raven_home must not be empty.")
+    return Path(raven_home).expanduser().resolve()
 
 
 def load_system_config(
@@ -540,16 +553,6 @@ def _fsync_directory(path: Path) -> None:
         pass
     finally:
         os.close(descriptor)
-
-
-def _platform_default_home(environment: Mapping[str, str]) -> Path:
-    if sys.platform == "win32":
-        base = environment.get("LOCALAPPDATA")
-        return Path(base) / "Raven" if base else Path.home() / "AppData" / "Local" / "Raven"
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "Raven"
-    base = environment.get("XDG_DATA_HOME")
-    return Path(base) / "raven" if base else Path.home() / ".local" / "share" / "raven"
 
 
 def _normalize_origins(value: Any) -> tuple[str, ...]:
@@ -701,7 +704,11 @@ def _require_int_range(
         _invalid_config(error_code, field_name, f"must be an integer {range_text}")
 
 
-def _invalid_config(error_code: ErrorCode, field_name: str, reason: str) -> None:
+def _invalid_config(
+    error_code: ErrorCode,
+    field_name: str,
+    reason: str,
+) -> NoReturn:
     raise RavenError(
         error_code,
         f"Invalid configuration field '{field_name}': {reason}.",

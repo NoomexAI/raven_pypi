@@ -15,7 +15,7 @@ from ...core.upload_retention import (
     remove_upload_source,
 )
 from ...h_api.raven import Raven
-from ..dependencies import get_runtime_registry, lease_raven, resolve_user_id, retain_task
+from ..dependencies import get_runtime_registry, lease_raven, resolve_user_id, submit_task
 from ..runtime import UserRuntimeRegistry
 from ..schemas import (
     ErrorResponse,
@@ -39,7 +39,10 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {"model": ErrorResponse},
     404: {"model": ErrorResponse},
     409: {"model": ErrorResponse},
+    413: {"model": ErrorResponse},
+    414: {"model": ErrorResponse},
     422: {"model": ErrorResponse},
+    429: {"model": ErrorResponse},
     503: {"model": ErrorResponse},
 }
 
@@ -121,8 +124,11 @@ async def delete_knowledge(
     request: Request,
 ) -> OperationTaskReference:
     raven.get_knowledge(name)
-    task = await raven.delete_knowledge(name)
-    await retain_task(request, raven, task)
+    task = await submit_task(
+        request,
+        raven,
+        lambda: raven.delete_knowledge(name),
+    )
     return OperationTaskReference.from_task(task)
 
 
@@ -174,20 +180,27 @@ async def upload_file(
     )
     submitted = False
     try:
-        copy_task = asyncio.create_task(
-            asyncio.to_thread(
-                _copy_upload,
-                file.file,
-                source,
-                raven.system_config.max_source_file_bytes,
+        async def stage_and_ingest():
+            copy_task = asyncio.create_task(
+                asyncio.to_thread(
+                    _copy_upload,
+                    file.file,
+                    source,
+                    raven.system_config.max_source_file_bytes,
+                )
             )
+            try:
+                await asyncio.shield(copy_task)
+            except asyncio.CancelledError:
+                await asyncio.gather(copy_task, return_exceptions=True)
+                raise
+            return await raven.ingest(name, source)
+
+        task = await submit_task(
+            request,
+            raven,
+            stage_and_ingest,
         )
-        try:
-            await asyncio.shield(copy_task)
-        except asyncio.CancelledError:
-            await asyncio.gather(copy_task, return_exceptions=True)
-            raise
-        task = await raven.ingest(name, source)
         submitted = True
         await asyncio.to_thread(
             bind_upload_operation,
@@ -202,7 +215,6 @@ async def upload_file(
             source,
             raven.paths.uploads_dir,
         )
-        await retain_task(request, raven, task)
         return OperationTaskReference.from_task(task)
     finally:
         await file.close()
@@ -252,8 +264,11 @@ async def ingest_trusted_path(
             "The source path is not a regular file.",
         )
     raven.get_knowledge(name)
-    task = await raven.ingest(name, source)
-    await retain_task(http_request, raven, task)
+    task = await submit_task(
+        http_request,
+        raven,
+        lambda: raven.ingest(name, source),
+    )
     return OperationTaskReference.from_task(task)
 
 
@@ -269,8 +284,11 @@ async def delete_file(
     raven: Annotated[Raven, Depends(lease_raven)],
     request: Request,
 ) -> OperationTaskReference:
-    task = await raven.delete_knowledge_file(name, file_id)
-    await retain_task(request, raven, task)
+    task = await submit_task(
+        request,
+        raven,
+        lambda: raven.delete_knowledge_file(name, file_id),
+    )
     return OperationTaskReference.from_task(task)
 
 

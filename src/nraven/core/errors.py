@@ -93,8 +93,12 @@ class ErrorCode(StrEnum):
     RUNTIME_CONFIG_CONFLICT = "runtime_config_conflict"
     INVALID_USER_ID = "invalid_user_id"
     AUTHENTICATION_REQUIRED = "authentication_required"
+    SERVER_ALREADY_RUNNING = "server_already_running"
     RUNTIME_REGISTRY_CLOSED = "runtime_registry_closed"
     RUNTIME_CAPACITY_EXCEEDED = "runtime_capacity_exceeded"
+    OPERATION_CAPACITY_EXCEEDED = "operation_capacity_exceeded"
+    REQUEST_BODY_TOO_LARGE = "request_body_too_large"
+    REQUEST_QUERY_TOO_LARGE = "request_query_too_large"
 
     EVENT_STREAM_CLOSED = "event_stream_closed"
     EVENT_STREAM_FINISHED = "event_stream_finished"

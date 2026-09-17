@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Query, Request, status
 from ...agent.policy import LOCAL_RETRIEVAL_MODES, RetrievalMode
 from ...core.errors import ErrorCode, RavenError
 from ...h_api.raven import Raven
-from ..dependencies import lease_raven, retain_task
+from ..dependencies import lease_raven, submit_task
 from ..schemas import (
     ConversationCreateRequest,
     ConversationMessagePageResponse,
@@ -34,7 +34,10 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {"model": ErrorResponse},
     404: {"model": ErrorResponse},
     409: {"model": ErrorResponse},
+    413: {"model": ErrorResponse},
+    414: {"model": ErrorResponse},
     422: {"model": ErrorResponse},
+    429: {"model": ErrorResponse},
     503: {"model": ErrorResponse},
 }
 
@@ -122,8 +125,11 @@ async def delete_conversation(
     request: Request,
 ) -> OperationTaskReference:
     raven.get_conversation(conversation_id)
-    task = await raven.delete_conversation(conversation_id)
-    await retain_task(request, raven, task)
+    task = await submit_task(
+        request,
+        raven,
+        lambda: raven.delete_conversation(conversation_id),
+    )
     return OperationTaskReference.from_task(task)
 
 
@@ -206,13 +212,23 @@ async def submit_turn(
             ErrorCode.INVALID_RETRIEVAL_MODE,
             f"Retrieval mode '{selected_mode.value}' is not valid for a local conversation.",
         )
-    session = raven.session(conversation)
-    await session.start()
-    run = await session.generate_response(
-        request.user_query,
-        retrieval_mode=request.retrieval_mode,
+    async def start_turn():
+        session = raven.session(conversation)
+        try:
+            await session.start()
+            return await session.generate_response(
+                request.user_query,
+                retrieval_mode=request.retrieval_mode,
+            )
+        except BaseException:
+            await session.close()
+            raise
+
+    run = await submit_task(
+        http_request,
+        raven,
+        start_turn,
     )
-    await retain_task(http_request, raven, run.task)
     return TurnAcceptedResponse(
         conversation_id=conversation_id,
         turn_id=run.turn_id,
@@ -236,8 +252,11 @@ async def reconstruct_turn(
     request: Request,
 ) -> OperationTaskReference:
     await raven.get_conversation_turn(conversation_id, turn_id)
-    task = await raven.reconstruct_from_turn(conversation_id, turn_id)
-    await retain_task(request, raven, task)
+    task = await submit_task(
+        request,
+        raven,
+        lambda: raven.reconstruct_from_turn(conversation_id, turn_id),
+    )
     return OperationTaskReference.from_task(task)
 
 

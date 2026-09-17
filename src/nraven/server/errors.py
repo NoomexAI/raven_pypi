@@ -68,6 +68,7 @@ def install_error_handling(app: FastAPI) -> None:
         request.state.request_id = str(uuid4())
         rejected = await _reject_untrusted_request(request)
         if rejected is not None:
+            _apply_allowed_cors(request, rejected)
             return rejected
         response = await call_next(request)
         response.headers[REQUEST_ID_HEADER] = request.state.request_id
@@ -127,8 +128,15 @@ def install_error_handling(app: FastAPI) -> None:
 
 
 def _status_for_raven_error(code: ErrorCode) -> int:
-    if code == ErrorCode.SOURCE_FILE_TOO_LARGE:
+    if code in {
+        ErrorCode.SOURCE_FILE_TOO_LARGE,
+        ErrorCode.REQUEST_BODY_TOO_LARGE,
+    }:
         return HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+    if code == ErrorCode.REQUEST_QUERY_TOO_LARGE:
+        return HTTPStatus.REQUEST_URI_TOO_LONG
+    if code == ErrorCode.OPERATION_CAPACITY_EXCEEDED:
+        return HTTPStatus.TOO_MANY_REQUESTS
     if code == ErrorCode.AUTHENTICATION_REQUIRED:
         return HTTPStatus.UNAUTHORIZED
     if code in _NOT_FOUND_CODES:
@@ -183,6 +191,17 @@ def _request_id(request: Request) -> str:
     return request_id
 
 
+def _apply_allowed_cors(request: Request, response: Response) -> None:
+    """Expose an early boundary error only to an explicitly allowed origin."""
+    origin = request.headers.get("origin")
+    if origin is None or origin not in request.app.state.system_config.cors_origins:
+        return
+    response.headers["Access-Control-Allow-Origin"] = origin
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    response.headers["Access-Control-Expose-Headers"] = REQUEST_ID_HEADER
+    response.headers["Vary"] = "Origin"
+
+
 async def _reject_untrusted_request(request: Request) -> JSONResponse | None:
     """Verify one request's host, origin, and identity before body parsing."""
     host = request.headers.get("host", "")
@@ -222,7 +241,12 @@ async def _reject_untrusted_request(request: Request) -> JSONResponse | None:
 
     scheme, separator, candidate = request.headers.get("authorization", "").partition(" ")
     expected = request.app.state.bearer_token
-    if not separator or scheme.lower() != "bearer" or not hmac.compare_digest(candidate, expected):
+    if (
+        not separator
+        or scheme.lower() != "bearer"
+        or not candidate.isascii()
+        or not hmac.compare_digest(candidate, expected)
+    ):
         return _unauthorized_response(request)
 
     raw_user_id = request.headers.get(USER_ID_HEADER)

@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
-from typing import Annotated
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Annotated, TypeVar
 from uuid import UUID
 
 from fastapi import Depends, Request
 
 from ..core.async_utils import await_completion
 from ..core.errors import ErrorCode, RavenError
-from ..core.operations import OperationTask
 from ..h_api.raven import Raven
 from .runtime import UserRuntimeRegistry
+
+
+SubmittedValue = TypeVar("SubmittedValue")
 
 
 def get_runtime_registry(request: Request) -> UserRuntimeRegistry:
@@ -52,19 +54,20 @@ async def lease_raven(
         yield raven
 
 
-async def retain_task(
+async def submit_task(
     request: Request,
     raven: Raven,
-    task: OperationTask,
-) -> None:
-    """Transfer ownership of an accepted background task to the registry."""
-    retention = asyncio.create_task(
-        get_runtime_registry(request).retain_task(
+    submitter: Callable[[], Awaitable[SubmittedValue]],
+) -> SubmittedValue:
+    """Admit, create, and retain one accepted background task."""
+    submission = asyncio.create_task(
+        get_runtime_registry(request).submit_task(
             resolve_user_id(request),
             raven,
-            task,
+            submitter,
         )
     )
-    _, cancellation_requested = await await_completion(retention)
+    submitted, cancellation_requested = await await_completion(submission)
     if cancellation_requested:
         raise asyncio.CancelledError
+    return submitted

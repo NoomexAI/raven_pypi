@@ -23,6 +23,15 @@ from ..core.operations import (
 from ..providers import ModelRole, ModelSpec
 
 
+MAX_IDENTIFIER_LENGTH = 255
+MAX_TITLE_LENGTH = 500
+MAX_SUMMARY_LENGTH = 32_768
+MAX_USER_QUERY_LENGTH = 32_768
+MAX_PREFERENCE_LENGTH = 8_192
+MAX_SOURCE_PATH_LENGTH = 32_768
+MAX_MODEL_OPTIONS = 128
+
+
 class HealthResponse(BaseModel):
     """Minimal process health response used by foundational probes."""
 
@@ -100,14 +109,15 @@ class ModelSpecRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    provider: str = Field(min_length=1)
-    model: str = Field(min_length=1)
+    provider: str = Field(min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
+    model: str = Field(min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
     role: ModelRole
     api_key_ref: str | None = Field(
         default=None,
+        max_length=MAX_IDENTIFIER_LENGTH,
         pattern=r"^[A-Za-z_][A-Za-z0-9_]*$",
     )
-    options: dict[str, Any] = Field(default_factory=dict)
+    options: dict[str, Any] = Field(default_factory=dict, max_length=MAX_MODEL_OPTIONS)
 
 
     @field_validator("provider", "model")
@@ -150,7 +160,7 @@ class OllamaModelRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    model: str = Field(min_length=1)
+    model: str = Field(min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
 
 
     @field_validator("model")
@@ -237,8 +247,8 @@ class KnowledgeCreateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(min_length=1)
-    user_summary: str = ""
+    name: str = Field(min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
+    user_summary: str = Field(default="", max_length=MAX_SUMMARY_LENGTH)
 
 
 
@@ -248,7 +258,7 @@ class KnowledgeUpdateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    user_summary: str
+    user_summary: str = Field(max_length=MAX_SUMMARY_LENGTH)
 
 
 
@@ -258,7 +268,7 @@ class IngestPathRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    source_path: str = Field(min_length=1)
+    source_path: str = Field(min_length=1, max_length=MAX_SOURCE_PATH_LENGTH)
 
 
 
@@ -373,7 +383,7 @@ class ConversationCreateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    knowledge_name: str | None = None
+    knowledge_name: str | None = Field(default=None, max_length=MAX_IDENTIFIER_LENGTH)
 
 
 
@@ -383,7 +393,7 @@ class ConversationUpdateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    title: str | None = None
+    title: str | None = Field(default=None, max_length=MAX_TITLE_LENGTH)
     pinned: bool | None = None
 
 
@@ -501,7 +511,7 @@ class TurnCreateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    user_query: str = Field(min_length=1)
+    user_query: str = Field(min_length=1, max_length=MAX_USER_QUERY_LENGTH)
     retrieval_mode: RetrievalMode | Literal["auto"] | None = None
 
 
@@ -612,7 +622,7 @@ class PreferenceCreateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    text: str = Field(min_length=1)
+    text: str = Field(min_length=1, max_length=MAX_PREFERENCE_LENGTH)
 
 
 
