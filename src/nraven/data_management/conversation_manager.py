@@ -27,7 +27,11 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models as qdrant_models
 
 from ..core.async_utils import await_completion, run_in_thread
-from ..core.config import DEFAULT_OPEN_CONVERSATION_LIMIT, PathConfig
+from ..core.config import (
+    DEFAULT_OPEN_CONVERSATION_LIMIT,
+    SQLITE_MAX_INTEGER,
+    PathConfig,
+)
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
 from ..core.operations import Operation, OperationManager, OperationTask, OperationType
@@ -504,9 +508,10 @@ class Conversation:
         self._lifecycle_lock = asyncio.Lock()
         self._memory_lock = asyncio.Lock()
         self._mutation_lock = asyncio.Lock()
-        self._session_lock = asyncio.Lock()
+        self._turn_lock = asyncio.Lock()
         self._title_lock = asyncio.Lock()
-        self._active_session_id: UUID | None = None
+        self._active_turn_owner: UUID | None = None
+        self._memory_configuration: tuple[int, int, int, int] | None = None
         self._started = False
         self._closed = False
         self._operation_manager = operation_manager
@@ -547,8 +552,8 @@ class Conversation:
 
 
     @property
-    def has_active_session(self) -> bool:
-        return self._active_session_id is not None
+    def has_active_turn(self) -> bool:
+        return self._active_turn_owner is not None
 
 
     @property
@@ -595,6 +600,7 @@ class Conversation:
             self._chat_store = None
             self._chat_memory = None
             self._vector_memory = None
+            self._memory_configuration = None
             self._closed = True
             self._started = False
             await run_in_thread(self._close_open_storage)
@@ -606,11 +612,12 @@ class Conversation:
             if not self.is_started:
                 return True
             with self._usage_lock:
-                if self.has_active_session or self._active_uses:
+                if self.has_active_turn or self._active_uses:
                     return False
                 self._chat_store = None
                 self._chat_memory = None
                 self._vector_memory = None
+                self._memory_configuration = None
                 self._started = False
             await run_in_thread(self._close_open_storage)
             return True
@@ -636,26 +643,22 @@ class Conversation:
                 self._active_uses -= 1
 
 
-    async def _claim_session(self, session_id: UUID) -> None:
-        """Reserve this conversation for one active Session instance."""
-        async with self._lifecycle_lock:
-            async with self._session_lock:
-                if (
-                    self._active_session_id is not None
-                    and self._active_session_id != session_id
-                ):
-                    raise RavenError(
-                        ErrorCode.CONVERSATION_SESSION_ACTIVE,
-                        f"Conversation '{self.conversation_id}' already has an active session.",
-                    )
-                self._active_session_id = session_id
+    async def _claim_turn(self, session_id: UUID) -> None:
+        """Reserve this conversation for one active turn."""
+        async with self._turn_lock:
+            if self._active_turn_owner is not None:
+                raise RavenError(
+                    ErrorCode.CONVERSATION_TURN_ACTIVE,
+                    f"Conversation '{self.conversation_id}' already has an active turn.",
+                )
+            self._active_turn_owner = session_id
 
 
-    async def _release_session(self, session_id: UUID) -> None:
-        """Release a Session reservation owned by ``session_id``."""
-        async with self._session_lock:
-            if self._active_session_id == session_id:
-                self._active_session_id = None
+    async def _release_turn(self, session_id: UUID) -> None:
+        """Release the active-turn reservation owned by ``session_id``."""
+        async with self._turn_lock:
+            if self._active_turn_owner == session_id:
+                self._active_turn_owner = None
 
 
     async def initialize_memory(
@@ -684,8 +687,27 @@ class Conversation:
 
         await self.start()
         async with self._memory_lock:
-            if self._chat_memory is not None:
+            configuration = (
+                id(llm),
+                id(embed_model),
+                token_limit,
+                memory_top_k,
+            )
+            if (
+                self._chat_memory is not None
+                and self._memory_configuration == configuration
+            ):
                 return
+
+            if self._chat_memory is not None:
+                stale_qdrant = self._qdrant
+                self._qdrant = None
+                self._chat_store = None
+                self._chat_memory = None
+                self._vector_memory = None
+                self._memory_configuration = None
+                if stale_qdrant is not None:
+                    await run_in_thread(stale_qdrant.close)
 
             if self._qdrant is None:
                 await run_in_thread(self._open_qdrant)
@@ -718,6 +740,7 @@ class Conversation:
             self._chat_store = chat_store
             self._chat_memory = chat_memory
             self._vector_memory = vector_memory
+            self._memory_configuration = configuration
 
         try:
             pending_turn_ids = await run_in_thread(
@@ -730,6 +753,7 @@ class Conversation:
                 self._chat_store = None
                 self._chat_memory = None
                 self._vector_memory = None
+                self._memory_configuration = None
             raise
 
 
@@ -741,6 +765,7 @@ class Conversation:
             self._chat_store = None
             self._chat_memory = None
             self._vector_memory = None
+            self._memory_configuration = None
         if qdrant is not None:
             await run_in_thread(qdrant.close)
 
@@ -877,6 +902,7 @@ class Conversation:
         after_message_id: int = 0,
     ) -> list[dict[str, Any]]:
         """Return a bounded page of canonical, uncompacted messages."""
+        self._validate_message_cursor(after_message_id)
         return await self._run_in_use(
             lambda: run_in_thread(
                 self._message_store.list_messages_page,
@@ -917,6 +943,8 @@ class Conversation:
         after_message_id: int = 0,
     ) -> list[dict[str, Any]]:
         """Return a bounded page after checking that the turn exists."""
+        self._validate_message_cursor(after_message_id)
+
         async def load_page() -> list[dict[str, Any]]:
             normalized = self._validate_turn_id(turn_id)
             turn = await run_in_thread(self._message_store.get_turn, normalized)
@@ -1276,6 +1304,20 @@ class Conversation:
                 "turn_id must be a valid UUID.",
             ) from exc
         return str(parsed)
+
+
+    @staticmethod
+    def _validate_message_cursor(after_message_id: int) -> None:
+        if (
+            isinstance(after_message_id, bool)
+            or not isinstance(after_message_id, int)
+            or not 0 <= after_message_id <= SQLITE_MAX_INTEGER
+        ):
+            raise RavenError(
+                ErrorCode.INVALID_MESSAGE_CURSOR,
+                "after_message_id must be between 0 and SQLite's maximum integer.",
+                details={"maximum": SQLITE_MAX_INTEGER},
+            )
 
 
     @staticmethod
@@ -1646,6 +1688,7 @@ class Conversation:
         self._chat_store = None
         self._chat_memory = None
         self._vector_memory = None
+        self._memory_configuration = None
         cleanup_error: BaseException | None = None
         try:
             self._message_store.close()
@@ -2394,10 +2437,10 @@ class ConversationManager:
     ) -> None:
         """Remove a conversation from the registry and disk."""
         conversation = self.get(conversation_id)
-        if conversation.has_active_session:
+        if conversation.has_active_turn:
             raise RavenError(
-                ErrorCode.CONVERSATION_SESSION_ACTIVE,
-                f"Conversation '{conversation_id}' has an active session.",
+                ErrorCode.CONVERSATION_TURN_ACTIVE,
+                f"Conversation '{conversation_id}' has an active turn.",
             )
         await self._emit(
             operation,
@@ -2480,7 +2523,7 @@ class ConversationManager:
                     (
                         conversation
                         for conversation in opened
-                        if not conversation.has_active_session
+                        if not conversation.has_active_turn
                         and conversation.active_uses == 0
                         and id(conversation) not in unavailable
                     ),

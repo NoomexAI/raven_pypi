@@ -515,6 +515,15 @@ class TurnCreateRequest(BaseModel):
     retrieval_mode: RetrievalMode | Literal["auto"] | None = None
 
 
+    @field_validator("user_query")
+    @classmethod
+    def validate_user_query(cls, value: str) -> str:
+        query = value.strip()
+        if not query:
+            raise ValueError("user_query must contain non-whitespace characters")
+        return query
+
+
 
 
 class TurnAcceptedResponse(BaseModel):

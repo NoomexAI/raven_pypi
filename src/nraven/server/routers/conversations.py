@@ -8,6 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, Request, status
 
 from ...agent.policy import LOCAL_RETRIEVAL_MODES, RetrievalMode
+from ...core.config import SQLITE_MAX_INTEGER
 from ...core.errors import ErrorCode, RavenError
 from ...h_api.raven import Raven
 from ..dependencies import lease_raven, submit_task
@@ -142,7 +143,7 @@ async def get_messages(
     conversation_id: str,
     raven: Annotated[Raven, Depends(lease_raven)],
     limit: Annotated[int | None, Query(ge=1)] = None,
-    after_message_id: Annotated[int, Query(ge=0)] = 0,
+    after_message_id: Annotated[int, Query(ge=0, le=SQLITE_MAX_INTEGER)] = 0,
 ) -> ConversationMessagePageResponse:
     page_size = _page_size(raven, limit)
     records = await raven.get_conversation_messages_page(
@@ -177,7 +178,7 @@ async def get_turn_messages(
     turn_id: UUID,
     raven: Annotated[Raven, Depends(lease_raven)],
     limit: Annotated[int | None, Query(ge=1)] = None,
-    after_message_id: Annotated[int, Query(ge=0)] = 0,
+    after_message_id: Annotated[int, Query(ge=0, le=SQLITE_MAX_INTEGER)] = 0,
 ) -> ConversationMessagePageResponse:
     page_size = _page_size(raven, limit)
     records = await raven.get_conversation_turn_messages_page(

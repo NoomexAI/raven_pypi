@@ -75,8 +75,13 @@ async def configure_models(
 )
 async def ollama_status(
     raven: Annotated[Raven, Depends(lease_raven)],
+    request: Request,
 ) -> OllamaProviderStatusResponse:
-    task = await raven.check_ollama_connection()
+    task = await submit_task(
+        request,
+        raven,
+        raven.check_ollama_connection,
+    )
     await task.result()
     return OllamaProviderStatusResponse()
 
@@ -88,8 +93,13 @@ async def ollama_status(
 )
 async def list_ollama_models(
     raven: Annotated[Raven, Depends(lease_raven)],
+    request: Request,
 ) -> OllamaModelsResponse:
-    task = await raven.list_ollama_models()
+    task = await submit_task(
+        request,
+        raven,
+        raven.list_ollama_models,
+    )
     result = await task.result()
     return OllamaModelsResponse(
         items=[_model_summary(item) for item in result]
@@ -104,8 +114,13 @@ async def list_ollama_models(
 async def inspect_ollama_model(
     request: OllamaModelRequest,
     raven: Annotated[Raven, Depends(lease_raven)],
+    http_request: Request,
 ) -> OllamaModelInspectionResponse:
-    task = await raven.inspect_ollama_model(request.model)
+    task = await submit_task(
+        http_request,
+        raven,
+        lambda: raven.inspect_ollama_model(request.model),
+    )
     result = await task.result()
     return _model_inspection(request.model, result)
 
