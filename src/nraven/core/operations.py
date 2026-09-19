@@ -59,6 +59,8 @@ class OperationType(StrEnum):
     MODEL_DELETE = "model.delete"
     MODEL_LOAD_LLM = "model.load_llm"
     MODEL_LOAD_EMBEDDING = "model.load_embedding"
+    MODEL_PRELOAD_LLM = "model.preload_llm"
+    MODEL_PRELOAD_EMBEDDING = "model.preload_embedding"
     MODEL_UNLOAD_LLM = "model.unload_llm"
     MODEL_UNLOAD_EMBEDDING = "model.unload_embedding"
 

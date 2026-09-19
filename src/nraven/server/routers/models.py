@@ -7,8 +7,10 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Request, status
 
 from ...h_api.raven import Raven
+from ...providers import ModelRole
 from ..dependencies import lease_raven, submit_task
 from ..schemas import (
+    ConfiguredModelPreloadRequest,
     ErrorResponse,
     ModelConfigureRequest,
     OllamaModelDetailsResponse,
@@ -159,6 +161,48 @@ async def delete_ollama_model(
         http_request,
         raven,
         lambda: raven.delete_ollama_model(request.model),
+    )
+    return OperationTaskReference.from_task(task)
+
+
+@router.post(
+    "/api/v1/provider/models/configured/{role}/preload",
+    response_model=OperationTaskReference,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses=_ERROR_RESPONSES,
+)
+async def preload_configured_model(
+    role: ModelRole,
+    raven: Annotated[Raven, Depends(lease_raven)],
+    http_request: Request,
+    request: ConfiguredModelPreloadRequest | None = None,
+) -> OperationTaskReference:
+    task = await submit_task(
+        http_request,
+        raven,
+        lambda: raven.preload_configured_model(
+            role,
+            None if request is None else request.keep_alive,
+        ),
+    )
+    return OperationTaskReference.from_task(task)
+
+
+@router.post(
+    "/api/v1/provider/models/configured/{role}/unload",
+    response_model=OperationTaskReference,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses=_ERROR_RESPONSES,
+)
+async def unload_configured_model(
+    role: ModelRole,
+    raven: Annotated[Raven, Depends(lease_raven)],
+    http_request: Request,
+) -> OperationTaskReference:
+    task = await submit_task(
+        http_request,
+        raven,
+        lambda: raven.unload_configured_model(role),
     )
     return OperationTaskReference.from_task(task)
 

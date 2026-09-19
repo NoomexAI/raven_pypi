@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
@@ -169,6 +170,35 @@ class OllamaModelRequest(BaseModel):
         value = value.strip()
         if not value:
             raise ValueError("model cannot be empty")
+        return value
+
+
+
+class ConfiguredModelPreloadRequest(BaseModel):
+    """Optional residency duration for the configured local model."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    keep_alive: float | str | None = None
+
+
+    @field_validator("keep_alive", mode="before")
+    @classmethod
+    def validate_keep_alive(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise ValueError("keep_alive must be a duration string or finite number")
+        if isinstance(value, str):
+            if not value or value.strip() != value:
+                raise ValueError("keep_alive cannot be empty or padded")
+            if value == "0":
+                raise ValueError("keep_alive cannot be zero for preload")
+            return value
+        if not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError("keep_alive must be a duration string or finite number")
+        if value == 0:
+            raise ValueError("keep_alive cannot be zero for preload")
         return value
 
 

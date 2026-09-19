@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "noomexai-raven"
 version = "0.2.0"
-description = "RAVEN — Retrieval Augmented Adaptive Epistemic Navigation. Privacy-first, fully offline RAG backend."
+description = "RAVEN — Retrieval Augmented Adaptive Epistemic Navigation. Privacy-first, RAG backend."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE.txt"]

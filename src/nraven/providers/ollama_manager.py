@@ -7,6 +7,7 @@ service, but it does not start or stop the Ollama process.
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 from collections import OrderedDict
 from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -38,6 +39,9 @@ class _KeyedLock:
 
 class OllamaManager:
     """Manage Ollama models and create their LlamaIndex adapters."""
+
+    _RESIDENCY_POLL_INTERVAL_SECONDS = 0.1
+    _RESIDENCY_CONFIRMATION_TIMEOUT_SECONDS = 10.0
 
     def __init__(
         self,
@@ -379,6 +383,112 @@ class OllamaManager:
             pull_task = await self.pull(model, operation=operation)
             await pull_task.result()
 
+
+    async def preload_llm(
+        self,
+        model: str,
+        keep_alive: str | float | None = None,
+        *,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        self._validate_keep_alive(keep_alive)
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.MODEL_PRELOAD_LLM
+        )
+        return await active_operation.run(
+            OperationType.MODEL_PRELOAD_LLM,
+            lambda active_operation: self._preload_llm(
+                model,
+                keep_alive,
+                operation=active_operation,
+            ),
+        )
+
+
+    async def _preload_llm(
+        self,
+        model: str,
+        keep_alive: str | float | None,
+        *,
+        operation: Operation,
+    ) -> None:
+        data = self._residency_event_data(model, "llm", keep_alive)
+        await self._emit(operation, EventType.MODEL_PRELOAD_LLM_STARTED, data)
+        try:
+            async with self._model_guard(model):
+                await self.ensure_available(model, operation=operation)
+                await self._client.generate(
+                    model=model,
+                    prompt="",
+                    stream=False,
+                    keep_alive=keep_alive,
+                )
+                await self._wait_for_residency(model, resident=True)
+        except Exception as exc:
+            error = self._provider_error("preload LLM", model)
+            await self._emit(
+                operation,
+                EventType.MODEL_PRELOAD_LLM_FAILED,
+                {**data, "error": error_payload(error)},
+            )
+            raise error from exc
+        await self._emit(operation, EventType.MODEL_PRELOAD_LLM_COMPLETED, data)
+
+
+    async def preload_embedding(
+        self,
+        model: str,
+        keep_alive: str | float | None = None,
+        *,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        self._validate_keep_alive(keep_alive)
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.MODEL_PRELOAD_EMBEDDING
+        )
+        return await active_operation.run(
+            OperationType.MODEL_PRELOAD_EMBEDDING,
+            lambda active_operation: self._preload_embedding(
+                model,
+                keep_alive,
+                operation=active_operation,
+            ),
+        )
+
+
+    async def _preload_embedding(
+        self,
+        model: str,
+        keep_alive: str | float | None,
+        *,
+        operation: Operation,
+    ) -> None:
+        data = self._residency_event_data(model, "embedding", keep_alive)
+        await self._emit(operation, EventType.MODEL_PRELOAD_EMBEDDING_STARTED, data)
+        try:
+            async with self._model_guard(model):
+                await self.ensure_available(model, operation=operation)
+                await self._client.embed(
+                    model=model,
+                    input="",
+                    keep_alive=keep_alive,
+                )
+                await self._wait_for_residency(model, resident=True)
+        except Exception as exc:
+            error = self._provider_error("preload embedding model", model)
+            await self._emit(
+                operation,
+                EventType.MODEL_PRELOAD_EMBEDDING_FAILED,
+                {**data, "error": error_payload(error)},
+            )
+            raise error from exc
+        await self._emit(
+            operation,
+            EventType.MODEL_PRELOAD_EMBEDDING_COMPLETED,
+            data,
+        )
+
+
     async def unload_llm(self, model: str, *, operation: Operation | None = None) -> OperationTask:
         active_operation = operation or await self._operation_manager.create(
             OperationType.MODEL_UNLOAD_LLM
@@ -402,6 +512,7 @@ class OllamaManager:
                     keep_alive=0,
                     options={"num_predict": 1},
                 )
+                await self._wait_for_residency(model, resident=False)
                 self._llms.pop(model, None)
         except Exception as exc:
             error = self._provider_error("unload LLM", model)
@@ -442,6 +553,7 @@ class OllamaManager:
         try:
             async with self._model_guard(model):
                 await self._client.embed(model=model, input="", keep_alive=0)
+                await self._wait_for_residency(model, resident=False)
                 self._embeddings.pop(model, None)
         except Exception as exc:
             error = self._provider_error("unload embedding model", model)
@@ -472,6 +584,37 @@ class OllamaManager:
 
     def _pull_guard(self, model: str) -> AbstractAsyncContextManager[None]:
         return self._keyed_lock(self._pull_locks, model)
+
+
+    async def _wait_for_residency(self, model: str, *, resident: bool) -> None:
+        timeout = min(
+            self.request_timeout,
+            self._RESIDENCY_CONFIRMATION_TIMEOUT_SECONDS,
+        )
+        deadline = asyncio.get_running_loop().time() + timeout
+        expected_name = self._canonical_model_name(model)
+        while True:
+            response = await self._client.ps()
+            models = response.models if hasattr(response, "models") else response["models"]
+            running = {
+                self._canonical_model_name(
+                    str(
+                        getattr(item, "model", None)
+                        or getattr(item, "name", None)
+                        or item.get("model")
+                        or item.get("name")
+                    )
+                )
+                for item in models
+            }
+            if (expected_name in running) == resident:
+                return
+            if asyncio.get_running_loop().time() >= deadline:
+                state = "resident" if resident else "unloaded"
+                raise TimeoutError(
+                    f"Ollama model '{model}' was not confirmed as {state}."
+                )
+            await asyncio.sleep(self._RESIDENCY_POLL_INTERVAL_SECONDS)
 
 
     @staticmethod
@@ -505,12 +648,63 @@ class OllamaManager:
 
 
     @staticmethod
+    def _canonical_model_name(model: str) -> str:
+        final_segment = model.rsplit("/", 1)[-1]
+        return model if ":" in final_segment else f"{model}:latest"
+
+
+    @staticmethod
     def _validate_cache_size(value: int, role: str) -> None:
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise RavenError(
                 ErrorCode.INVALID_RESOURCE_CACHE_SIZE,
                 f"{role} adapter cache size must be a positive integer.",
             )
+
+
+    @staticmethod
+    def _validate_keep_alive(value: str | float | None) -> None:
+        if value is None:
+            return
+        if isinstance(value, bool):
+            raise RavenError(
+                ErrorCode.INVALID_MODEL_SPEC,
+                "Ollama keep_alive must be a duration string or finite number.",
+            )
+        if isinstance(value, str):
+            if value.strip() != value or not value:
+                raise RavenError(
+                    ErrorCode.INVALID_MODEL_SPEC,
+                    "Ollama keep_alive duration cannot be empty or padded.",
+                )
+            if value == "0":
+                raise RavenError(
+                    ErrorCode.INVALID_MODEL_SPEC,
+                    "Ollama preload keep_alive cannot be zero; use unload instead.",
+                )
+            return
+        if not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise RavenError(
+                ErrorCode.INVALID_MODEL_SPEC,
+                "Ollama keep_alive must be a duration string or finite number.",
+            )
+        if value == 0:
+            raise RavenError(
+                ErrorCode.INVALID_MODEL_SPEC,
+                "Ollama preload keep_alive cannot be zero; use unload instead.",
+            )
+
+
+    @staticmethod
+    def _residency_event_data(
+        model: str,
+        role: str,
+        keep_alive: str | float | None,
+    ) -> dict[str, Any]:
+        data: dict[str, Any] = {"model": model, "role": role}
+        if keep_alive is not None:
+            data["keep_alive"] = keep_alive
+        return data
 
 
     @staticmethod

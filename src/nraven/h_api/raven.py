@@ -581,24 +581,47 @@ class Raven:
         return await self.provider.ollama.delete(model, operation=operation)
 
 
-    async def unload_ollama_llm(
+    async def preload_configured_model(
         self,
-        model: str,
+        role: ModelRole,
+        keep_alive: str | float | None = None,
         *,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self.provider.ollama.unload_llm(model, operation=operation)
+        """Preload the configured model when it uses local Ollama storage."""
+        operation_type = self._preload_operation_type(role)
+        active_operation = operation or await self.operation_manager.create(
+            operation_type
+        )
+        return await active_operation.run(
+            operation_type,
+            lambda active_operation: self._change_configured_model_residency(
+                role,
+                action="preload",
+                keep_alive=keep_alive,
+                operation=active_operation,
+            ),
+        )
 
 
-    async def unload_ollama_embedding(
+    async def unload_configured_model(
         self,
-        model: str,
+        role: ModelRole,
         *,
         operation: Operation | None = None,
     ) -> OperationTask:
-        return await self.provider.ollama.unload_embedding(
-            model,
-            operation=operation,
+        """Release a configured Ollama model without removing its adapter."""
+        operation_type = self._unload_operation_type(role)
+        active_operation = operation or await self.operation_manager.create(
+            operation_type
+        )
+        return await active_operation.run(
+            operation_type,
+            lambda active_operation: self._change_configured_model_residency(
+                role,
+                action="unload",
+                operation=active_operation,
+            ),
         )
 
 
@@ -634,6 +657,8 @@ class Raven:
         async with self._model_lock:
             self._models_reloading = True
             try:
+                previous_llm_spec = self._llm_spec
+                previous_embedding_spec = self._embedding_spec
                 llm_task = await self.provider.load(llm_spec, operation=operation)
                 embedding_task = await self.provider.load(
                     embedding_spec,
@@ -664,12 +689,181 @@ class Raven:
                 self._llm_spec = llm_spec
                 self._embedding_spec = embedding_spec
                 self._configure_model_components()
+                await self._unload_replaced_ollama_models(
+                    previous_llm_spec,
+                    previous_embedding_spec,
+                    llm_spec,
+                    embedding_spec,
+                    operation=operation,
+                )
+                await self._preload_model_spec(
+                    embedding_spec,
+                    operation=operation,
+                )
+                await self._preload_model_spec(
+                    llm_spec,
+                    operation=operation,
+                )
             finally:
                 self._models_reloading = False
         return {
             "llm": self._model_result(llm_spec),
             "embedding": self._model_result(embedding_spec),
         }
+
+
+    async def _change_configured_model_residency(
+        self,
+        role: ModelRole,
+        *,
+        action: str,
+        operation: Operation,
+        keep_alive: str | float | None = None,
+    ) -> dict[str, Any]:
+        async with self._model_lock:
+            spec = self._configured_model_spec(role)
+            if action == "preload":
+                return await self._preload_model_spec(
+                    spec,
+                    keep_alive=keep_alive,
+                    operation=operation,
+                )
+            return await self._unload_model_spec(spec, operation=operation)
+
+
+    async def _unload_replaced_ollama_models(
+        self,
+        previous_llm_spec: ModelSpec | None,
+        previous_embedding_spec: ModelSpec | None,
+        llm_spec: ModelSpec,
+        embedding_spec: ModelSpec,
+        *,
+        operation: Operation,
+    ) -> None:
+        active_ollama_models = {
+            spec.model
+            for spec in (llm_spec, embedding_spec)
+            if spec.provider == "ollama"
+        }
+        unloaded_models: set[str] = set()
+        for spec in (previous_llm_spec, previous_embedding_spec):
+            if (
+                spec is None
+                or spec.provider != "ollama"
+                or spec.model in active_ollama_models
+                or spec.model in unloaded_models
+            ):
+                continue
+            await self._unload_model_spec(spec, operation=operation)
+            unloaded_models.add(spec.model)
+
+
+    async def _preload_model_spec(
+        self,
+        spec: ModelSpec,
+        *,
+        operation: Operation,
+        keep_alive: str | float | None = None,
+    ) -> dict[str, Any]:
+        if spec.provider != "ollama":
+            return self._model_residency_result(
+                spec,
+                action="preload",
+                performed=False,
+                reason="provider_has_no_local_residency",
+            )
+        loader = (
+            self.provider.ollama.preload_llm
+            if spec.role == ModelRole.LLM
+            else self.provider.ollama.preload_embedding
+        )
+        task = await loader(spec.model, keep_alive, operation=operation)
+        await task.result()
+        return self._model_residency_result(
+            spec,
+            action="preload",
+            performed=True,
+        )
+
+
+    async def _unload_model_spec(
+        self,
+        spec: ModelSpec,
+        *,
+        operation: Operation,
+    ) -> dict[str, Any]:
+        if spec.provider != "ollama":
+            return self._model_residency_result(
+                spec,
+                action="unload",
+                performed=False,
+                reason="provider_has_no_local_residency",
+            )
+        unloader = (
+            self.provider.ollama.unload_llm
+            if spec.role == ModelRole.LLM
+            else self.provider.ollama.unload_embedding
+        )
+        task = await unloader(spec.model, operation=operation)
+        await task.result()
+        return self._model_residency_result(
+            spec,
+            action="unload",
+            performed=True,
+        )
+
+
+    def _configured_model_spec(self, role: ModelRole) -> ModelSpec:
+        if role == ModelRole.LLM:
+            spec = self._llm_spec
+            error_code = ErrorCode.LLM_MODEL_REQUIRED
+        else:
+            spec = self._embedding_spec
+            error_code = ErrorCode.EMBEDDING_MODEL_REQUIRED
+        if spec is None:
+            raise RavenError(
+                error_code,
+                f"No {role.value} model is currently configured.",
+            )
+        return spec
+
+
+    @staticmethod
+    def _preload_operation_type(role: ModelRole) -> OperationType:
+        return (
+            OperationType.MODEL_PRELOAD_LLM
+            if role == ModelRole.LLM
+            else OperationType.MODEL_PRELOAD_EMBEDDING
+        )
+
+
+    @staticmethod
+    def _unload_operation_type(role: ModelRole) -> OperationType:
+        return (
+            OperationType.MODEL_UNLOAD_LLM
+            if role == ModelRole.LLM
+            else OperationType.MODEL_UNLOAD_EMBEDDING
+        )
+
+
+    @staticmethod
+    def _model_residency_result(
+        spec: ModelSpec,
+        *,
+        action: str,
+        performed: bool,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "action": action,
+            "performed": performed,
+            "provider": spec.provider,
+            "model": spec.model,
+            "role": spec.role.value,
+        }
+        if reason is not None:
+            result["reason"] = reason
+        return result
 
 
     def _configure_model_components(self) -> None:
