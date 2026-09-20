@@ -26,6 +26,8 @@ Runtime dependencies:
 * llama-index-core
 * llama-index-llms-ollama
 * llama-index-embeddings-ollama
+* llama-index-llms-litellm
+* llama-index-embeddings-litellm
 * llama-index-vector-stores-qdrant
   Source: https://github.com/run-llama/llama_index/blob/main/llama-dev/LICENSE
 
@@ -38,19 +40,13 @@ Runtime dependencies:
 * docling
   Source: https://github.com/docling-project/docling/blob/main/LICENSE
 
+* litellm
+  Source: https://github.com/BerriAI/litellm/blob/main/LICENSE
+
 Optional server dependencies:
 
 * fastapi
   Source: https://github.com/fastapi/fastapi/blob/master/LICENSE
-
-Optional LiteLLM dependencies:
-
-* llama-index-llms-litellm
-* llama-index-embeddings-litellm
-  Source: https://github.com/run-llama/llama_index/blob/main/llama-dev/LICENSE
-
-* litellm
-  Source: https://github.com/BerriAI/litellm/blob/main/LICENSE
 
 Development dependencies:
 
