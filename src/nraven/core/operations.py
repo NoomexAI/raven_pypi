@@ -48,7 +48,7 @@ class OperationStatus(StrEnum):
 class OperationType(StrEnum):
     """Stable names for operations provided by Raven's built-in components."""
 
-    RAVEN_LOAD_MODELS = "nraven.load_models"
+    RAVEN_CONFIGURE_MODELS = "nraven.configure_models"
     RUNTIME_SETTINGS_UPDATE = "runtime.settings.update"
     RUNTIME_SETTINGS_RESET = "runtime.settings.reset"
 

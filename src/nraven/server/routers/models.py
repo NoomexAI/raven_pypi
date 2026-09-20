@@ -62,7 +62,7 @@ async def configure_models(
     task = await submit_task(
         http_request,
         raven,
-        lambda: raven.load(
+        lambda: raven.configure_models(
             request.llm.to_domain(),
             request.embedding.to_domain(),
         ),

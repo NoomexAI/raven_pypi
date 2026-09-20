@@ -348,7 +348,7 @@ async def main() -> None:
     await raven.start()
 
     try:
-        task = await raven.load(
+        task = await raven.configure_models(
             ModelSpec(
                 provider="ollama",
                 model="qwen3:8b",
@@ -369,11 +369,12 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Loading verifies both adapters and checks the embedding model against existing
-knowledge stores before installing the new pair. RAVEN then unloads replaced
-Ollama models that are no longer selected and preloads newly configured Ollama
-models. If pre-installation validation fails, the previous configured pair
-remains active.
+Configuration verifies both adapters and checks the embedding model against
+existing knowledge stores before installing the new pair. When no models are
+configured, RAVEN installs the pair and preloads its Ollama models. When a pair
+is already configured, RAVEN unloads replaced Ollama models, installs the new
+pair, and preloads its Ollama models. If pre-installation validation fails, the
+previous configured pair remains active.
 
 RAVEN also exposes operation-based Ollama administration for connection checks,
 listing, inspection, pulling, and deletion. These methods connect to the
@@ -395,7 +396,7 @@ async def main() -> None:
     await raven.start()
 
     try:
-        task = await raven.load(
+        task = await raven.configure_models(
             ModelSpec(
                 provider="gemini",
                 model="gemini-2.5-flash",
@@ -424,11 +425,11 @@ selected external service.
 
 ### Switching configured models
 
-Call `Raven.load()` with a new valid pair to switch models. The replacement is
-serialized and validated before it becomes active:
+Call `Raven.configure_models()` with a new valid pair to switch models. The
+replacement is serialized and validated before it becomes active:
 
 ```python
-task = await raven.load(new_llm_spec, new_embedding_spec)
+task = await raven.configure_models(new_llm_spec, new_embedding_spec)
 configured = await task.result()
 ```
 

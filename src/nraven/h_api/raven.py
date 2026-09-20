@@ -625,21 +625,21 @@ class Raven:
         )
 
 
-    async def load(
+    async def configure_models(
         self,
         llm_spec: ModelSpec,
         embedding_spec: ModelSpec,
         *,
         operation: Operation | None = None,
     ) -> OperationTask:
-        """Load both model adapters and configure model-dependent components."""
+        """Configure both model adapters and model-dependent components."""
         self._validate_model_specs(llm_spec, embedding_spec)
         active_operation = operation or await self.operation_manager.create(
-            OperationType.RAVEN_LOAD_MODELS
+            OperationType.RAVEN_CONFIGURE_MODELS
         )
         return await active_operation.run(
-            OperationType.RAVEN_LOAD_MODELS,
-            lambda active_operation: self._load_models(
+            OperationType.RAVEN_CONFIGURE_MODELS,
+            lambda active_operation: self._configure_models(
                 llm_spec,
                 embedding_spec,
                 operation=active_operation,
@@ -647,7 +647,7 @@ class Raven:
         )
 
 
-    async def _load_models(
+    async def _configure_models(
         self,
         llm_spec: ModelSpec,
         embedding_spec: ModelSpec,
@@ -1763,12 +1763,12 @@ class Raven:
         if self.llm is None:
             raise RavenError(
                 ErrorCode.LLM_MODEL_REQUIRED,
-                "Call Raven.load() before using model-dependent operations.",
+                "Call Raven.configure_models() before using model-dependent operations.",
             )
         if self.embed_model is None:
             raise RavenError(
                 ErrorCode.EMBEDDING_MODEL_REQUIRED,
-                "Call Raven.load() before using model-dependent operations.",
+                "Call Raven.configure_models() before using model-dependent operations.",
             )
         if self.retrieval_pipelines is None:
             raise RavenError(
