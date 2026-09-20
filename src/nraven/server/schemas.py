@@ -82,6 +82,74 @@ class RuntimeStatusResponse(BaseModel):
 
 
 
+class RuntimeSettingsResponse(BaseModel):
+    """Current mutable operation defaults for one user runtime."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(ge=1)
+    revision: int = Field(ge=0)
+    breakpoint_percentile_threshold: int = Field(ge=1, le=100)
+    buffer_size: int = Field(ge=1)
+    max_extraction_retries: int = Field(ge=1)
+    chunk_size: int = Field(ge=1)
+    chunk_overlap: int = Field(ge=0)
+    retrieval_top_k: int = Field(ge=1)
+    agent_max_iterations: int = Field(ge=1)
+    memory_token_limit: int = Field(ge=1)
+    memory_top_k: int = Field(ge=1)
+
+
+
+
+class RuntimeSettingsUpdateRequest(BaseModel):
+    """Partial revision-guarded update to one user's runtime defaults."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=0, strict=True)
+    breakpoint_percentile_threshold: int | None = Field(
+        default=None,
+        ge=1,
+        le=100,
+        strict=True,
+    )
+    buffer_size: int | None = Field(default=None, ge=1, strict=True)
+    max_extraction_retries: int | None = Field(default=None, ge=1, strict=True)
+    chunk_size: int | None = Field(default=None, ge=1, strict=True)
+    chunk_overlap: int | None = Field(default=None, ge=0, strict=True)
+    retrieval_top_k: int | None = Field(default=None, ge=1, strict=True)
+    agent_max_iterations: int | None = Field(default=None, ge=1, strict=True)
+    memory_token_limit: int | None = Field(default=None, ge=1, strict=True)
+    memory_top_k: int | None = Field(default=None, ge=1, strict=True)
+
+
+    @model_validator(mode="after")
+    def require_change(self) -> "RuntimeSettingsUpdateRequest":
+        if not self.changes():
+            raise ValueError("at least one runtime setting must be supplied")
+        return self
+
+
+    def changes(self) -> dict[str, int]:
+        return self.model_dump(
+            exclude={"expected_revision"},
+            exclude_none=True,
+        )
+
+
+
+
+class RuntimeSettingsResetRequest(BaseModel):
+    """Revision guard for restoring one user's runtime defaults."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=0, strict=True)
+
+
+
+
 class DiscoveryIssueResponse(BaseModel):
     """One persisted resource that could not be loaded safely."""
 

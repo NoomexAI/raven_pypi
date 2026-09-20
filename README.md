@@ -147,6 +147,88 @@ from nraven import Raven
 ```
 
 
+## Library quick start
+
+The `Raven` facade is the recommended entry point for Python applications. The
+example below configures local Ollama models, ingests one document, creates a
+global conversation, and streams an agent response:
+
+```python
+import asyncio
+
+from nraven import EventType, ModelRole, ModelSpec, Raven
+
+
+async def main() -> None:
+    raven = Raven("./raven-home")
+    session = None
+    await raven.start()
+
+    try:
+        configure_task = await raven.configure_models(
+            ModelSpec(
+                provider="ollama",
+                model="qwen3:8b",
+                role=ModelRole.LLM,
+            ),
+            ModelSpec(
+                provider="ollama",
+                model="bge-m3",
+                role=ModelRole.EMBEDDING,
+            ),
+        )
+        await configure_task.result()
+
+        create_knowledge_task = await raven.create_knowledge(
+            "engineering",
+            "Engineering reference documents",
+        )
+        await create_knowledge_task.result()
+
+        ingestion_task = await raven.ingest(
+            "engineering",
+            "./documents/system-design.pdf",
+        )
+        await ingestion_task.result()
+
+        create_conversation_task = await raven.create_conversation()
+        conversation = await create_conversation_task.result()
+
+        session = raven.session(conversation)
+        await session.start()
+        run = await session.generate_response(
+            "What does the design say about thermal protection?",
+            retrieval_mode="auto",
+        )
+
+        async for event in run.stream:
+            if event.type == EventType.CHAT_THINKING_DELTA:
+                print(event.data.get("delta", ""), end="")
+            elif event.type == EventType.CHAT_TOOL_CALL:
+                print(f"\nTool: {event.data.get('name')}")
+            elif event.type == EventType.CHAT_RESPONSE_DELTA:
+                print(event.data.get("delta", ""), end="")
+
+        result = await run.collect()
+        print(f"\n\nFinal response: {result.response}")
+    finally:
+        if session is not None:
+            await session.close()
+        await raven.close()
+
+
+asyncio.run(main())
+```
+
+Ollama must already be running and the selected models must be installed. Use
+`Raven.pull_ollama_model()` when the application should pull a missing Ollama
+model as an observable operation.
+
+Operation-producing calls return an `OperationTask`, not the final domain
+value. Await `task.result()` when the next step depends on that value, or
+consume the operation's events when progress is the primary concern.
+
+
 ## Operation-first API
 
 RAVEN represents work with two related objects:
@@ -1085,6 +1167,732 @@ If the selected turn contains no successful knowledge evidence—for example, a
 casual conversation with no tool calls—the method returns an empty list.
 
 
+## FastAPI server quick start
+
+Install the server dependencies and start RAVEN with an explicit storage home:
+
+```bash
+pip install "noomexai-raven[server]"
+nraven serve --home /path/to/raven-home
+```
+
+`--home` is mandatory. On its first start, the server creates the default
+system configuration at:
+
+```text
+<raven-home>/system_settings/system_settings.json
+```
+
+Pass `--system-settings /path/to/system_settings.json` to use another settings
+file instead. Host, port, and log level come from that immutable
+`SystemConfig`; the defaults are `127.0.0.1`, `8765`, and `info`.
+
+The CLI starts one Uvicorn worker. RAVEN's embedded Qdrant databases and local
+SQLite stores are intentionally owned by one server process, so increasing the
+Uvicorn worker count is not supported.
+
+At launch, the server:
+
+- obtains an exclusive lock for the supplied RAVEN home;
+- creates a random bearer token;
+- writes the token to `<raven-home>/temp/server_auth/bearer_token` for the
+  owning application or deployment host;
+- starts the user-runtime registry and recovery services;
+- removes the token and releases the home lock on normal shutdown.
+
+A second server cannot own the same home concurrently. Treat the bearer-token
+file like a password and do not expose it through a public web root.
+
+The generated API contract is available at:
+
+- `http://127.0.0.1:8765/docs`
+- `http://127.0.0.1:8765/openapi.json`
+
+Those routes, along with liveness and readiness probes, are intentionally
+available without the bearer token. Application routes require it.
+
+
+## Using RAVEN from a web or desktop UI
+
+The HTTP interface follows the same operation-first design as the Python API.
+A normal UI flow is:
+
+1. Start or connect to the RAVEN server.
+2. Obtain the launch bearer token through the trusted application or host
+   layer.
+3. Configure the LLM and embedding-model pair.
+4. Create a knowledge database and upload documents.
+5. Consume the returned operation's SSE stream until ingestion finishes.
+6. Create a global or local conversation.
+7. Submit a turn and render its typed events as they arrive.
+8. Reconnect with `Last-Event-ID` if the connection drops.
+9. Cancel an active operation or explicitly retry an eligible failed task when
+   needed.
+
+### Desktop applications
+
+The default server configuration uses RAVEN's persisted default user UUID, so
+a single-user desktop application can omit `X-Raven-User-ID`. The native
+application process reads the launch token locally and attaches it to requests
+made by, or proxied for, its UI. A browser view should not independently read
+credentials from the filesystem.
+
+A desktop request therefore normally contains:
+
+```http
+POST /api/v1/conversations HTTP/1.1
+Host: 127.0.0.1:8765
+Authorization: Bearer <launch-token>
+Content-Type: application/json
+
+{"knowledge_name": null}
+```
+
+### Hosted applications
+
+In a hosted deployment, RAVEN is an internal backend behind the host's own
+application server. The host authenticates the end user, authorizes access to
+an internal UUID, and forwards that UUID in `X-Raven-User-ID`. Set
+`require_user_id_header` to `true` in `SystemConfig` so requests without that
+context are rejected.
+
+The host-to-RAVEN request contains both credentials:
+
+```http
+POST /api/v1/conversations HTTP/1.1
+Host: raven.internal:8765
+Authorization: Bearer <launch-token>
+X-Raven-User-ID: 4b9bd24b-61de-42ed-9176-d2db91b66702
+Content-Type: application/json
+
+{"knowledge_name": "engineering"}
+```
+
+This example assumes `raven.internal` has been added to `allowed_hosts` in the
+server's `SystemConfig`.
+
+RAVEN validates the UUID and isolates that user's files, databases,
+operations, and settings beneath a separate directory. It does not authenticate
+the public account or decide which UUID that account may use; those are host
+application responsibilities.
+
+### Streaming operation events
+
+Native browser `EventSource` cannot attach the required `Authorization`
+header. Use `fetch()` with an SSE parser, or proxy the stream through the host
+application. This compact TypeScript example preserves the last successfully
+received event ID for reconnection:
+
+```typescript
+type RavenEvent = {
+  event_id: number;
+  operation_id: string;
+  task_id: string | null;
+  task_name: string | null;
+  type: string;
+  timestamp: string;
+  data: Record<string, unknown>;
+  is_final: boolean;
+};
+
+async function streamOperation(
+  eventsUrl: string,
+  token: string,
+  onEvent: (event: RavenEvent) => void,
+  options: {
+    userId?: string;
+    lastEventId?: number;
+    signal?: AbortSignal;
+  } = {},
+): Promise<number | undefined> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+  };
+  if (options.userId) headers["X-Raven-User-ID"] = options.userId;
+  if (options.lastEventId !== undefined) {
+    headers["Last-Event-ID"] = String(options.lastEventId);
+  }
+
+  const response = await fetch(eventsUrl, {
+    headers,
+    signal: options.signal,
+  });
+  if (!response.ok || !response.body) {
+    throw new Error(`SSE request failed: ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let cursor = options.lastEventId;
+
+  while (true) {
+    const {value, done} = await reader.read();
+    buffer += decoder.decode(value, {stream: !done}).replaceAll("\r\n", "\n");
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop() ?? "";
+
+    for (const frame of frames) {
+      if (!frame || frame.startsWith(":")) continue;
+      const data = frame
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trimStart())
+        .join("\n");
+      if (!data) continue;
+
+      const event = JSON.parse(data) as RavenEvent;
+      cursor = event.event_id;
+      onEvent(event);
+    }
+
+    if (done) return cursor;
+  }
+}
+```
+
+Persist `cursor` only after the UI has successfully handled the event. On
+reconnect, send that value as `Last-Event-ID`; RAVEN replays retained events
+after it and then waits for new events. SSE heartbeat comments keep idle
+connections alive. The stream closes after a final event. If retention cleanup
+has created a gap before the supplied cursor, the API returns `410 Gone`
+rather than silently skipping events. A fully expired operation is no longer a
+resource and returns `404 Not Found`.
+
+Render event types independently: thinking is not response text, tool calls
+and bounded tool results describe agent work, `reconstruction.file` supplies
+verifiable sources, and response deltas form the user-visible answer.
+
+
+## HTTP API overview
+
+Every application route uses versioned paths and typed Pydantic contracts.
+This table summarizes the implemented surface; use `/docs` or
+`/openapi.json` for exact request fields, response schemas, query parameters,
+and error bodies.
+
+| Area | Representative routes |
+| --- | --- |
+| Health | `GET /api/v1/health/live`, `GET /api/v1/health/ready` |
+| Runtime | Status, revision-safe settings read/update/reset, and discovery issues under `/api/v1/runtime` |
+| Configured models | `GET /api/v1/provider/models/configured`, `POST /api/v1/provider/models/configure`, configured-role preload and unload routes |
+| Ollama administration | Status, list, inspect, pull, and delete routes under `/api/v1/providers/ollama` |
+| Operations | List and inspect operations/tasks, stream events, cancel operations, discover retryable tasks, and retry a task |
+| Knowledge | CRUD, file listing/deletion, section navigation, statistics, multipart upload, and trusted-path ingestion under `/api/v1/knowledges` |
+| Conversations | CRUD, canonical messages, turns, turn messages, preferences, turn submission, and reconstruction under `/api/v1/conversations` |
+
+### Authentication and errors
+
+Send the launch token on protected routes:
+
+```http
+Authorization: Bearer <launch-token>
+```
+
+Include `X-Raven-User-ID: <uuid>` when hosted user context is enabled. Errors
+share one machine-readable envelope and request ID:
+
+```json
+{
+  "error": {
+    "code": "knowledge_not_found",
+    "message": "Knowledge 'engineering' does not exist.",
+    "details": {}
+  },
+  "request_id": "632d4f96-1e5f-4a4b-b1fd-f6167a742f01"
+}
+```
+
+The same request ID is returned in `X-Request-ID` for correlation with server
+logs.
+
+### Configuring models
+
+Configure one validated LLM and embedding pair:
+
+```http
+POST /api/v1/provider/models/configure HTTP/1.1
+Authorization: Bearer <launch-token>
+Content-Type: application/json
+
+{
+  "llm": {
+    "provider": "ollama",
+    "model": "qwen3:8b",
+    "role": "llm",
+    "api_key_ref": null,
+    "options": {}
+  },
+  "embedding": {
+    "provider": "ollama",
+    "model": "bge-m3",
+    "role": "embedding",
+    "api_key_ref": null,
+    "options": {}
+  }
+}
+```
+
+Long-running commands return `202 Accepted` with an operation reference:
+
+```json
+{
+  "operation_id": "cc9dce11-16ca-42be-b418-18588d03a571",
+  "task_id": "8f708231-4a27-40cb-a51e-477339c167ad",
+  "status": "running",
+  "events_url": "/api/v1/operations/cc9dce11-16ca-42be-b418-18588d03a571/events",
+  "retry_of_operation_id": null,
+  "retry_of_task_id": null
+}
+```
+
+The initial status may be `queued` or `running`. Follow `events_url` for
+progress and terminal state, or inspect the task directly.
+
+### Uploading and ingesting a document
+
+Browser and desktop clients should use multipart upload:
+
+```http
+POST /api/v1/knowledges/engineering/files HTTP/1.1
+Authorization: Bearer <launch-token>
+Content-Type: multipart/form-data; boundary=...
+
+--...
+Content-Disposition: form-data; name="file"; filename="system-design.pdf"
+Content-Type: application/pdf
+
+<file bytes>
+--...--
+```
+
+The returned operation reference points to ingestion progress and completion
+events. Uploaded sources remain in a private user-scoped retry area for the
+configured retry window, then cleanup removes them. Trusted local paths use
+`POST /api/v1/knowledges/{name}/ingest-path` and are disabled unless the server
+explicitly enables them and allowlists their roots.
+
+### Submitting a turn
+
+Create a global conversation with `{"knowledge_name": null}` or a local one
+with a knowledge name, then submit a turn:
+
+```http
+POST /api/v1/conversations/<conversation-id>/turns HTTP/1.1
+Authorization: Bearer <launch-token>
+Content-Type: application/json
+
+{
+  "user_query": "What does the design say about thermal protection?",
+  "retrieval_mode": "auto"
+}
+```
+
+The `202 Accepted` response adds `conversation_id` and `turn_id` to the
+operation reference. Use the operation's SSE endpoint while the turn is
+running. The persisted turn and canonical messages can be fetched later from
+their conversation routes.
+
+
+## Configuration
+
+RAVEN separates deployment policy, user-scoped paths, and mutable operation
+defaults into three configuration types.
+
+### `SystemConfig`
+
+`SystemConfig` is immutable for the lifetime of a running server. It controls
+host, port, logging, allowed origins and hosts, request and upload limits,
+operation retention, SSE heartbeat timing, concurrency limits, cache bounds,
+trusted-path ingestion, and deployment-wide safety ceilings.
+
+The server uses one shared `SystemConfig` for every user runtime. It is not a
+per-user preference object and cannot be changed through the HTTP API.
+
+#### Server loading and changes
+
+Starting the server with only a home directory:
+
+```bash
+nraven serve --home /path/to/raven-home
+```
+
+loads this file:
+
+```text
+<raven-home>/system_settings/system_settings.json
+```
+
+If the file does not exist, RAVEN creates it with all default values. To change
+system settings, stop the server, edit the file, and restart it. The file is
+validated at startup and is not hot-reloaded.
+
+An existing settings file elsewhere can be selected explicitly:
+
+```bash
+nraven serve \
+  --home /path/to/raven-home \
+  --system-settings /path/to/production-system-settings.json
+```
+
+An explicit file must already exist. RAVEN reads it in place and does not copy
+it into the home directory.
+
+The default generated file has this complete shape:
+
+```json
+{
+  "schema_version": 1,
+  "host": "127.0.0.1",
+  "port": 8765,
+  "log_level": "info",
+  "operation_sync_interval_seconds": 1.0,
+  "operation_retention_seconds": 86400.0,
+  "upload_retry_retention_seconds": 86400.0,
+  "operation_cleanup_interval_seconds": 300.0,
+  "operation_cleanup_batch_size": 100,
+  "event_replay_page_size": 256,
+  "operation_page_size": 50,
+  "finished_operation_cache_size": 256,
+  "open_knowledge_limit": 16,
+  "open_conversation_limit": 64,
+  "llm_adapter_cache_size": 8,
+  "embedding_adapter_cache_size": 8,
+  "prompt_cache_size": 32,
+  "sse_heartbeat_interval_seconds": 30.0,
+  "max_source_file_bytes": 104857600,
+  "max_upload_request_overhead_bytes": 65536,
+  "max_request_body_bytes": 1048576,
+  "max_query_string_bytes": 8192,
+  "max_active_operations_per_user": 8,
+  "max_active_operations": 64,
+  "max_document_pages": 1000,
+  "max_retrieval_top_k": 25,
+  "max_agent_iterations": 50,
+  "runtime_idle_seconds": 1800.0,
+  "max_user_runtimes": 100,
+  "cors_origins": ["http://localhost:3000"],
+  "allowed_hosts": ["localhost", "127.0.0.1", "[::1]"],
+  "require_user_id_header": false,
+  "trusted_ingestion_enabled": false,
+  "allowed_ingestion_roots": []
+}
+```
+
+Unknown fields, invalid types, non-finite numbers, and unsupported
+`schema_version` values cause startup to fail with a configuration error.
+
+#### Server and request boundary fields
+
+| Field | Default | Accepted value | Purpose |
+| --- | ---: | --- | --- |
+| `schema_version` | `1` | Exactly the supported schema version | Identifies the system-settings file format. It should not be changed manually. |
+| `host` | `"127.0.0.1"` | Non-empty string | Address passed to Uvicorn. Keep the loopback default for desktop use; hosted deployments may bind another interface deliberately. |
+| `port` | `8765` | Integer from `1` through `65535` | TCP port used by the FastAPI server. |
+| `log_level` | `"info"` | `"critical"`, `"error"`, `"warning"`, `"info"`, or `"debug"` | Uvicorn logging level. |
+| `sse_heartbeat_interval_seconds` | `30.0` | Finite number greater than zero | Maximum idle interval before the operation SSE endpoint sends a heartbeat comment. |
+| `max_source_file_bytes` | `104857600` (100 MiB) | Positive integer | Maximum accepted source-document size. |
+| `max_upload_request_overhead_bytes` | `65536` (64 KiB) | Positive integer | Maximum multipart framing and metadata overhead allowed beyond the uploaded file bytes. |
+| `max_request_body_bytes` | `1048576` (1 MiB) | Positive integer | Maximum ordinary non-file request-body size. |
+| `max_query_string_bytes` | `8192` (8 KiB) | Positive integer | Maximum encoded query-string size. |
+| `cors_origins` | `["http://localhost:3000"]` | List of complete HTTP or HTTPS origins | Browser origins allowed by CORS. Entries may contain a scheme, host, and optional port, but no path, query, or fragment. |
+| `allowed_hosts` | `["localhost", "127.0.0.1", "[::1]"]` | Non-empty list of hostnames or IP literals without ports | Host-header allowlist checked before request processing. Add an internal hostname explicitly before using it in hosted deployment. |
+| `require_user_id_header` | `false` | Boolean | When true, protected requests must include a valid `X-Raven-User-ID`; when false, a missing header selects the default desktop user. |
+
+#### Operations and event fields
+
+| Field | Default | Accepted value | Purpose |
+| --- | ---: | --- | --- |
+| `operation_sync_interval_seconds` | `1.0` | Finite number greater than zero | Interval used by the operation manager's periodic durable-store synchronization service. Lifecycle checkpoints are still written immediately where required. |
+| `operation_retention_seconds` | `86400.0` (24 hours) | Finite number greater than or equal to zero | Time terminal operations, tasks, and events remain eligible for replay before cleanup. Zero makes completed history immediately eligible. |
+| `operation_cleanup_interval_seconds` | `300.0` (5 minutes) | Finite number greater than zero | Interval between background cleanup passes. |
+| `operation_cleanup_batch_size` | `100` | Positive integer | Maximum expired operations removed by one cleanup pass. |
+| `event_replay_page_size` | `256` | Positive integer | Number of persisted events loaded per page while replaying an operation stream. |
+| `operation_page_size` | `50` | Positive integer | Default and maximum page size exposed by operation and resource-list HTTP endpoints. |
+| `finished_operation_cache_size` | `256` | Non-negative integer | Maximum completed `Operation` objects retained in the in-memory LRU cache. Zero disables that completed-operation cache. Durable records remain in SQLite until retention cleanup. |
+| `max_active_operations_per_user` | `8` | Positive integer no greater than `max_active_operations` | Maximum accepted non-terminal operation tasks for one user. |
+| `max_active_operations` | `64` | Positive integer | Maximum accepted non-terminal operation tasks across the server. |
+
+#### Resource and cache fields
+
+| Field | Default | Accepted value | Purpose |
+| --- | ---: | --- | --- |
+| `open_knowledge_limit` | `16` | Positive integer | Maximum idle/open knowledge resources retained in one user's LRU registry before eligible resources are closed and evicted. |
+| `open_conversation_limit` | `64` | Positive integer | Maximum idle/open conversation resources retained in one user's LRU registry. Active resources remain protected. |
+| `llm_adapter_cache_size` | `8` | Positive integer | Maximum cached LLM adapters in the provider layer. |
+| `embedding_adapter_cache_size` | `8` | Positive integer | Maximum cached embedding adapters in the provider layer. |
+| `prompt_cache_size` | `32` | Positive integer | Maximum cached conversation-specific agent prompts. Preference changes invalidate the affected prompt. |
+| `runtime_idle_seconds` | `1800.0` (30 minutes) | Finite number greater than zero | Time an unleased user runtime may remain idle before server eviction. Active tasks retain their runtime. |
+| `max_user_runtimes` | `100` | Positive integer | Maximum user runtimes that may be resident or initializing simultaneously. Idle runtimes are evicted when possible before capacity is rejected. |
+
+#### Ingestion and runtime ceiling fields
+
+| Field | Default | Accepted value | Purpose |
+| --- | ---: | --- | --- |
+| `upload_retry_retention_seconds` | `86400.0` (24 hours) | Finite number greater than zero | Time a failed private staged browser upload remains available for user-confirmed ingestion retry. Successful uploads are removed after ingestion. |
+| `max_document_pages` | `1000` | Positive integer | Maximum number of pages accepted from a page-based document parser. |
+| `max_retrieval_top_k` | `25` | Positive integer | Server-wide ceiling for `RuntimeConfig.retrieval_top_k` and per-call retrieval overrides. |
+| `max_agent_iterations` | `50` | Positive integer | Server-wide ceiling for `RuntimeConfig.agent_max_iterations` and per-session overrides. |
+| `trusted_ingestion_enabled` | `false` | Boolean | Enables the trusted local-path ingestion route for controlled host environments. Browser clients should normally use multipart upload. |
+| `allowed_ingestion_roots` | `[]` | List of filesystem paths | Roots beneath which trusted local-path ingestion is permitted. Paths are expanded and resolved. At least one root is required when trusted ingestion is enabled. |
+
+`max_active_operations_per_user` cannot exceed `max_active_operations`.
+Trusted-path ingestion cannot be enabled with an empty
+`allowed_ingestion_roots` list.
+
+#### Library usage
+
+Library applications can construct and pass the immutable configuration
+directly:
+
+```python
+from nraven import Raven, SystemConfig
+
+
+config = SystemConfig(
+    max_active_operations_per_user=4,
+    max_active_operations=32,
+    max_source_file_bytes=50 * 1024 * 1024,
+)
+raven = Raven("./raven-home", system_config=config)
+```
+
+When `system_config` is omitted, `Raven` uses an in-memory `SystemConfig()` with
+the defaults above. Unlike the server CLI, the `Raven` constructor does not
+automatically load or create `system_settings.json`.
+
+Library applications that want file-backed system settings can manage them
+explicitly:
+
+```python
+from nraven import Raven, SystemConfig
+
+
+config = SystemConfig(
+    max_active_operations_per_user=4,
+    max_active_operations=32,
+)
+config.save("./system_settings.json")
+
+loaded_config = SystemConfig.load("./system_settings.json")
+raven = Raven("./raven-home", system_config=loaded_config)
+```
+
+`SystemConfig.save()` uses an atomic temporary-file replacement and requests a
+filesystem synchronization before returning. Because the dataclass is frozen,
+changing a setting means creating or loading a new `SystemConfig`, then
+constructing a new `Raven` or restarting the server with it.
+
+### `PathConfig`
+
+`PathConfig` is immutable for one RAVEN/user runtime. It validates the user ID
+as a UUID and derives all user-specific storage paths from `raven_home` and
+`user_id`:
+
+```text
+<raven-home>/
+├── system_settings/
+│   └── system_settings.json
+├── temp/
+│   └── server_auth/
+│       ├── server.lock
+│       └── bearer_token
+└── <user-uuid>/
+    ├── data/
+    │   ├── knowledge_base/
+    │   └── conversations/
+    ├── operations/
+    │   └── operations.sqlite3
+    ├── runtime_settings/
+    │   └── runtime_settings.json
+    └── temp/
+        └── uploads/
+```
+
+The server lazily creates one `Raven` runtime per validated UUID and evicts
+idle runtimes according to `SystemConfig`. Active operation tasks retain their
+runtime until they reach a terminal state.
+
+### `RuntimeConfig`
+
+`RuntimeConfig` is a per-user immutable snapshot of mutable defaults. It stores
+semantic-splitting parameters, extraction retries, chunk settings, retrieval
+`top_k`, agent iteration limits, and conversation-memory limits in
+`runtime_settings.json`.
+
+The complete settings document contains these fields:
+
+| Field | Default | Accepted value | Purpose |
+| --- | ---: | --- | --- |
+| `schema_version` | `1` | Managed by RAVEN | Identifies the persisted runtime-settings schema. It is returned to callers but cannot be updated directly. |
+| `revision` | `0` initially | Managed by RAVEN | Increases after every successful update or reset and provides optimistic concurrency control. It cannot be updated directly. |
+| `breakpoint_percentile_threshold` | `95` | Integer from `1` through `100` | Percentile used to identify semantic distances that become section boundaries. Lower values generally produce more boundaries. |
+| `buffer_size` | `1` | Positive integer | Number of neighboring semantic units included on each side when constructing embedding windows for boundary detection. |
+| `max_extraction_retries` | `3` | Positive integer | Maximum attempts for LLM-based structured section-metadata extraction during ingestion. |
+| `chunk_size` | `512` | Positive integer | Target chunk size supplied to LlamaIndex's sentence-aware splitter before embedding and vector storage. |
+| `chunk_overlap` | `50` | Non-negative integer smaller than `chunk_size` | Overlap between adjacent embedding chunks. |
+| `retrieval_top_k` | `3` | Positive integer no greater than `SystemConfig.max_retrieval_top_k` (`25` by default) | Default number of results requested by retrieval pipelines and agent retrieval tools. |
+| `agent_max_iterations` | `10` | Positive integer no greater than `SystemConfig.max_agent_iterations` (`50` by default) | Maximum number of agent workflow iterations allowed for one turn. |
+| `memory_token_limit` | `4000` | Positive integer | Token budget for the model-facing compacted conversation context. |
+| `memory_top_k` | `5` | Positive integer | Number of semantically similar canonical messages returned by conversation-memory search. |
+
+Runtime settings are defaults, not global mutable variables inside running
+work. Each ingestion, retrieval, or session run captures its effective values
+when it starts. Updating settings affects subsequent work; it does not alter an
+operation that is already running. Explicit per-call arguments can override
+the persisted defaults without changing them.
+
+#### Python API
+
+Update it atomically through the Python facade:
+
+```python
+current = raven.get_runtime_settings()
+
+task = await raven.update_runtime_settings(
+    {
+        "retrieval_top_k": 5,
+        "agent_max_iterations": 12,
+    },
+    expected_revision=current["revision"],
+)
+updated = await task.result()
+```
+
+Each successful change creates a new revision. Supplying
+`expected_revision` prevents one caller from silently overwriting a concurrent
+update. `Raven.reset_runtime_settings()` restores built-in defaults as another
+revision.
+
+#### HTTP API
+
+The same revision-safe contract is available over HTTP:
+
+```http
+GET   /api/v1/runtime/settings
+PATCH /api/v1/runtime/settings
+POST  /api/v1/runtime/settings/reset
+```
+
+All three endpoints require the normal bearer authorization header. In hosted
+mode they also use `X-Raven-User-ID`, so each user reads and changes only their
+own runtime settings.
+
+##### Read settings
+
+```http
+GET /api/v1/runtime/settings HTTP/1.1
+Authorization: Bearer <launch-token>
+X-Raven-User-ID: <user-uuid>
+```
+
+The GET endpoint has no request body. `X-Raven-User-ID` is required only when
+the server has `require_user_id_header=true`.
+
+Example response:
+
+```json
+{
+  "schema_version": 1,
+  "revision": 0,
+  "breakpoint_percentile_threshold": 95,
+  "buffer_size": 1,
+  "max_extraction_retries": 3,
+  "chunk_size": 512,
+  "chunk_overlap": 50,
+  "retrieval_top_k": 3,
+  "agent_max_iterations": 10,
+  "memory_token_limit": 4000,
+  "memory_top_k": 5
+}
+```
+
+##### Update settings
+
+```http
+PATCH /api/v1/runtime/settings HTTP/1.1
+Authorization: Bearer <launch-token>
+Content-Type: application/json
+```
+
+The PATCH body requires `expected_revision` and at least one configurable
+field. Include only the fields that should change:
+
+```json
+{
+  "expected_revision": 0,
+  "retrieval_top_k": 5,
+  "agent_max_iterations": 12
+}
+```
+
+The complete request-body shape is shown below. Apart from
+`expected_revision`, every field is optional:
+
+```json
+{
+  "expected_revision": 0,
+  "breakpoint_percentile_threshold": 90,
+  "buffer_size": 2,
+  "max_extraction_retries": 4,
+  "chunk_size": 768,
+  "chunk_overlap": 75,
+  "retrieval_top_k": 5,
+  "agent_max_iterations": 12,
+  "memory_token_limit": 8000,
+  "memory_top_k": 8
+}
+```
+
+Every configurable field is optional independently, so these are also valid
+partial updates:
+
+```json
+{
+  "expected_revision": 4,
+  "chunk_size": 768,
+  "chunk_overlap": 75
+}
+```
+
+```json
+{
+  "expected_revision": 5,
+  "memory_token_limit": 8000
+}
+```
+
+Do not include `schema_version` or `revision` in the body, and omit fields that
+should remain unchanged. Unknown fields and an update containing no setting
+are rejected with `422 Unprocessable Entity`. Setting values must be JSON
+integers rather than strings or booleans. RAVEN validates the merged result, so
+`chunk_overlap` must remain smaller than `chunk_size`, and retrieval or agent
+limits must remain below their `SystemConfig` ceilings.
+
+On success, PATCH returns the complete settings document with `revision`
+incremented by one. If the current revision differs from
+`expected_revision`, RAVEN returns `409 Conflict`; read the current settings
+again before deciding whether to submit a new update.
+
+##### Reset settings
+
+```http
+POST /api/v1/runtime/settings/reset HTTP/1.1
+Authorization: Bearer <launch-token>
+Content-Type: application/json
+
+{
+  "expected_revision": 6
+}
+```
+
+Reset accepts no setting fields. It restores every configurable field to the
+defaults listed above, increments the current revision, persists the result,
+and returns the complete updated settings document. It never changes the
+revision back to zero. A stale `expected_revision` returns `409 Conflict` just
+as it does for PATCH.
+
+
 ## Persistence and recovery
 
 RAVEN stores each user's state under:
@@ -1138,3 +1946,176 @@ or recovery.
 Model adapters, active network clients, and Ollama VRAM residency are runtime
 state. They are rebuilt or reconfigured after process restart rather than being
 treated as durable application state.
+
+
+## Security and deployment responsibilities
+
+RAVEN provides the security boundary needed between its API and a trusted
+desktop application or deployment host. It does not attempt to replace a
+public application's identity system.
+
+### What RAVEN enforces
+
+- A random per-launch bearer token protects application routes.
+- Bearer-token comparison is constant-time, and credential values are not
+  returned in API responses or events.
+- Optional `X-Raven-User-ID` context must be a valid UUID.
+- Each UUID receives a separate storage root and independently owned runtime.
+- Request hosts and browser origins must match explicit `SystemConfig`
+  allowlists.
+- Request bodies, query strings, source files, multipart overhead, active
+  operations, and list pages are bounded.
+- Uploaded filenames are validated and staged inside controlled user-specific
+  directories.
+- Trusted-path ingestion is disabled by default and, when enabled, is limited
+  to configured roots.
+- Model specifications refer to API keys by environment-variable name;
+  applications should never place secret values in `options`.
+- Errors use stable codes and sanitized messages, while an `X-Request-ID`
+  allows operators to correlate failures with private server logs.
+
+Health and OpenAPI routes do not require the bearer token, but they remain
+subject to host validation. All other routes require the launch token. The
+default host and CORS configuration is loopback-only and should remain narrow
+unless a deployment has a deliberate network boundary.
+
+### What the host application owns
+
+For a desktop product, the native application owns the server process, reads
+the local launch token, and decides how its UI reaches RAVEN.
+
+For a hosted product, the host application must:
+
+- authenticate end users;
+- authorize each account to one internal user UUID;
+- inject that UUID and the private RAVEN bearer token into proxied requests;
+- decide which model-administration and destructive routes each user may
+  invoke;
+- keep provider API keys in its environment or secret manager;
+- terminate TLS and configure its reverse proxy safely;
+- start, stop, monitor, and resource-limit Ollama when local models are used;
+- back up and protect the RAVEN home at the filesystem level.
+
+Do not expose the bearer-token file, RAVEN home, or an unrestricted internal
+RAVEN port to untrusted clients. In a hosted deployment, browser requests
+should normally go through the host backend rather than carrying RAVEN's
+process-wide launch token directly.
+
+Ollama model residency is process-global. Changing or unloading a configured
+Ollama model can affect shared host resources, so a multi-user host should
+restrict model-administration routes and choose an explicit residency policy.
+
+
+## Advanced component API
+
+`Raven` is the recommended composition root, but the package exports its major
+components for applications that need lower-level integration or focused
+testing:
+
+| Area | Public components |
+| --- | --- |
+| Operations and events | `OperationManager`, `Operation`, `OperationTask`, records, statuses, retry policies, cleanup services, `EventStream`, `Event`, and `EventType` |
+| Providers | `Provider`, `ModelSpec`, `ModelRole`, `OllamaManager`, and `LiteLLMManager` |
+| Knowledge and conversations | `KnowledgeBase`, `Knowledge`, `ConversationManager`, `Conversation`, and `DiscoveryIssue` |
+| Document processing | `DocumentParser`, parsed element/document contracts, `ProvenanceAwareSemanticSplitter`, and semantic unit/section contracts |
+| Pipelines | `IngestionPipeline`, all four retrieval pipeline classes, the common `RetrievalPipeline`, and `Reconstructor` |
+| Agent execution | `AgentPolicy`, `AgentHarness`, `Session`, and `SessionRun` |
+| Configuration | `SystemConfig`, `PathConfig`, and `RuntimeConfig` |
+
+These types preserve the same operation and event contracts used by the
+facade. When composing them manually, the application becomes responsible for
+their dependency order, lifecycle, shared operation context, and cleanup. Most
+applications should begin with `Raven` and move to individual components only
+when they need a boundary the facade intentionally does not expose.
+
+
+## Development and testing
+
+Clone the repository and install the package in editable mode with development
+and server dependencies:
+
+```bash
+python -m venv .venv
+python -m pip install -e ".[dev,server]"
+```
+
+Run the fast suite without external model services:
+
+```bash
+python -m pytest -m "not integration"
+```
+
+Run the complete pytest suite when the required external services and model
+assets are available:
+
+```bash
+python -m pytest
+```
+
+Tests marked `integration` may require a running Ollama server, installed test
+models, cloud-provider credentials, or real document assets. Use a dedicated
+temporary RAVEN home for destructive, crash-recovery, and subprocess tests; do
+not point them at application data.
+
+The repository also contains focused end-to-end scripts for provider,
+ingestion, retrieval, reconstruction, session, memory, retry, and hard-crash
+behavior. Review a script's model and filesystem requirements before running
+it.
+
+Build distributions with:
+
+```bash
+python -m pip install build
+python -m build
+```
+
+Before release, test the generated wheel in fresh environments in both
+supported installation forms:
+
+```bash
+python -m pip install ./dist/noomexai_raven-0.2.0-py3-none-any.whl
+python -m pip install "./dist/noomexai_raven-0.2.0-py3-none-any.whl[server]"
+```
+
+Replace `0.2.0` with the version being tested.
+
+The core wheel must cover both Ollama and LiteLLM/cloud provider paths. The
+server smoke test must additionally verify CLI startup, bearer authentication,
+OpenAPI generation, SSE replay, cancellation, and shutdown.
+
+
+## Current limitations
+
+- The server uses one Uvicorn worker. Embedded Qdrant and per-user SQLite
+  stores are not a distributed multi-process backend.
+- Durable operations and events are local to one RAVEN home. Running several
+  replicas requires an external coordination and storage design that this
+  release does not provide.
+- RAVEN does not own the Ollama process. A desktop application or deployment
+  host must supervise it and clean up its host-level resources.
+- Model specifications and adapter/VRAM state are runtime configuration, not
+  durable state. Configure models again after a server restart.
+- Supported ingestion formats in this release are `.txt`, `.md`, `.pdf`, and
+  `.docx`.
+- Parsing and reconstruction preserve semantic content and navigation ranges,
+  but do not reproduce the source's exact visual layout or bounding boxes.
+- Crash recovery marks abandoned operations as interrupted and supports
+  explicit retry for eligible tasks. It does not serialize arbitrary Python
+  execution state or resume a model call at the exact interrupted instruction.
+- Uploaded sources can be retried only within the configured private retention
+  window. After expiry, the user must upload the file again.
+- RAVEN validates user UUIDs and isolates their storage, but public account
+  authentication, account-to-UUID authorization, TLS, and internet-facing
+  policy belong to the host application.
+- Cloud model capabilities, rate limits, availability, and pricing are defined
+  by the selected provider and LiteLLM adapter.
+
+
+## License and third-party notices
+
+RAVEN is released under the [MIT License](LICENSE.txt).
+
+The distribution depends on third-party open-source packages under their own
+licenses. See [ThirdPartyNotices.txt](ThirdPartyNotices.txt) for the packages,
+license identifiers, copyright notices, and license texts included with this
+project.
