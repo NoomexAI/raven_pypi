@@ -474,6 +474,617 @@ For a cloud model, these methods complete without attempting local residency
 and report that the provider has no local residency to manage.
 
 
+## Knowledge and ingestion
+
+A knowledge is one persistent collection of related documents and vectors.
+`KnowledgeBase` manages the collection of knowledge resources; each `Knowledge`
+owns its own metadata, source-section records, and local Qdrant storage.
+
+Create a knowledge before ingesting documents into it:
+
+```python
+create_task = await raven.create_knowledge(
+    "engineering",
+    user_summary="Engineering specifications and design documents.",
+)
+knowledge = await create_task.result()
+```
+
+Knowledge names identify their storage directories and must be unique within
+the current user's RAVEN home. The user summary helps global, reasoning-based
+retrieval decide which knowledge collections are relevant.
+
+### Supported document formats
+
+RAVEN currently accepts:
+
+| Format | Extensions | Parsing behavior |
+| --- | --- | --- |
+| Plain text | `.txt` | Read natively as UTF-8 text. |
+| Markdown | `.md`, `.markdown` | Read natively while preserving the textual source. |
+| PDF | `.pdf` | Parsed through Docling into ordered document elements and page provenance. |
+| Word | `.docx` | Parsed through Docling into ordered document elements and available page provenance. |
+
+The parser normalizes text, headings, list items, tables, captions, formulas,
+and picture elements. Tables are projected to Markdown where possible. The
+current ingestion path indexes the document's textual projection; it does not
+send raw image data to a vision model.
+
+PDF and DOCX elements may carry page ranges. Plain-text and Markdown files use
+`navigation_type="none"` because they do not have an intrinsic page system.
+These provenance fields later allow reconstructed sections to link back to the
+appropriate part of the source.
+
+### Ingestion flow
+
+```text
+Source validation and snapshot
+              |
+              v
+     Provenance-aware parsing
+              |
+              v
+       Semantic sectioning
+              |
+              v
+   LLM section-metadata extraction
+              |
+              v
+       Chunking and embedding
+              |
+              v
+  Qdrant vectors + SQLite file records
+```
+
+The parser first produces ordered elements. The semantic splitter then creates
+sections while retaining the contributing element IDs and combined source
+range. Each stored section receives an ID shaped as:
+
+```text
+<file-id>-<section-index>
+```
+
+For example, `a83fd91c20b4-3` identifies the third semantic section of that
+file. Section metadata includes a summary, keywords, conditions, definitions,
+raw content, source element IDs, and the source range used for navigation.
+
+Start ingestion through the high-level API after configuring the models:
+
+```python
+from nraven import EventType
+
+
+ingestion = await raven.ingest(
+    "engineering",
+    "./documents/system-design.pdf",
+)
+
+async for event in ingestion.events():
+    if event.type == EventType.INGESTION_PROGRESS:
+        print(event.data)
+
+ingested_file = await ingestion.result()
+print(ingested_file)
+```
+
+The result contains the knowledge name, file name, generated file ID, section
+count, chunk count, and original source path. Progress events identify stages
+such as source validation, snapshotting, parsing, sectioning, metadata
+extraction, chunking, embedding, vector storage, and metadata commit.
+
+Chunking and semantic-splitting values use the current per-user runtime
+settings unless explicitly overridden for the call:
+
+```python
+ingestion = await raven.ingest(
+    "engineering",
+    "./documents/system-design.pdf",
+    breakpoint_percentile_threshold=92,
+    chunk_size=768,
+    chunk_overlap=64,
+)
+```
+
+### Navigation and management
+
+RAVEN exposes the same source hierarchy to applications that it exposes to the
+agent's navigation tools:
+
+```python
+knowledges = await raven.list_knowledges()
+files = await raven.list_knowledge_files("engineering")
+sections = await raven.list_file_sections(
+    "engineering",
+    "system-design.pdf",
+)
+section = await raven.get_knowledge_section(
+    "engineering",
+    sections[0]["section_id"],
+)
+```
+
+The section lookup returns metadata together with `raw_content`, so an
+application can inspect a source directly without performing semantic
+retrieval. Pageable variants are available for knowledge, file, and section
+listings.
+
+File deletion and knowledge deletion are operation-based:
+
+```python
+delete_file = await raven.delete_knowledge_file(
+    "engineering",
+    ingested_file["file_id"],
+)
+await delete_file.result()
+```
+
+### Ingestion safety and retry
+
+RAVEN snapshots the submitted source before parsing so the file cannot silently
+change underneath a running ingestion. Concurrent ingestion of the same file
+is rejected, and an already committed file is not duplicated during a retry.
+
+Vector writes happen before the SQLite metadata commit. If the metadata commit
+fails or cancellation occurs at that boundary, RAVEN removes the uncommitted
+vectors. Startup and graceful-shutdown reconciliation also remove orphaned
+vectors left by a hard process termination.
+
+Ingestion tasks persist the information required for user-confirmed retry. A
+server upload remains in its private retry area only for the configured
+retention window; after that window the source must be uploaded again.
+
+
+## Retrieval
+
+RAVEN provides four retrieval strategies. Each strategy has a local variant
+for one named knowledge and a global variant for searching across the current
+user's knowledge base.
+
+| Strategy | Best suited for | Relative cost |
+| --- | --- | --- |
+| Embedded | Focused scientific, factual, or numeric questions where semantic precision matters most. | Lowest |
+| Hierarchical | Broader context, narrative structure, and relationships that benefit from LLM metadata scoring. | High |
+| Vector-conditioned | Vector narrowing followed by hierarchical scoring; a practical compromise for contextual questions. | Medium to high |
+| Agreement | Comparing embedded and hierarchical results when an expensive cross-check is justified. | Highest |
+
+The available mode strings are:
+
+```text
+local_embedded
+local_hierarchical
+local_vector_conditioned
+local_agreement
+
+global_embedded
+global_hierarchical
+global_vector_conditioned
+global_agreement
+```
+
+Run a strategy directly through `Raven.retrieve()`:
+
+```python
+retrieval = await raven.retrieve(
+    "local_embedded",
+    "What operating temperature does the controller require?",
+    knowledge_name="engineering",
+    top_k=3,
+)
+sections = await retrieval.result()
+```
+
+Local modes require `knowledge_name`. Global modes select from all available
+knowledge collections and do not require a local scope.
+
+Except for agreement retrieval, every strategy returns the same bounded list:
+
+```json
+[
+  {
+    "knowledge_name": "engineering",
+    "file_name": "system-design.pdf",
+    "section_id": "a83fd91c20b4-3",
+    "raw_content": "..."
+  }
+]
+```
+
+This is deliberately the complete model-facing retrieval contract. Internal
+scores, chunks, and vector identifiers do not leak into the result.
+
+### Agreement retrieval
+
+Agreement retrieval preserves the relationship between its two source
+strategies:
+
+```json
+{
+  "agreement_type": "Weak Agreement",
+  "retrieved_content": {
+    "embedded_retrieval": [
+      {
+        "knowledge_name": "engineering",
+        "file_name": "system-design.pdf",
+        "section_id": "a83fd91c20b4-3",
+        "raw_content": "..."
+      }
+    ],
+    "hierarchical_retrieval": [
+      {
+        "knowledge_name": "engineering",
+        "file_name": "requirements.pdf",
+        "section_id": "fd05a621bd91-2",
+        "raw_content": "..."
+      }
+    ]
+  }
+}
+```
+
+When both strategies return identical results, `agreement_type` is
+`"Strong Agreement"` and `retrieved_content` is a single section list. Weak
+agreement and disagreement retain the two lists so the model can reason about
+their differences. Reconstruction accepts both shapes.
+
+`Raven.retrieve()` requires an explicit strategy. Automatic selection belongs
+to an agent session: pass `retrieval_mode="auto"` or omit the argument and let
+the model choose among the tools permitted for that conversation.
+
+
+## Conversations, sessions, and memory
+
+A conversation and a session are intentionally different resources:
+
+- A `Conversation` is persistent. It owns metadata, canonical messages,
+  committed turns, compacted model context, vector memory, and preferences.
+- A `Session` is temporary. It connects one conversation to the agent harness
+  so the caller can generate responses.
+
+A session is never restored from disk. To continue an existing conversation,
+load the conversation and create a new session around it.
+
+### Global and local conversations
+
+Create a global conversation by omitting `knowledge_name`:
+
+```python
+create_task = await raven.create_conversation()
+conversation = await create_task.result()
+```
+
+Create a local conversation by binding it to an existing knowledge:
+
+```python
+create_task = await raven.create_conversation("engineering")
+conversation = await create_task.result()
+```
+
+The conversation derives its type from that binding:
+
+```text
+knowledge_name is None   -> global conversation
+knowledge_name is set    -> local conversation
+```
+
+The stable metadata representation includes `conversation_id`, `type`,
+`knowledge_name`, `title`, `is_titled`, `pinned`, and `created_at`.
+
+### Running a turn
+
+```python
+from nraven import EventType
+
+
+session = raven.session(conversation)
+await session.start()
+
+try:
+    run = await session.generate_response(
+        "What does the design specify for thermal protection?",
+        retrieval_mode="auto",
+    )
+
+    async for event in run.stream:
+        if event.type == EventType.CHAT_THINKING_DELTA:
+            print(event.data.get("delta", ""), end="")
+        elif event.type == EventType.CHAT_TOOL_CALL:
+            print("Tool:", event.data.get("name"))
+        elif event.type == EventType.CHAT_TOOL_RESULT:
+            print("Tool result:", event.data.get("ui_summary"))
+        elif event.type == EventType.RECONSTRUCTION_FILE:
+            print("Source:", event.data.get("file_name"))
+        elif event.type == EventType.CHAT_RESPONSE_DELTA:
+            print(event.data.get("delta", ""), end="")
+
+    result = await run.collect()
+    print(result.response)
+finally:
+    await session.close()
+```
+
+The event stream is authoritative. `collect()` replays those events into an
+`AgentRunResult` containing the accumulated thinking text, response, tool
+calls, evidence references, reconstructed sources, and iteration-limit state.
+
+Each run also has a stable `turn_id`. A committed turn contains the user
+message, assistant tool-call messages, tool-result messages, and final
+assistant response. Internal thinking is streamed for the caller but is not
+stored as conversation history.
+
+The first completed user turn triggers a separate title completion when the
+conversation is still untitled. That title operation does not enter the chat
+history, and later turns do not regenerate it. Applications may update the
+title or pinned state explicitly.
+
+### Turn serialization
+
+Multiple temporary sessions may reference the same conversation, which is
+useful when the same account has several browser tabs or application windows.
+Only one turn may run against a conversation at a time. A competing turn is
+rejected instead of racing message, memory, and preference mutations.
+
+Turns in different conversations can run concurrently.
+
+Turn commits are atomic and idempotent. If retry encounters an already
+committed `turn_id`, RAVEN verifies the query, reconciles memory indexing, and
+reuses the stored result rather than generating and storing a duplicate turn.
+
+### Context and vector memory
+
+RAVEN maintains two complementary memory views:
+
+- **Compacted context** uses LlamaIndex's summary memory to keep recent
+  messages and a summary of older history within the configured token limit.
+  This is the context passed to the model.
+- **Vector memory** indexes canonical user messages and final assistant
+  responses for semantic recall when the agent needs details from earlier
+  discussion. Internal tool traces are not added to this semantic index.
+
+The complete canonical history remains available to the application even when
+the model-facing context has been compacted:
+
+```python
+messages = await raven.get_conversation_messages(
+    conversation.conversation_id,
+)
+```
+
+Compaction emits started, completed, and failed events so a UI can explain a
+delay instead of appearing stalled.
+
+### Conversation preferences
+
+Preferences are local to one conversation. Each preference has a stable UUID
+and its text:
+
+```json
+{
+  "preference_id": "90297ef3-5336-4d09-a155-edf21408e242",
+  "text": "Use concise answers unless I ask for detail."
+}
+```
+
+The agent can list, save, and remove preferences when the user explicitly asks
+it to do so. Removal uses `preference_id`, avoiding fragile exact-text
+matching. Preference changes invalidate the conversation's cached prompt and
+apply on the next agent run.
+
+Applications can manage the same records directly:
+
+```python
+save_task = await raven.save_conversation_preference(
+    conversation.conversation_id,
+    "Use concise answers unless I ask for detail.",
+)
+preference = await save_task.result()
+
+remove_task = await raven.remove_conversation_preference(
+    conversation.conversation_id,
+    preference["preference_id"],
+)
+await remove_task.result()
+```
+
+
+## Agent harness
+
+The agent harness owns model behavior; it does not own conversation storage.
+For each run it creates a fresh LlamaIndex `FunctionAgent`, builds the current
+conversation policy and prompt, exposes only permitted tools, translates
+workflow output into RAVEN events, tracks evidence, reconstructs sources, and
+normalizes failures.
+
+RAVEN does not classify the user's query with a separate brittle intent
+classifier. The model decides whether it should:
+
+- answer directly;
+- search conversation memory;
+- navigate knowledge names, files, and sections;
+- retrieve relevant sections;
+- inspect a specific section;
+- modify an explicit conversation preference;
+- or use several tools sequentially.
+
+Tool calls are sequential by default. The system prompt tells the model to use
+the smallest sufficient tool sequence and not to call additional retrieval or
+navigation tools merely to reconfirm evidence it already has.
+
+### Tool exposure and retrieval constraints
+
+Tool availability is enforced by construction, not merely requested in the
+system prompt:
+
+| Conversation/run | Retrieval tools exposed |
+| --- | --- |
+| Local conversation, automatic mode | All four local retrieval tools. |
+| Global conversation, automatic mode | All local and global retrieval tools. Local tools require a `knowledge_name`. |
+| Specific retrieval mode | Only that retrieval tool, if valid for the conversation scope. |
+
+Memory, preference, and permitted navigation tools remain available when a
+specific retrieval strategy is selected. A local conversation's navigation is
+automatically bound to its knowledge. Global navigation requires explicit
+knowledge names where appropriate.
+
+The non-retrieval tools are:
+
+- `list_knowledges`
+- `list_files`
+- `list_sections`
+- `get_section`
+- `search_memory`
+- `list_preferences`
+- `save_preference`
+- `remove_preference`
+
+An invalid retrieval mode or a global-only mode requested for a local
+conversation is rejected before model execution.
+
+### Tool results and recoverable errors
+
+Inside the agent, every tool result separates model-facing content from bounded
+UI metadata:
+
+```json
+{
+  "ok": true,
+  "result": [
+    {
+      "knowledge_name": "engineering",
+      "file_name": "system-design.pdf",
+      "section_id": "a83fd91c20b4-3",
+      "raw_content": "..."
+    }
+  ],
+  "ui_summary": {
+    "kind": "retrieval",
+    "section_count": 2,
+    "sections": [
+      {
+        "knowledge_name": "engineering",
+        "file_name": "system-design.pdf",
+        "section_id": "a83fd91c20b4-3"
+      }
+    ]
+  },
+  "evidence": [
+    {
+      "knowledge_name": "engineering",
+      "file_name": "system-design.pdf",
+      "section_id": "a83fd91c20b4-3"
+    }
+  ]
+}
+```
+
+The model-facing result can contain the complete context needed to answer. The
+bounded `ui_summary` gives the frontend safe metadata for rendering. The
+published `chat.tool_result` event contains `ok`, `ui_summary`, evidence, and
+error information when applicable; it deliberately omits the full model-facing
+`result` so raw sections are not duplicated in the event stream.
+
+Recoverable mistakes—such as an invalid knowledge name, file name, section ID,
+or preference ID—are returned to the model as `ok=false` with an error and a
+concrete `next_action`. This lets the model correct its arguments and retry.
+Cancellation, infrastructure failures, and unrecoverable persistence failures
+terminate the operation.
+
+### Evidence and completion behavior
+
+Successful retrieval and direct section inspection produce evidence references
+containing only `knowledge_name`, `file_name`, and `section_id`. The harness
+deduplicates these references and uses them for source reconstruction.
+
+When the agent has attempted to use knowledge tools but obtains no valid
+evidence, RAVEN does not accept an unsupported knowledge answer. It emits a safe
+insufficient-evidence response instead. Conversation memory is not treated as
+evidence for a knowledge-base fact.
+
+The harness enforces a maximum number of agent iterations. If the limit is
+reached, it records that state and asks the agent engine for an early final
+response. Failure to produce that response becomes an observable failed
+operation rather than an incomplete success.
+
+
+## Source reconstruction
+
+Source reconstruction is RAVEN's transparency layer. It takes retrieval
+evidence, groups section IDs by knowledge and file, reloads the complete stored
+section sequence, and marks the sections used by the model.
+
+A reconstructed file has this shape:
+
+```json
+{
+  "knowledge_name": "engineering",
+  "file_name": "system-design.pdf",
+  "navigation_type": "page",
+  "sections": [
+    {
+      "section_id": "a83fd91c20b4-1",
+      "highlighted": false,
+      "raw_content": "...",
+      "source_range": [1, 2]
+    },
+    {
+      "section_id": "a83fd91c20b4-3",
+      "highlighted": true,
+      "raw_content": "...",
+      "source_range": [2, 2]
+    }
+  ]
+}
+```
+
+For page-based documents, `[12, 12]` means the section belongs to page 12 and
+`[12, 14]` means it spans pages 12 through 14. Text and Markdown sources use
+`navigation_type="none"` and may have `source_range=null`.
+
+Reconstruction preserves semantic sections and source navigation provenance;
+it is not intended to reproduce the original file's pixel-perfect layout.
+
+### Automatic reconstruction
+
+During an agent turn, the harness automatically reconstructs files whenever a
+successful tool result provides knowledge evidence. Each reconstructed file is
+published as `reconstruction.file`, and `run.collect()` includes all files in
+`reconstructed_sources`.
+
+### Direct reconstruction
+
+Any compatible retrieval result can be reconstructed independently of the
+agent:
+
+```python
+retrieval = await raven.retrieve(
+    "global_embedded",
+    "What does the documentation say about thermal protection?",
+)
+retrieved_sections = await retrieval.result()
+
+reconstruction = await raven.reconstruct(retrieved_sections)
+files = await reconstruction.result()
+```
+
+The method accepts the common section-list contract and the agreement-retrieval
+contract.
+
+### Reconstruction from a persisted turn
+
+Tool results are stored with their conversation turn, so reconstruction can be
+requested again later without repeating retrieval:
+
+```python
+reconstruction = await raven.reconstruct_from_turn(
+    conversation.conversation_id,
+    run.turn_id,
+)
+files = await reconstruction.result()
+```
+
+If the selected turn contains no successful knowledge evidence—for example, a
+casual conversation with no tool calls—the method returns an empty list.
+
+
 ## Persistence and recovery
 
 RAVEN stores each user's state under:
