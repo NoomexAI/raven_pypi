@@ -1,586 +1,528 @@
 # RAVEN
 
-**Retrieval Augmented Adaptive Epistemic Navigation** — Privacy-first, fully offline RAG backend.
+**Retrieval Augmented Adaptive Epistemic Navigation**
+
+RAVEN is an asynchronous RAG and agent backend for building applications over
+persistent knowledge and conversations. It combines semantic document
+ingestion, multiple retrieval strategies, agent-directed tool use, durable
+operations, replayable event streams, conversation memory, and source
+reconstruction behind one Python API and an optional FastAPI server.
+
+RAVEN is local-first and privacy-conscious, but it is not limited to offline
+models. Applications can use a local Ollama server, cloud models through
+LiteLLM, or a mixture of the two.
+
+RAVEN supports two primary integration paths:
+
+```text
+Python application  ───────────────────────>  Raven facade
+
+Browser / desktop UI  ─>  FastAPI server  ─>  Raven facade
+```
+
+The high-level `Raven` class is the recommended entry point for library use.
+The underlying components remain public for applications that need more direct
+control.
+
+
+## Key features
+
+- **Agent-driven retrieval** — the model selects and sequences the tools
+  permitted by the conversation scope and the requested retrieval mode.
+- **Local and cloud models** — use Ollama locally, LiteLLM-compatible cloud
+  providers, or different providers for generation and embeddings.
+- **Durable asynchronous operations** — long-running work has observable
+  status, task results, cancellation, persisted events, and explicit retry.
+- **Replayable streaming** — operation events can be consumed directly in
+  Python or transported to a UI through replayable Server-Sent Events (SSE).
+- **Persistent knowledge** — parse, semantically split, embed, retrieve, and
+  navigate documents stored in isolated knowledge databases.
+- **Multiple retrieval strategies** — embedded, hierarchical,
+  agreement-based, and vector-conditioned retrieval, each with local and
+  global variants.
+- **Persistent conversations** — retain messages, tool calls, tool results,
+  compacted context, vector memory, preferences, titles, and turn identity.
+- **Transparent evidence** — reconstruct the source sections used during a
+  response so users can inspect and verify the supporting material.
+- **Crash-aware storage** — interrupted operations are detected after restart,
+  retryable work remains discoverable, and ingestion state is reconciled.
+- **Per-user isolation** — each user UUID receives a separate data,
+  operations, settings, and temporary-storage tree.
+- **Application-ready server** — the optional FastAPI layer provides bearer
+  authentication, OpenAPI schemas, upload controls, operation endpoints, and
+  SSE delivery.
+
+
+## How RAVEN fits together
+
+```text
+Python caller                         Browser / desktop UI
+      |                                       |
+      |                               Authenticated FastAPI
+      +-------------------+-------------------+
+                          |
+                      Raven facade
+                          |
+                 Operations and events
+                          |
+       +------------------+-------------------+
+       |                  |                   |
+ Knowledge pipeline   Conversations      Agent harness
+       |              and sessions            |
+       +------------------+-------------------+
+                          |
+               SQLite and local Qdrant
+                          |
+                 Ollama or LiteLLM
+```
+
+The main ownership boundaries are:
+
+| Component | Responsibility |
+| --- | --- |
+| `Raven` | Composes the backend and exposes its high-level, operation-first API. |
+| `KnowledgeBase` | Discovers and manages persistent `Knowledge` resources. |
+| `Knowledge` | Owns one knowledge database, its source records, and its vectors. |
+| `ConversationManager` | Discovers and manages persistent `Conversation` resources. |
+| `Conversation` | Owns messages, turns, memory, preferences, and conversation metadata. |
+| `Session` | Temporarily connects one conversation to the agent; it is not persisted. |
+| `AgentHarness` | Defines model behavior, available tools, streaming, and evidence handling. |
+| `Provider` | Resolves provider-neutral model specifications to Ollama or LiteLLM adapters. |
+| `Operation` | Owns the lifecycle and event stream of one user-visible action. |
+| `OperationTask` | Represents one invocation, result, cancellation, and retry boundary inside an operation. |
+
+Knowledge and conversations are durable resources. A session is only an
+interaction medium: create one when you need to run a turn, then discard it.
+Different conversations may run concurrently, while RAVEN prevents overlapping
+turns from mutating the same conversation.
+
+
+## Requirements
+
+- Python 3.11 or newer.
+- A writable RAVEN home directory supplied by the application.
+- For local models, a separately installed and running
+  [Ollama](https://ollama.com/download) server.
+- For cloud models, the relevant provider API key available through an
+  environment variable.
+- Enough system memory, accelerator memory, and storage for the models and
+  document collections selected by the application.
+
+RAVEN connects to Ollama but does not start, stop, update, or supervise the
+Ollama process. Process lifecycle and host-level resource management belong to
+the desktop application or deployment host.
+
+RAVEN does not require a particular GPU API or a fixed amount of VRAM. Those
+requirements depend on the selected local model and the way Ollama is deployed.
+
 
 ## Installation
+
+Install the Python library with both Ollama and LiteLLM provider support:
 
 ```bash
 pip install noomexai-raven
 ```
 
-**Required: `llama-cpp-python`** - not installed with the package due to os specific build dependencies. Build `llama-cpp-python` from source or use a prebuilt wheel. See official PyPI page for `llama-cpp-python`.
-
-**Powershell (Windows):**
+Install the library and FastAPI server dependencies:
 
 ```bash
-$env:CMAKE_ARGS = "-DGGML_VULKAN=1"
-pip install llama-cpp-python --no-cache-dir --force-reinstall -v
+pip install "noomexai-raven[server]"
 ```
 
- — see [PyPI page](https://pypi.org/project/llama-cpp-python/) for platform-specific installation.
+RAVEN uses different names at different integration boundaries:
 
-## Architecture
+| Context | Name |
+| --- | --- |
+| Product | RAVEN |
+| PyPI distribution | `noomexai-raven` |
+| Python package | `nraven` |
+| Command-line program | `nraven` |
+| High-level Python class | `Raven` |
 
-- **KnowledgeBase**: List of **Knowledge** databases powered by SQLite + sqlite-vec for vector storage
-- **IngestionPipeline**: Semantic sectioning via LLM + BGE-M3 embeddings
-- **Retrieval Pipelines**: Embedded, Hierarchical, Agreement-based, Vector-conditioned
-- **ChatSession**: Tool-calling chat with memory, preferences, streaming
-
-For detailed explanation visit [RAVEN desktop app page](https://github.com/NoomexAI/RAVEN).
-
-## Requirements
-
-- Python 3.11+
-- Vulkan-compatible GPU (recommended for llama-cpp-python)
-- 6 GB+ VRAM
-
-## Quick Start
-
-The high level api, **Raven** can be used for quick testing but is not suitable for development environment. For development environment, it's better to use the explicit components.
+For example:
 
 ```python
-import os
-os.environ['RAVEN_HOME'] = "./RAVEN"            # make sure this is set before importing anything from raven.
+from nraven import Raven
+```
 
-import raven
 
-api = raven.Raven()
+## Operation-first API
 
-api.create_knowledge("<knowledge_name>", user_summary="contains files about <knowledge_name>")
-api.ingest(
-    knowledge_name = "<knowledge_name>",
-    file_path= "/path/to/file.txt"              # Only supports .txt files for now.
+RAVEN represents work with two related objects:
+
+- An `Operation` is the root lifecycle of one user-visible action. It owns the
+  status and the ordered event stream.
+- An `OperationTask` is one unit of work within that operation. It owns that
+  invocation's result and retry metadata.
+
+Nested component calls reuse the parent operation. This preserves one coherent
+event stream while assigning each task its own UUID, name, status, and result.
+
+Most high-level methods start their work immediately and return an
+`OperationTask`:
+
+```python
+task = await raven.list_ollama_models()
+models = await task.result()
+```
+
+Awaiting the method creates and schedules the task; it does not wait for the
+operation to finish. `await task.result()` waits for completion and returns the
+method's domain result. If the task failed or was cancelled, `result()` raises
+the corresponding error instead of returning an ambiguous value.
+
+An operation moves through these states:
+
+```text
+queued -> running -> completed
+                  -> failed
+                  -> cancelled
+```
+
+Applications can inspect and control work through the facade:
+
+```python
+operation = await raven.get_operation(task.operation_id)
+record = await raven.get_operation_record(task.operation_id)
+task_record = await raven.get_operation_task(task.operation_id, task.task_id)
+
+await raven.wait_operation(task.operation_id)
+await raven.cancel_operation(task.operation_id)
+```
+
+Operations and tasks are also pageable through `list_operations()` and
+`list_operation_tasks()`. This lets a library caller or server recover status
+without holding the original Python object.
+
+### Cancellation
+
+Cancel the task directly when its handle is available:
+
+```python
+await task.cancel()
+```
+
+Or cancel its complete operation by ID:
+
+```python
+await raven.cancel_operation(task.operation_id)
+```
+
+Cancellation is cooperative. RAVEN records a terminal cancellation state and
+allows cleanup or durable state transitions already in progress to finish
+safely where required.
+
+### User-confirmed retry
+
+Only task types with an explicit retry policy are retryable. RAVEN currently
+uses user-confirmed retry for operations such as ingestion, reconstruction,
+and session generation rather than automatically repeating arbitrary model or
+storage work.
+
+```python
+retryable = await raven.list_retryable_tasks()
+
+if retryable:
+    failed = retryable[0]
+    retry_task = await raven.retry_task(
+        failed.operation_id,
+        failed.task_id,
+    )
+    result = await retry_task.result()
+```
+
+A retry creates a new operation linked to the failed task. It does not rewrite
+the original operation's history.
+
+
+## Events and streaming
+
+Events are RAVEN's primary observability and streaming contract. Every event is
+associated with an operation and may also identify the task that emitted it.
+
+Conceptually, an event contains:
+
+```json
+{
+  "type": "chat.tool_call",
+  "data": {
+    "name": "global_embedded_retrieval",
+    "step": 1
+  },
+  "operation_id": "7e6d796c-6711-4fc7-a967-78738ecac96a",
+  "task_id": "b3e7752e-64db-4924-a171-4c761f1594c0",
+  "task_name": "session.generate_response",
+  "event_id": 8,
+  "timestamp": "2026-09-20T10:30:00+00:00",
+  "is_final": false
+}
+```
+
+`event_id` increases monotonically within an operation. `task_id` and
+`task_name` correlate events from nested work without splitting the operation
+into disconnected streams.
+
+Consume events from a task while it runs:
+
+```python
+task = await raven.pull_ollama_model("qwen3:8b")
+
+async for event in task.events():
+    print(event.event_id, event.type.value, event.data)
+
+await task.result()
+```
+
+Important event families include:
+
+- `chat.thinking_delta`, `chat.tool_call`, `chat.tool_result`,
+  `chat.response_delta`, and `chat.completed`;
+- ingestion start, progress, commit, cleanup, and completion events;
+- retrieval strategy events;
+- `reconstruction.file` and reconstruction completion events;
+- context compaction and conversation turn-commit events;
+- model connection, pull, load, preload, unload, and failure events;
+- operation and task terminal events.
+
+### Replay after disconnection
+
+Events are persisted, not limited to the lifetime of a subscriber. Store the
+last successfully processed event ID and resume after it:
+
+```python
+last_event_id = 12
+
+async for event in raven.operation_events(
+    operation_id,
+    after_event_id=last_event_id,
+):
+    last_event_id = event.event_id or last_event_id
+    print(event)
+```
+
+The same cursor model powers the FastAPI SSE endpoint and its
+`Last-Event-ID` reconnection behavior. A consumer receives retained events
+after its cursor, then waits asynchronously for new events until the operation
+reaches a terminal state.
+
+Use `read_operation_events()` when a finite snapshot is more appropriate than
+a live iterator.
+
+
+## Model providers
+
+RAVEN separates model configuration from model implementation through three
+public types:
+
+- `ModelSpec` describes a model without constructing its adapter.
+- `ModelRole` distinguishes the generation model from the embedding model.
+- `Provider` routes each specification to Ollama or LiteLLM.
+
+`ModelSpec` contains:
+
+| Field | Meaning |
+| --- | --- |
+| `provider` | `"ollama"` for local Ollama, or a LiteLLM provider name for cloud models. |
+| `model` | The provider-specific model name. |
+| `role` | `ModelRole.LLM` or `ModelRole.EMBEDDING`. |
+| `api_key_ref` | Optional environment-variable name containing the provider key. |
+| `options` | Non-secret adapter options for LiteLLM-backed models. |
+
+Secrets must not be placed in `options`. RAVEN rejects common credential fields
+there and resolves `api_key_ref` from the process environment when the model is
+loaded.
+
+### Local models with Ollama
+
+The following configures both roles from a running Ollama server:
+
+```python
+import asyncio
+
+from nraven import ModelRole, ModelSpec, Raven
+
+
+async def main() -> None:
+    raven = Raven("./raven-home")
+    await raven.start()
+
+    try:
+        task = await raven.load(
+            ModelSpec(
+                provider="ollama",
+                model="qwen3:8b",
+                role=ModelRole.LLM,
+            ),
+            ModelSpec(
+                provider="ollama",
+                model="bge-m3",
+                role=ModelRole.EMBEDDING,
+            ),
+        )
+        configured = await task.result()
+        print(configured)
+    finally:
+        await raven.close()
+
+
+asyncio.run(main())
+```
+
+Loading verifies both adapters and checks the embedding model against existing
+knowledge stores before installing the new pair. RAVEN then unloads replaced
+Ollama models that are no longer selected and preloads newly configured Ollama
+models. If pre-installation validation fails, the previous configured pair
+remains active.
+
+RAVEN also exposes operation-based Ollama administration for connection checks,
+listing, inspection, pulling, and deletion. These methods connect to the
+Ollama server; they do not own its process.
+
+### Cloud models through LiteLLM
+
+Set the provider's API key in the environment managed by your application or
+deployment platform. `api_key_ref` contains only the variable's name:
+
+```python
+import asyncio
+
+from nraven import ModelRole, ModelSpec, Raven
+
+
+async def main() -> None:
+    raven = Raven("./raven-home")
+    await raven.start()
+
+    try:
+        task = await raven.load(
+            ModelSpec(
+                provider="gemini",
+                model="gemini-2.5-flash",
+                role=ModelRole.LLM,
+                api_key_ref="GEMINI_API_KEY",
+                options={"temperature": 0.2},
+            ),
+            ModelSpec(
+                provider="ollama",
+                model="bge-m3",
+                role=ModelRole.EMBEDDING,
+            ),
+        )
+        configured = await task.result()
+        print(configured)
+    finally:
+        await raven.close()
+
+
+asyncio.run(main())
+```
+
+The LLM and embedding model do not need to use the same provider. Provider
+availability, capabilities, prices, and rate limits remain properties of the
+selected external service.
+
+### Switching configured models
+
+Call `Raven.load()` with a new valid pair to switch models. The replacement is
+serialized and validated before it becomes active:
+
+```python
+task = await raven.load(new_llm_spec, new_embedding_spec)
+configured = await task.result()
+```
+
+The result is JSON-compatible configuration metadata:
+
+```json
+{
+  "llm": {
+    "provider": "gemini",
+    "model": "gemini-2.5-flash",
+    "role": "llm"
+  },
+  "embedding": {
+    "provider": "ollama",
+    "model": "bge-m3",
+    "role": "embedding"
+  }
+}
+```
+
+### Ollama model residency
+
+Configured Ollama models can be explicitly preloaded into or released from
+Ollama's runtime memory without changing the configured adapter:
+
+```python
+preload = await raven.preload_configured_model(
+    ModelRole.LLM,
+    keep_alive="10m",
 )
-# Once a knowledge is created it's added to the KnowledgeBase registry. You won't have to create it again unless you delete it.
-# You can ingest files in a previously created knowledge the same way by passing the knowledge_name to api.ingest
+print(await preload.result())
 
-session = api.session()
-
-while True:
-    user_query = input("\nUser: ")
-    
-    result = session.generate_response(user_query, retrieval_mode='auto')
-
-    print("\nThinking:\n")
-    print(result.think)
-
-    print("\nResponse:\n")
-    print(result.response)
+unload = await raven.unload_configured_model(ModelRole.LLM)
+print(await unload.result())
 ```
 
-## Status
+`keep_alive` accepts an Ollama duration string or a finite number of seconds.
+A negative value requests indefinite residency. Zero is rejected for preload;
+call `unload_configured_model()` when the intended action is unloading.
 
- - To enable default status tracking, use the **Status** class from **raven.status**.
+For a cloud model, these methods complete without attempting local residency
+and report that the provider has no local residency to manage.
 
- ```python
- import raven
- from raven.status import Status
 
- s = Status()
- s.on_change = lambda status: print("\n\n", status)
+## Persistence and recovery
 
- # s.on_change runs every time s.status = "<new_status>" is defined
+RAVEN stores each user's state under:
 
- api = raven.Raven(s=s)
- ```
-
- - on_status method and custom status
-
- ```python
- from raven.status import Status
-
- def alert(status):
-     print("Error found.")
-
- s.on_status("Error", alert)
-
- s.status = "Error"              # triggers the alert function and prints the message
- ```
-
- This way you can define custom status and trigger functions on that status
-
- - Custom status fields (advanced)
-
- There are 27 status fields defined in the **StatusRegistry** dataclass.
-
- ```python
- @dataclass
- class StatusRegistry:                       # exposed via raven.status
-     # Model Manager
-     LOADING_BASE_MODEL: str = "loading_base_model"
-     BASE_MODEL_LOADED: str = "base_model_loaded"
-     LOADING_EMBEDDING_MODEL: str = "loading_embedding_model"
-     EMBEDDING_MODEL_LOADED: str = "embedding_model_loaded"
-     LOADING_SBD_MODEL: str = "loading_sbd_model"
-     SBD_MODEL_LOADED: str = "sbd_model_loaded"
-     DOWNLOADING_BASE_MODEL: str = "downloading_base_model"
-     BASE_MODEL_DOWNLOADED: str = "base_model_downloaded"
-     DOWNLOADING_EMBEDDING_MODEL: str = "downloading_embedding_model"
-     EMBEDDING_MODEL_DOWNLOADED: str = "embedding_model_downloaded"
-     DOWNLOADING_SBD_MODEL: str = "downloading_sbd_model"
-     SBD_MODEL_DOWNLOADED: str = "sbd_model_downloaded"
-
-     # Ingestion Pipeline
-     INGESTION_GRAMMAR_ENFORCED: str = "ingestion_grammar_enforced"
-     SUBDIVIDING_FILE: str = "subdividing_file"
-     FILE_SUBDIVIDED: str = "file_subdivided"
-     INGESTION_INFERENCE_RUNNING: str = "ingestion_inference_running"
-     INGESTION_INFERENCE_COMPLETE: str = "ingestion_inference_complete"
-     INGESTING: str = "ingesting"
-     INGESTION_COMPLETE: str = "ingestion_complete"
-
-     # Chat Session
-     GENERATING_TITLE: str = "generating_title"
-     TITLE_GENERATED: str = "title_generated"
-     GENERATING_RESPONSE: str = "generating_response"
-     THINKING_START: str = "thinking_start"
-     THINKING_END: str = "thinking_end"
-     TOOL_CALL_DETECTED: str = "tool_call_detected"
-     RETRIEVED_SECTIONS: str = "retrieved_sections"
-     RESPONSE_COMPLETE: str = "response_complete"
- ```
-
- You can access those status fileds using **s.registry** parameter.
-
- ```python
- from raven.status import Status
-
- s = Status()
- print(s.registry.LOADING_BASE_MODEL)
- 
- # To see all of the fields
- print(s.registry.list_all())
- ```
-
- You can define your own status fields by creating a custom dataclass that inherits from **StatusRegistry**.
-
- ```python
- from raven.status import Status, StatusRegistry
- from dataclasses import dataclass
-
- @dataclass
- class ExtendedStatusRegistry(StatusRegistry):
-     CUSTOM_STATUS: str = "custom_status"
-
- status_registry = ExtendedStatusRegistry()
-
- s = Status(registry= status_registry)
-
- # Now you can use your custom status field
- print(s.registry.CUSTOM_STATUS)
-
- # You can use that filed instead of hardcoding strings everywhere
- def custom_func(status):
-     print("Custom fucn called")
-
- s.on_status(s.registry.CUSTOM_STATUS, custom_func)
- ```
-
-## Logging
-
-To setup logging and create a ./RAVEN/raven.log file use the **setup_logging** function.
-
-```python
-from raven import Raven
-from raven.core import setup_logging
-
-setup_logging()
-
-api = Raven()
+```text
+<raven-home>/<user-uuid>/
+├── data/
+│   ├── knowledge_base/
+│   │   └── <knowledge-name>/
+│   │       ├── metadata.json
+│   │       ├── file.sqlite3
+│   │       └── qdrant/
+│   └── conversations/
+│       └── <conversation-id>/
+│           ├── metadata.json
+│           ├── messages.sqlite3
+│           └── qdrant/
+├── operations/
+│   └── operations.sqlite3
+├── runtime_settings/
+│   └── runtime_settings.json
+└── temp/
+    └── uploads/
 ```
 
-## Streaming
-
-To enable streaming use the **generate_response_stream** method instead in generate_response.
-
-```python
-import os
-os.environ['RAVEN_HOME'] = "./RAVEN"            # make sure this is set before importing anything from raven.
-
-import raven
-
-api = raven.Raven()
-session = api.session()
-
-while True:
-    user_query = input("\nUser: ")
-    stream = session.generate_response_stream(user_query, retrieval_mode="auto")
-
-    # generate_response_stream returns a Generator[ChatResult] object
-
-    print("\nRaven:")
-    for result in stream:
-        if result.think:
-            print(result.think, end="", flush=True)
-        if result.response:
-            print(result.response, end="", flush=True)
-```
-
-## Retrieval Modes
-
-Raven features 4 main retrieval modes each one with a **local** and **global** variant. Local modes are for searching a single **Knowledge** database where Global modes are for searching across the whole **KnowledgeBase**.
-
-```python
-@dataclass
-class RetrievalModes:                               # defined in raven.core.constants. also exposed through api.retrieval_mode
-    AUTO: str = "auto"
-
-    LOCAL_EMBEDDED_RETRIEVAL: str = "local_embedded_retrieval"
-    LOCAL_HIERARCHICAL_RETRIEVAL: str = "local_hierarchical_retrieval"
-    LOCAL_AGREEMENT_BASED_RETRIEVAL: str = "local_agreement_retrieval"
-    LOCAL_VECTOR_CONDITIONED_RETRIEVAL: str = "local_vector_conditioned_retrieval"
-
-    GLOBAL_EMBEDDED_RETRIEVAL: str = "global_embedded_retrieval"
-    GLOBAL_HIERARCHICAL_RETRIEVAL: str = "global_hierarchical_retrieval"
-    GLOBAL_AGREEMENT_BASED_RETRIEVAL: str = "global_agreement_retrieval"
-    GLOBAL_VECTOR_CONDITIONED_RETRIEVAL: str = "global_vector_conditioned_retrieval"
-
-    def list_all(self) -> dict[str, str]:
-        return {f.name: getattr(self, f.name) for f in fields(self)}
-```
-
-You can use either the strings or the fields. To use the fields, you can use **api.retrieval_mode**.
-
-```python
-# Two ways to use retrieval modes
-result = session.generate_response(user_query, retrieval_mode= 'auto')
-result = session.generate_response(user_query, retrieval_mode= api.retrieval_mode.AUTO)
-
-# Same works for streaming
-stream = session.generate_response_stream(user_query, retrieval_mode= "local_hierarchical_retrieval")
-stream = session.generate_response_stream(user_query, retrieval_mode= api.retrieval_mode.LOCAL_HIERARCHICAL_RETRIEVAL)
-```
-
-## Source Reconstruction
-
-RAVEN features a source reconstruction functionality that let's you reconstruct the source after retrieval. The sections from the reconstructed source that the model used for answering your question has a **"highlighted": True** field.
-
-```python
-import raven
-
-api = raven.Raven()
-session = api.session()
-
-while True:
-    user_query = input("\nUser: ")
-    result = session.generate_response(user_query, retrieval_mode='auto')
-
-    print("\nThinking:\n")
-    print(result.think)
-
-    print("\nResponse:\n")
-    print(result.response)
-
-    # Reconstructor needs the tool_result and tool_name to work
-    tool_name, tool_result = result.tool_name, result.tool_result
-
-    print("\nReconstructed:\n")
-    print(api.reconstruct(tool_result, tool_name))
-
-
-# For streaming
-while True:
-    user_query = input("\nUser:")
-    stream = session.generate_response_stream(user_query, retrieval_mode="auto")
-
-    tool_name = None
-    tool_result = None
-
-    print("\nRaven:")
-    for result in stream:
-
-        if result.think:
-            print(result.think, end="", flush=True)
-        if result.response:
-            print(result.response, end="", flush=True)
-
-        if result.tool_result and result.tool_name:
-            tool_name = result.tool_name
-            tool_result = result.tool_result
-
-
-    reconstructor = Reconstructor(knowledge_base)
-    reconstructed = reconstructor.reconstruct(tool_result, tool_name)
-    print(f"\nReconstructed:\n{reconstructed}\n")
-```
-
-## Components
-
-For development environment it's better to use individual components explicitly to control the data flow.
-
- - **Initialization** - This is the part where you initialize all the components according to their dependency order.
- 
- ```python
- from raven.core import KnowledgeBase, ModelManager, setup_logging
- from raven.pipelines import IngestionPipeline
- from raven.session import ConversationManager, ChatSession
- from raven.reconstructor import Reconstructor
- from raven.core.constants import RetrievalModes
-
- setup_logging()
-
- # ============== Retrieval modes =================================
- retrieval_mode = RetrievalMode()                                       # if you plan to use fileds.
-
- # ============== KnowledgeBase and ModelManager ===================
-
- knowledge_base = KnowledgeBase()
- model_manager = ModelManager()
-
- # ============== Models ============================================
-
- base_model = model_manager.initiate_base_model()                
- # supports 3 base models: gemma-4-E2B-it, gemma-4-E4B-it, Qwen2.5-7B-instruct (experimental) in .gguf format.
-
- embedding_model = model_manager.initiate_embedding_model()
- sbd_model = model_manager.initiate_sbd_model()
-
- # ==============IngestionPipeline ==================================
-
- # Only Initialize ingestion if you plan to ingest files in Knowledges
- ingestion = IngestionPipeline(
-     knowledge_base= knowledge_base,
-     base_model= base_model,
-     embedding_model= embedding_model,
-     sbd_model= sbd_model
- )
-
- # =============== ConversationManager ===============================
-
- conversation_manager = ConversationManager(
-     knowledge_base= knowledge_base,
-     base_model= base_model,
-     embedding_model= embedding_model
- )
- ```
-
- - **Generation loop** - This is where we used the initialized components to perform operations
-
- ```python
-
- # Creating new knowledge (Not necessary if you want to retrieve info from a previously created knowledge)
- knowledge_base.create_knowledge("engineering", user_summary="contains engineering files")
- knowledge_base.create_knowledge("medical", user_summary= "contains medical files")
-
- # Ingesting files
- ingestion.ingest(
-     knowledge_name= "engineering",
-     file_path= r"path/to/file.txt"
- )
- ingestion.ingest(
-     knowledge_name= "medical",
-     file_path= r"path/to/file.txt"
- )
-
- # Creating Converstaion
- conversation_id = conversation_manager.create_conversation()
-
- # To open an existing conversation, set the conversation_id = the base name of the corresponding .conv file in the ./RAVEN/Conversations directory
-
- conversation = conversation_manager.get_conversation(conversation_id)
-
- # Initializing Session with that conversation
- session = ChatSession(
-     conversation= conversation,
-     knowledge_base= knowledge_base,
-     base_model= base_model,
-     embedding_model= embedding_model,
- )
-
- # Interacting with the model in that session
- # For normal chat loop
- while True:
-     user_query = input("\nUser: ")
-    
-     result = session.generate_response(user_query, retrieval_mode = retrieval_mode.AUTO)
-
-     print("\nThinking:\n")
-     print(result.think)
-
-     print("\nResponse:\n")
-     print(result.response)
-
-     tool_name, tool_result = result.tool_name, result.tool_result
-
-     reconstructor = Reconstructor(knowledge_base)
-     reconstructed = reconstructor.reconstruct(tool_result, tool_name)
-     print(f"\nReconstructed:\n{reconstructed}\n")
-
-
- # For streaming chat loop
- while True:
-     user_query = input("\nUser:")
-     stream = session.generate_response_stream(user_query, retrieval_mode= retieval_mode.AUTO)
- 
-     tool_name = None
-     tool_result = None
-
-     print("\nRaven:")
-     for result in stream:
-
-         if result.think:
-             print(result.think, end="", flush=True)
-         if result.response:
-             print(result.response, end="", flush=True)
-
-         if result.tool_result and result.tool_name:
-             tool_name = result.tool_name
-             tool_result = result.tool_result
-
-
-     reconstructor = Reconstructor(knowledge_base)
-     reconstructed = reconstructor.reconstruct(tool_result, tool_name)
-     print(f"\nReconstructed:\n{reconstructed}\n")
- ```
-
-  - Complete code for a component setup
-
- ```python
- import os
- os.environ["RAVEN_HOME"] = r"./RAVEN"
-
- from raven.core import KnowledgeBase, ModelManager, setup_logging
- from raven.pipelines import IngestionPipeline
- from raven.session import ConversationManager, ChatSession
- from raven.reconstructor import Reconstructor
-
- setup_logging()
-
- # Initialize knowledge base and model manager
- knowledge_base = KnowledgeBase()
- model_manager = ModelManager()
-
- print("Initializing models...\n")
- base_model = model_manager.initiate_base_model()                
- # supports 3 base models: gemma-4-E2B-it, gemma-4-E4B-it, Qwen2.5-7B-instruct (experimental) in .gguf format.
-
- embedding_model = model_manager.initiate_embedding_model()
- sbd_model = model_manager.initiate_sbd_model()
- print("Models initialised\n")
-
-
- knowledge_base.create_knowledge("engineering", user_summary="contains engineering files")
- knowledge_base.create_knowledge("medical", user_summary= "contains medical files")
-
- ingestion = IngestionPipeline(
-     knowledge_base= knowledge_base,
-     base_model= base_model,
-     embedding_model= embedding_model,
-     sbd_model= sbd_model
- )
-
- print("Ingesting...\n")
- ingestion.ingest(
-     knowledge_name= "engineering",
-     file_path= r"path/to/file.txt"
- )
- ingestion.ingest(
-     knowledge_name= "medical",
-     file_path= r"path/to/file.txt"
- )
- print("Ingestion complete\n")
-
- conversation_manager = ConversationManager(
-     knowledge_base= knowledge_base,
-     base_model= base_model,
-     embedding_model= embedding_model
- )
- conversation_id = conversation_manager.create_conversation()
- conversation = conversation_manager.get_conversation(conversation_id)
-
- session = ChatSession(
-     conversation= conversation,
-     knowledge_base= knowledge_base,
-     base_model= base_model,
-     embedding_model= embedding_model,
- )
-
- # For normal chat loop
- while True:
-     user_query = input("\nUser: ")
-     
-     result = session.generate_response(user_query, retrieval_mode='auto')
-
-     print("\nThinking:\n")
-     print(result.think)
-
-     print("\nResponse:\n")
-     print(result.response)
-
-     tool_name, tool_result = result.tool_name, result.tool_result
-
-     reconstructor = Reconstructor(knowledge_base)
-     reconstructed = reconstructor.reconstruct(tool_result, tool_name)
-     print(f"\nReconstructed:\n{reconstructed}\n")
-
-
- # For streaming chat loop
- while True:
-     user_query = input("\nUser:")
-     stream = session.generate_response_stream(user_query, retrieval_mode="auto")
-
-     tool_name = None
-     tool_result = None
-
-     print("\nRaven:")
-     for result in stream:
-
-         if result.think:
-             print(result.think, end="", flush=True)
-         if result.response:
-             print(result.response, end="", flush=True)
- 
-         if result.tool_result and result.tool_name:
-             tool_name = result.tool_name
-             tool_result = result.tool_result
-
-
-     reconstructor = Reconstructor(knowledge_base)
-     reconstructed = reconstructor.reconstruct(tool_result, tool_name)
-     print(f"\nReconstructed:\n{reconstructed}\n")
- ```
-
-## Status in components
-
-To enable status tracking while using explicit components, you have to pass the status instance to the classes that expects it. There are three classes that expect an **s: status** argument.
- - ModelManager
- - IngestionPipeline
- - ChatSession
-
-```python
-import os
-os.environ["RAVEN_HOME"] = r"./RAVEN"
-
-from raven.core import KnowledgeBase, ModelManager, setup_logging
-from raven.pipelines import IngestionPipeline
-from raven.session import ConversationManager, ChatSession
-from raven.reconstructor import Reconstructor
-from raven.status import Status
-
-setup_logging()
-
-s = Status()
-s.on_change = lambda status: print(status)
-
-model_manager = ModelManager(s=s)
-
-ingestion = IngestionPipeline(
-    knowledge_base= knowledge_base,
-    base_model= base_model,
-    embedding_model= embedding_model,
-    sbd_model= sbd_model,
-    s= s
-)
-
-session = ChatSession(
-    conversation= conversation,
-    knowledge_base= knowledge_base,
-    base_model= base_model,
-    embedding_model= embedding_model,
-    s= s
-)
-```
-
-## License
-
-MIT — see [LICENSE.txt](LICENSE.txt)
+This persists:
+
+- knowledge metadata, parsed source sections, and Qdrant vectors;
+- conversation metadata, original messages, tool messages, turns, compacted
+  context, vector memory, and preferences;
+- operation records, task records, statuses, retry links, and events;
+- per-user runtime settings.
+
+### Recovery after interruption
+
+On startup, RAVEN inspects persisted operations. If a previous process stopped
+while an operation was non-terminal, the worker no longer exists, so RAVEN
+marks the operation as interrupted instead of pretending that it completed or
+leaving it permanently running.
+
+Eligible failed tasks remain discoverable for explicit retry. A retry starts a
+new linked operation and uses the task's persisted retry input; RAVEN does not
+blindly resume arbitrary Python workers or automatically repeat external model
+calls.
+
+Ingestion uses pending records and reconciliation to remove or complete
+partially committed storage changes. Conversation turn IDs and idempotent turn
+commits prevent the same completed turn from being written twice during retry
+or recovery.
+
+Model adapters, active network clients, and Ollama VRAM residency are runtime
+state. They are rebuilt or reconfigured after process restart rather than being
+treated as durable application state.
