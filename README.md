@@ -46,9 +46,12 @@ control.
 - [FastAPI server quick start](#fastapi-server-quick-start)
 - [Using RAVEN from a web or desktop UI](#using-raven-from-a-web-or-desktop-ui)
 - [HTTP API overview](#http-api-overview)
+- [HTTP request reference](#http-request-reference)
 - [Configuration](#configuration)
 - [Persistence and recovery](#persistence-and-recovery)
+- [Backup, restore, and cleanup](#backup-restore-and-cleanup)
 - [Security and deployment responsibilities](#security-and-deployment-responsibilities)
+- [Server troubleshooting](#server-troubleshooting)
 - [Advanced component API](#advanced-component-api)
 - [Development and testing](#development-and-testing)
 - [Current limitations](#current-limitations)
@@ -330,7 +333,7 @@ async def main() -> None:
 
         create_knowledge_task = await raven.create_knowledge(
             "engineering",
-            "Engineering reference documents",
+            user_summary = "Engineering reference documents",
         )
         await create_knowledge_task.result()
 
@@ -519,11 +522,45 @@ task = await raven.run_operation("my_app.index", custom_worker)
 result = await task.result()
 ```
 
-Use `run_operation()` when one worker is enough. Use `create_operation()` and
-`operation.run()` when several component calls must share one operation and
-event stream. Operation names must be non-empty stable strings; application
-names should use a namespace such as `my_app.index` to avoid collisions with
-built-in names.
+The example above uses `run_operation()` for a single worker: it creates the
+operation, starts that worker, and gives you an `OperationTask` whose
+`result()` waits for its return value.
+
+For a workflow that calls several RAVEN components, create the operation
+first and pass it to each call. This example assumes `raven` is started, its
+models are configured, the source file exists, and `engineering` is a new
+knowledge name:
+
+```python
+async def prepare_knowledge(operation):
+    create_task = await raven.create_knowledge(
+        "engineering",
+        operation=operation,
+    )
+    knowledge = await create_task.result()
+
+    ingest_task = await raven.ingest(
+        knowledge.name,
+        "./documents/system-design.pdf",
+        operation=operation,
+    )
+    return await ingest_task.result()
+
+
+operation = await raven.create_operation("my_app.prepare_knowledge")
+root_task = await operation.run("my_app.prepare_knowledge", prepare_knowledge)
+ingested_file = await root_task.result()
+print(ingested_file["file_id"])
+```
+
+`operation.run()` starts the root task; its name must match the name passed to
+`create_operation()`. Inside the worker, both component calls run as child
+tasks under the same operation. Await each child's `result()` before depending
+on its output. All three tasks share one operation ID and replayable event
+stream, while `root_task.result()` waits for the whole workflow and returns
+the ingestion result. Operation names must be non-empty stable strings;
+application names should use a namespace such as `my_app.prepare_knowledge`
+to avoid collisions with built-in names.
 
 `submit_operation(name, worker)` is the event-oriented convenience form: it
 creates and starts the root task but returns the owning `Operation`. Use it
@@ -585,6 +622,8 @@ Only task types with an explicit retry policy are retryable. RAVEN currently
 uses user-confirmed retry for operations such as ingestion, reconstruction,
 and session generation rather than automatically repeating arbitrary model or
 storage work.
+The persisted `retry_policy` field is exactly `"never"` or
+`"user_confirmed"`; it is not an instruction to auto-retry on startup.
 
 | Retryable root task | Maximum attempts | What is reused |
 | --- | --- | --- |
@@ -973,6 +1012,16 @@ embedding_spec = ModelSpec(
 )
 ```
 
+> **WARNING — Choose your embedding model before ingesting data.** Knowledge
+> vectors and conversation vector memory are generated in that model's vector
+> space. A different embedding model cannot reliably search those existing
+> vectors, even if it produces vectors with the same dimensions. RAVEN records
+> the embedding identity and rejects mismatches; configuring another model
+> does **not** convert stored embeddings. To change models after data exists,
+> plan an explicit rebuild/re-embedding of the affected knowledge and memory
+> stores from their source data. Changing the LLM does not have this particular
+> vector-compatibility constraint.
+
 Secrets must not be placed in `options`. RAVEN rejects common credential fields
 there and resolves `api_key_ref` from the process environment when the model is
 loaded.
@@ -1161,6 +1210,10 @@ and custom-provider selection.
 
 Call `Raven.configure_models()` with a new valid pair to switch models. The
 replacement is serialized and validated before it becomes active:
+
+**Keep the same embedding model for existing knowledge and vector memory.**
+The warning above applies to model switches too: RAVEN does not re-embed old
+data during configuration, and an incompatible replacement is rejected.
 
 ```python
 task = await raven.configure_models(new_llm_spec, new_embedding_spec)
@@ -2613,8 +2666,8 @@ async function streamOperation(
 
   while (true) {
     const {value, done} = await reader.read();
-    buffer += decoder.decode(value, {stream: !done}).replaceAll("\r\n", "\n");
-    const frames = buffer.split("\n\n");
+    buffer += decoder.decode(value, {stream: !done});
+    const frames = buffer.split(/\r?\n\r?\n/);
     buffer = frames.pop() ?? "";
 
     for (const frame of frames) {
@@ -2627,8 +2680,8 @@ async function streamOperation(
       if (!data) continue;
 
       const event = JSON.parse(data) as RavenEvent;
-      cursor = event.event_id;
       onEvent(event);
+      cursor = event.event_id;
     }
 
     if (done) return cursor;
@@ -2647,6 +2700,31 @@ resource and returns `404 Not Found`.
 Render event types independently: thinking is not response text, tool calls
 and bounded tool results describe agent work, `reconstruction.file` supplies
 verifiable sources, and response deltas form the user-visible answer.
+
+For a desktop UI, the trusted native process obtains the launch token and
+forwards the requests in this order: `POST /provider/models/configure`,
+`POST /knowledges`, `POST /knowledges/{name}/files`, follow its `events_url`,
+`POST /conversations`, `POST /conversations/{id}/turns`, follow that new
+`events_url`, then `GET /conversations/{id}/turns/{turn_id}` and `/messages`
+for durable display. All paths in this paragraph are under `/api/v1`.
+The UI should store the returned `conversation_id` as its chat identity and
+the returned `turn_id` as the durable identity of the generated turn; neither
+is the SSE `event_id`.
+
+For a hosted UI, the browser calls its **host backend**, which authenticates
+the account and authorizes its UUID. The host backend supplies RAVEN's
+per-launch bearer token and the authorized `X-Raven-User-ID` on each internal
+request, including SSE reconnects. The browser does not choose that UUID or
+receive the launch token. The same sequence above then applies per user.
+
+Within one operation, `operation_id` selects the stream, `task_id` identifies
+a root or nested task, `event_id` is the replay cursor, and `call_id` matches
+an agent's `chat.tool_call` with its `chat.tool_result`. If a connection drops,
+reopen the same operation stream with the last successfully handled event ID;
+do not submit the turn a second time just to recover deltas. Direct retrieval
+and direct reconstruction are currently Python-facade capabilities; the HTTP
+server exposes reconstruction of a persisted turn, not a generic direct
+retrieval/reconstruction endpoint.
 
 
 ## HTTP API overview
@@ -2777,6 +2855,179 @@ The `202 Accepted` response adds `conversation_id` and `turn_id` to the
 operation reference. Use the operation's SSE endpoint while the turn is
 running. The persisted turn and canonical messages can be fetched later from
 their conversation routes.
+
+
+## HTTP request reference
+
+The following `curl` examples use POSIX shell syntax (`curl.exe` in
+PowerShell). Set `RAVEN_URL=http://127.0.0.1:8765` and supply `RAVEN_TOKEN`
+through your trusted desktop or host process. Each protected request explicitly
+sends `Authorization: Bearer $RAVEN_TOKEN`. For hosted use, also send
+`X-Raven-User-ID: 4b9bd24b-61de-42ed-9176-d2db91b66702` on every protected
+request when `require_user_id_header` is enabled. The UUIDs below are example
+path values; replace them with IDs returned by your server. Requests without
+`-d` or `-F` have no body. JSON bodies use `Content-Type: application/json`.
+Do not pass the process-wide launch token directly to an untrusted browser.
+
+Each response example below identifies its HTTP status and useful fields.
+`202 Accepted` commands return an operation reference, not the finished task
+result. Most `202` commands use this complete body:
+
+```json
+{
+  "operation_id": "cc9dce11-16ca-42be-b418-18588d03a571",
+  "task_id": "8f708231-4a27-40cb-a51e-477339c167ad",
+  "status": "running",
+  "events_url": "/api/v1/operations/cc9dce11-16ca-42be-b418-18588d03a571/events",
+  "retry_of_operation_id": null,
+  "retry_of_task_id": null
+}
+```
+
+The initial status may instead be `queued`. A turn submission uses a distinct
+`202` body: `conversation_id`, `turn_id`, `operation_id`, `task_id`, `status`,
+and `events_url` (without retry-link fields). The `200` and `201` routes below
+wait for their work and return the resource. Errors use the common
+`{"error":{"code":"...","message":"...","details":{}},"request_id":"..."}`
+envelope; see [Errors](#errors). `/openapi.json` supplies the complete typed
+response schemas. The examples use valid request formats; response snippets
+marked *excerpt* show selected fields rather than the entire object.
+
+### Health and runtime requests
+
+Health and OpenAPI routes are unauthenticated; all runtime routes require the
+bearer token. These requests have empty bodies unless `-d` is shown.
+
+| Request | Success | Meaning |
+| --- | --- | --- |
+| `curl -i "$RAVEN_URL/api/v1/health/live"` | `200 {"status":"ok"}` | HTTP process is live. |
+| `curl -i "$RAVEN_URL/api/v1/health/ready"` | `200 {"status":"ready"}` | Registry is ready; otherwise `503`. |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/runtime"` | `200` excerpt: `{"started":true,"models_loaded":false,"operation_store_healthy":true}` | User-runtime state; full response also has `user_id`, `closed`, `runtime_config_revision`, and `models`. |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/runtime/settings"` | `200` complete settings document, initially `{"revision":0,...}` | Read current defaults before editing. |
+| `curl -i -X PATCH -H "Authorization: Bearer $RAVEN_TOKEN" -H 'Content-Type: application/json' -d '{"expected_revision":0,"retrieval_top_k":5}' "$RAVEN_URL/api/v1/runtime/settings"` | `200` complete settings document, now `{"revision":1,"retrieval_top_k":5,...}` | Change only specified fields; stale revision gives `409`. |
+| `curl -i -X POST -H "Authorization: Bearer $RAVEN_TOKEN" -H 'Content-Type: application/json' -d '{"expected_revision":1}' "$RAVEN_URL/api/v1/runtime/settings/reset"` | `200` complete defaults, now `{"revision":2,"retrieval_top_k":3,...}` | Restore all runtime defaults. |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/runtime/discovery-issues"` | `200 {"items":[]}` when no malformed resource was found | Each nonempty item has `resource_type`, `directory_name`, `code`, and `message`. |
+
+The complete mutable field list and request semantics are in
+[RuntimeConfig](#runtimeconfig). `operation_store_healthy: false` needs operator
+attention before submitting further work. Invalid settings are `422`, not
+background tasks.
+
+### Model requests
+
+Configured-model routes affect this user's `Raven` runtime. Ollama
+administration affects the externally managed Ollama service and should be
+restricted by a hosted application's authorization layer.
+
+| Request | Success | Meaning |
+| --- | --- | --- |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/provider/models/configured"` | `200 {"llm":null,"embedding":null}` before configuration | After configuration, each role has `provider`, `model`, and `role`. |
+| `curl -i -X POST -H "Authorization: Bearer $RAVEN_TOKEN" -H 'Content-Type: application/json' -d '{"llm":{"provider":"ollama","model":"qwen3:8b","role":"llm","api_key_ref":null,"options":{}},"embedding":{"provider":"ollama","model":"bge-m3","role":"embedding","api_key_ref":null,"options":{}}}' "$RAVEN_URL/api/v1/provider/models/configure"` | `202` operation reference | Validate and install one LLM/embedding pair. |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/providers/ollama/status"` | `200 {"provider":"ollama","status":"available"}` | Check Ollama connection; unavailability gives `503`. |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/providers/ollama/models"` | `200 {"items":[]}` if no models are installed | Items can include `model`, `modified_at`, `digest`, `size`, and `details`. |
+| `curl -i -X POST -H "Authorization: Bearer $RAVEN_TOKEN" -H 'Content-Type: application/json' -d '{"model":"qwen3:8b"}' "$RAVEN_URL/api/v1/providers/ollama/models/inspect"` | `200` inspection object containing `model`, `template`, `modelfile`, `license`, `details`, `model_info`, `parameters`, and `capabilities` | Inspect one model. |
+| `curl -i -X POST -H "Authorization: Bearer $RAVEN_TOKEN" -H 'Content-Type: application/json' -d '{"model":"qwen3:8b"}' "$RAVEN_URL/api/v1/providers/ollama/models/pull"` | `202` operation reference | Follow `model.pull.progress` events. |
+| `curl -i -X POST -H "Authorization: Bearer $RAVEN_TOKEN" -H 'Content-Type: application/json' -d '{"model":"qwen3:8b"}' "$RAVEN_URL/api/v1/providers/ollama/models/delete"` | `202` operation reference | Permanently remove an installed model. |
+| `curl -i -X POST -H "Authorization: Bearer $RAVEN_TOKEN" -H 'Content-Type: application/json' -d '{"keep_alive":"10m"}' "$RAVEN_URL/api/v1/provider/models/configured/llm/preload"` | `202` operation reference | Preload the configured role. Omit body to use Ollama's default; `0` is invalid. |
+| `curl -i -X POST -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/provider/models/configured/embedding/unload"` | `202` operation reference | Unload the configured role; no body. |
+
+For preload/unload, `{role}` is `llm` or `embedding`; substitute either in
+both examples. Cloud adapters have no Ollama VRAM residency. Model names for
+inspect/pull/delete go in the JSON body, not a path segment. See
+[Model providers](#model-providers) for role, API-key, and switching rules.
+
+### Operation and SSE requests
+
+Use the `operation_id` and `task_id` returned by a `202` command. In these
+examples they are `cc9dce11-16ca-42be-b418-18588d03a571` and
+`8f708231-4a27-40cb-a51e-477339c167ad`. The default list page size is the
+`operation_page_size` system setting (50); `limit` must be positive and cannot
+exceed it. Pass a non-null `next_cursor` back in the corresponding `after_*`
+query parameter. List status filters accept the documented operation states.
+
+| Request | Success | Meaning |
+| --- | --- | --- |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/operations?status=failed&limit=10"` | `200 {"items":[],"next_cursor":null}` if none failed | Newest-first operation page; optional `after_operation_id=<uuid>`. |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/operation-tasks/retryable?limit=10"` | `200 {"items":[],"next_cursor":null}` if none eligible | Retryable task page; optional `after_task_id=<uuid>`. |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/operations/cc9dce11-16ca-42be-b418-18588d03a571"` | `200` operation object with `operation_id`, `name`, `status`, `last_event_id`, times, `error`, and `is_finished` | Inspect terminal state independently of SSE. |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/operations/cc9dce11-16ca-42be-b418-18588d03a571/tasks?status=failed&limit=10"` | `200 {"items":[],"next_cursor":null}` if none failed | Tasks within one operation; optional `after_task_id=<uuid>`. |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/operations/cc9dce11-16ca-42be-b418-18588d03a571/tasks/8f708231-4a27-40cb-a51e-477339c167ad"` | `200` task object with `status`, `retry_policy`, `attempt`, `max_attempts`, `attempts_remaining`, `can_retry`, retry links, times, and error | Check a task's eligibility before retry. Retry inputs are never exposed. |
+| `curl -i -N -H "Authorization: Bearer $RAVEN_TOKEN" -H 'Last-Event-ID: 5' "$RAVEN_URL/api/v1/operations/cc9dce11-16ca-42be-b418-18588d03a571/events"` | `200 text/event-stream`, frames such as `id: 6`, `event: chat.response_delta`, `data: {...}` | Replay after event 5, then follow live updates. Omit `Last-Event-ID` to start at the beginning. |
+| `curl -i -X POST -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/operations/cc9dce11-16ca-42be-b418-18588d03a571/cancel"` | `200` operation object; status may still be transitioning | Request cooperative cancellation; no request body. Recheck operation/task status. |
+| `curl -i -X POST -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/operations/cc9dce11-16ca-42be-b418-18588d03a571/tasks/8f708231-4a27-40cb-a51e-477339c167ad/retry"` | `202` new operation reference with `retry_of_operation_id` and `retry_of_task_id` populated | User-confirmed retry; no request body. The original operation is unchanged. |
+
+An SSE frame has `id`, typed `event`, and a JSON `data` envelope with
+`event_id`, `operation_id`, `task_id`, `task_name`, `type`, ISO timestamp,
+payload `data`, and `is_final`. Heartbeats are SSE comments, not JSON events.
+The stream closes after a final event. Invalid cursor gives `400`; an expired
+replay gap gives `410`; a cleaned-up operation gives `404`. See
+[Replay after disconnection](#replay-after-disconnection) and
+[Streaming operation events](#streaming-operation-events) for the client flow.
+
+### Knowledge, ingestion, and navigation requests
+
+The `name` path value below is `engineering`. File deletion uses a `file_id`;
+section navigation uses the stored `file_name`, which must be URL-encoded if
+it contains spaces or reserved characters. List endpoints return
+`{"items":[...],"next_cursor":null}` when the final page is reached.
+Non-null cursors belong in the next request's matching `after_*` parameter.
+`limit` defaults to `operation_page_size` and may not exceed it.
+
+| Request | Success | Meaning |
+| --- | --- | --- |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/knowledges?limit=10"` | `200 {"items":[],"next_cursor":null}` if none exist | Knowledge summaries; optional `after_name=engineering`. Items include `name`, `user_summary`, `count`, and `created_at`. |
+| `curl -i -X POST -H "Authorization: Bearer $RAVEN_TOKEN" -H 'Content-Type: application/json' -d '{"name":"engineering","user_summary":"Engineering reference documents"}' "$RAVEN_URL/api/v1/knowledges"` | `201` metadata with `schema_version`, `name`, `created_at`, and `user_summary` | Create; duplicate name gives `409`. |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/knowledges/engineering"` | `200` same knowledge metadata object | Inspect an existing knowledge. |
+| `curl -i -X PATCH -H "Authorization: Bearer $RAVEN_TOKEN" -H 'Content-Type: application/json' -d '{"user_summary":"Updated engineering documents"}' "$RAVEN_URL/api/v1/knowledges/engineering"` | `200` updated metadata object | Replace its summary; an empty string is allowed. |
+| `curl -i -X DELETE -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/knowledges/engineering"` | `202` operation reference | Delete the knowledge and its files/vectors. Irreversible without backup. |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/knowledges/engineering/files?limit=10"` | `200 {"items":[],"next_cursor":null}` if empty | Files; optional `after_file_id=<file-id>`. Each item has `file_id`, `file_name`, counts, `ingested_at`, and `navigation_type`. |
+| `curl -i -X POST -H "Authorization: Bearer $RAVEN_TOKEN" -F 'file=@system-design.pdf;type=application/pdf' "$RAVEN_URL/api/v1/knowledges/engineering/files"` | `202` operation reference | Browser-safe upload. The required multipart field is **`file`**; do not manually set a boundary. |
+| `curl -i -X POST -H "Authorization: Bearer $RAVEN_TOKEN" -H 'Content-Type: application/json' -d '{"source_path":"/srv/raven-imports/system-design.pdf"}' "$RAVEN_URL/api/v1/knowledges/engineering/ingest-path"` | `202` operation reference | Trusted server-local path only; disabled by default and limited to allowed roots. No upload bytes in this request. |
+| `curl -i -X DELETE -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/knowledges/engineering/files/a83fd91c20b4"` | `202` operation reference | Delete by **file ID**, not filename. |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/knowledges/engineering/files/system-design.pdf/sections?limit=10&after_section_index=0"` | `200 {"items":[],"next_cursor":null}` if none | Sections in increasing index order. Use returned numeric cursor in `after_section_index`. |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/knowledges/engineering/files/system-design.pdf/sections/a83fd91c20b4-3"` | `200` full section with `section_id`, `file_id`, `file_name`, `section_index`, `raw_content`, `summary`, `keywords`, `conditions`, `definitions`, `source_element_ids`, and `source_range` | Inspect exact text and provenance; wrong file/section pairing gives `404`. |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/knowledges/engineering/stats"` | `200 {"vector_count":42,"file_count":1}` | Count stored files and vector points. |
+
+Accepted filenames are simple `.txt`, `.md`, `.docx`, or `.pdf` names; paths,
+control characters, reserved device names, and unsupported extensions are
+rejected. The configured source-file and request-size limits also apply. A
+successful upload is removed from staging after ingestion. A failed upload
+remains private and retryable only within `upload_retry_retention_seconds`;
+after expiry, upload again. Duplicate file ingestion gives a conflict rather
+than silently replacing data. A failed/interrupted ingestion may be retried
+through its task if `can_retry` is true; RAVEN reconciles pending vector and
+metadata state. See [Ingestion safety and retry](#ingestion-safety-and-retry).
+
+### Conversation, turn, and preference requests
+
+The examples use conversation ID `c36c45ac5575`, turn ID
+`c4d242e9-f6e9-4a84-8cdc-e7bf5c8a3021`, and preference ID
+`562fe22a-8eea-4f24-bb81-eeb0f663fd4d`. Use the IDs returned by your own
+server. A conversation's `type` is computed from `knowledge_name`: `null` is
+global, a named knowledge is local. The server creates a temporary session for
+a turn; there is no session HTTP resource.
+
+| Request | Success | Meaning |
+| --- | --- | --- |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/conversations?limit=10"` | `200 {"items":[],"next_cursor":null}` if none exist | Newest-first metadata; optional `after_conversation_id=<id>`. |
+| `curl -i -X POST -H "Authorization: Bearer $RAVEN_TOKEN" -H 'Content-Type: application/json' -d '{"knowledge_name":null}' "$RAVEN_URL/api/v1/conversations"` | `201` metadata with `conversation_id`, `type:"global"`, `knowledge_name:null`, `title`, `is_titled`, `pinned`, and `created_at` | Create global. Use `"knowledge_name":"engineering"` for local. |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/conversations/c36c45ac5575"` | `200` full conversation metadata | Reload a conversation. |
+| `curl -i -X PATCH -H "Authorization: Bearer $RAVEN_TOKEN" -H 'Content-Type: application/json' -d '{"title":"Thermal design","pinned":true}' "$RAVEN_URL/api/v1/conversations/c36c45ac5575"` | `200` updated metadata | Supply `title`, `pinned`, or both; scope cannot be changed. |
+| `curl -i -X DELETE -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/conversations/c36c45ac5575"` | `202` operation reference | Delete conversation data; back up first if needed. |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/conversations/c36c45ac5575/messages?limit=10&after_message_id=0"` | `200 {"items":[],"next_cursor":null}` if empty | Canonical, uncompacted transcript. Messages include role, content, turn/order, tool calls, and tool-call identifiers. |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/conversations/c36c45ac5575/turns/c4d242e9-f6e9-4a84-8cdc-e7bf5c8a3021"` | `200` turn with `turn_id`, `operation_id`, `user_query`, `result`, `memory_indexed`, `committed_at` | Load a durable turn. Result includes thinking, response, evidence, tool calls, and reconstructed sources. |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/conversations/c36c45ac5575/turns/c4d242e9-f6e9-4a84-8cdc-e7bf5c8a3021/messages?limit=10&after_message_id=0"` | `200 {"items":[],"next_cursor":null}` if none | Canonical messages for only this turn, paginated by message ID. |
+| `curl -i -X POST -H "Authorization: Bearer $RAVEN_TOKEN" -H 'Content-Type: application/json' -d '{"user_query":"What protects the motor from overheating?","retrieval_mode":"auto"}' "$RAVEN_URL/api/v1/conversations/c36c45ac5575/turns"` | `202` reference plus `conversation_id` and new `turn_id` | Start generation. `retrieval_mode` can be omitted, `auto`, or an allowed exact mode. |
+| `curl -i -X POST -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/conversations/c36c45ac5575/turns/c4d242e9-f6e9-4a84-8cdc-e7bf5c8a3021/reconstruction"` | `202` operation reference | Reconstruct persisted turn evidence; no body. A casual turn may return an empty result. |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/conversations/c36c45ac5575/preferences"` | `200 {"items":[]}` if none | Items contain exact `preference_id` and `text`. |
+| `curl -i -X POST -H "Authorization: Bearer $RAVEN_TOKEN" -H 'Content-Type: application/json' -d '{"text":"Prefer concise explanations."}' "$RAVEN_URL/api/v1/conversations/c36c45ac5575/preferences"` | `201` preference with `preference_id` and `text` | Save conversation-scoped preference. |
+| `curl -i -X DELETE -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/conversations/c36c45ac5575/preferences/562fe22a-8eea-4f24-bb81-eeb0f663fd4d"` | `200` removed preference object | Delete by stable ID, not matching text; no body. |
+
+An accepted turn's `events_url` is the UI's live source of thinking, tool
+calls/results, reconstruction, and answer deltas. Fetch the turn and messages
+after completion for durable display. Two simultaneous turns on the same
+conversation are rejected with `409`; different conversations may run at
+once. See [Conversations, sessions, and memory](#conversations-sessions-and-memory).
 
 
 ## Configuration
@@ -3233,6 +3484,50 @@ state. They are rebuilt or reconfigured after process restart rather than being
 treated as durable application state.
 
 
+## Backup, restore, and cleanup
+
+The safest consistent backup is an **offline copy of the complete RAVEN home**:
+stop accepting new work, wait for or cancel active operations, stop the one
+RAVEN server process, and only then copy the home to protected storage. This
+keeps each user's knowledge SQLite files, Qdrant directories, conversation
+SQLite files, operations/event SQLite store, metadata, and runtime settings
+together. Do not copy only `file.sqlite3` without its corresponding Qdrant
+directory, or only `messages.sqlite3` without conversation metadata and
+memory storage. A live file-by-file copy is not a transactionally consistent
+backup across these stores. The externally managed Ollama installation and its
+model cache are separate and are **not** included in a RAVEN-home backup.
+
+To restore, stop RAVEN, copy the complete saved home into the intended home
+path, ensure the server identity can read/write it, then start one server with
+`nraven serve --home <restored-home>`. If you used an explicit
+`--system-settings` path outside the home, restore that file separately. Verify
+`/api/v1/health/ready`, the user runtime status, knowledge/conversation lists,
+and operation discovery issues before opening traffic. The launch bearer token
+is per start and must be obtained again; do not reuse a token from a backup.
+Provider API keys must be restored through the host's environment/secret
+manager. Reconfigure the runtime model pair after restart.
+
+This is a backup/restore procedure for the **same storage schema**. Importing
+one user's directory into a different account, combining two homes, or
+migrating across incompatible schema versions is not an automatic public API.
+Keep a pre-upgrade backup and test new releases on a copy before replacing a
+production home. Malformed resources are reported by
+`GET /api/v1/runtime/discovery-issues`; do not edit SQLite or Qdrant files
+under a live process to repair them.
+
+Operation/event history becomes eligible for automatic removal after
+`operation_retention_seconds`; the cleanup service runs every
+`operation_cleanup_interval_seconds` and removes at most
+`operation_cleanup_batch_size` expired operations per pass. This is a
+retention policy, not a promise that rows disappear at the exact deadline.
+Private staged browser uploads have their own
+`upload_retry_retention_seconds` window; successful uploads are removed after
+ingestion, while failed sources expire and are cleaned up. After that, the
+original task may still appear in history but its upload can no longer be
+retried: the client must upload again. Never delete individual live database
+files as a substitute for configured cleanup.
+
+
 ## Security and deployment responsibilities
 
 RAVEN provides the security boundary needed between its API and a trusted
@@ -3291,6 +3586,37 @@ Ollama model can affect shared host resources, so a multi-user host should
 restrict model-administration routes and choose an explicit residency policy.
 
 
+## Server troubleshooting
+
+Start with the HTTP status and the response `error.code`, then use
+`X-Request-ID` to find the corresponding server log entry. For accepted
+background work, inspect the operation and task status and their event stream;
+the original `202` response is not proof of completion.
+
+| Symptom | Check | Action |
+| --- | --- | --- |
+| Server will not start | `--home` was omitted, settings JSON is invalid, port is occupied, or another process owns the home lock | Supply a writable explicit home. Validate/edit `system_settings.json` while stopped. Keep one RAVEN worker per home; do not remove a lock while its owner still runs. |
+| `/live` works but `/ready` gives `503` | Runtime registry not ready | Wait for startup or inspect startup logs. Do not begin ingestion or chat until ready. |
+| `401 authentication_required` | Missing/wrong per-launch bearer token, or required hosted user ID omitted | Obtain the **current** token from the trusted owner and add the required `X-Raven-User-ID`. A restart rotates the token. |
+| `400 invalid_user_id` | Hosted header is not a UUID | Fix the host's account-to-UUID mapping; do not accept a browser-supplied UUID as authorization. |
+| `403 host_not_allowed` or `origin_not_allowed` | Request host or browser Origin not in immutable allowlist | Add the intended exact host/origin to system settings and restart; do not open a wildcard merely to silence the error. |
+| `503 ollama_unavailable` | Ollama 0.34.2 is not running at configured `OLLAMA_HOST` | Start/check the separately managed Ollama service, its address, and firewall; then retry the provider check. |
+| Cloud model fails | Provider key reference absent or key unavailable to the RAVEN process | Ensure the referenced environment variable is present **before** server startup; do not put the secret value in `ModelSpec.options`. Check provider quotas/capabilities separately. |
+| `409` during ingestion | A file with the same identity/name is already present or active | Inspect `/files`; delete the existing file deliberately before re-ingesting, or wait for active ingestion to finish. |
+| Upload gives `413`, `422`, or trusted path is refused | File/request limit, invalid filename, unsupported format, disabled trusted path, or path outside allowed roots | Check source extension/name and byte limits; for browser files use multipart `file`, not server-local path. Change immutable path policy only after operator review and restart. |
+| Turn gives `409 conversation_turn_active` | Another session is already processing that conversation | Wait for its operation to finish/cancel, then submit a new turn. Separate conversations may run concurrently. |
+| Operation gives `429` | Per-user or global active-operation limit reached | Wait/cancel old work; only increase limits after capacity planning. |
+| SSE reconnect gives `400`, `410`, or `404` | Invalid `Last-Event-ID`, expired replay gap, or fully cleaned operation | Send a decimal cursor; on `410`, fetch operation/turn state and rebuild the UI, because missing deltas cannot be replayed. On `404`, the operation is gone. |
+| A server crash left an operation interrupted | No worker survives process termination | Inspect retry eligibility; explicitly retry eligible tasks. Do not assume a started-but-unfinished operation succeeded. |
+| `503 operation_database_in_use`, storage failure, or corrupt resource | Another process owns the local database, or storage is unhealthy | Stop conflicting processes, check filesystem permissions/free space, make an offline backup, and inspect discovery issues. Do not manually modify live SQLite/Qdrant files. |
+
+Readiness is not model readiness: `/ready` reports that the runtime registry
+can serve requests; `/api/v1/runtime` shows whether **this user's** models
+are configured. A hosted deployment should keep RAVEN behind its authenticating
+backend and not expose the shared launch token or internal user UUID mapping
+to a public browser.
+
+
 ## Advanced component API
 
 `Raven` is the recommended composition root, but the package exports its major
@@ -3312,6 +3638,38 @@ facade. When composing them manually, the application becomes responsible for
 their dependency order, lifecycle, shared operation context, and cleanup. Most
 applications should begin with `Raven` and move to individual components only
 when they need a boundary the facade intentionally does not expose.
+
+### Additional `Raven` facade methods
+
+The main workflows above introduce the commonly used methods. These public
+facade methods support custom orchestration, pagination, inspection, and
+administration without requiring direct component ownership:
+
+| Method and required inputs | Result and use |
+| --- | --- |
+| `raven.runtime_config` | Current immutable `RuntimeConfig` snapshot; read-only. Use `update_runtime_settings()` to persist a change. |
+| `await raven.create_operation(name)` | A new `Operation`; caller starts its tasks with `operation.run(name, worker)`. |
+| `await raven.submit_operation(name, worker)` | Creates an operation and starts a root task; returns the `Operation`. `worker` is an async function taking that operation. Inspect events/status or await its completion. |
+| `await raven.list_operation_tasks(operation_id, status=None, limit=None, after_task_id=None)` | A page of `OperationTaskRecord` values for one operation; use the final task ID as the next cursor. Unknown operation raises a not-found error. |
+| `await raven.list_knowledges_page(limit=10, after_name=None)` | List of knowledge summary dictionaries, ordered for cursor pagination; the caller chooses a positive page size. |
+| `await raven.update_knowledge(name, user_summary="...")` | `OperationTask`; await `.result()` before reading the revised summary. Missing knowledge fails. |
+| `await raven.list_file_sections_page(knowledge_name, file_name, limit=10, after_section_index=0)` | Section dictionaries after the given index; an unknown file raises `file_not_found`. |
+| `await raven.count_knowledge_vectors(knowledge_name)` | Integer number of vector points in that knowledge. |
+| `await raven.count_knowledge_files(knowledge_name)` | Integer number of stored files. |
+| `await raven.delete_knowledge(name)` | `OperationTask`; await `.result()` and observe events. Removes the knowledge's storage; back up first. |
+| `raven.get_conversation_details(conversation_id)` | Persistent metadata dictionary, including scope and title; missing ID raises `conversation_not_found`. |
+| `await raven.get_conversation_messages_page(conversation_id, limit=10, after_message_id=0)` | Canonical message records after the cursor, not compacted model context. |
+| `await raven.get_conversation_turn(conversation_id, turn_id)` | Durable turn dictionary; missing turn raises `conversation_turn_not_found`. |
+| `await raven.get_conversation_turn_messages(conversation_id, turn_id)` | LlamaIndex `ChatMessage` objects belonging to that turn. |
+| `await raven.get_conversation_turn_messages_page(conversation_id, turn_id, limit=10, after_message_id=0)` | Canonical per-turn message records with IDs suitable for paging a UI. |
+| `await raven.get_conversation_preferences(conversation_id)` | List of `{preference_id, text}` dictionaries for that conversation. |
+| `await raven.delete_conversation(conversation_id)` | `OperationTask`; await `.result()` and observe events. Deletes persisted transcript, memory, and preferences. |
+
+For a long-running method, the returned `OperationTask` is the handle:
+`await task.result()` retrieves completion or raises its error, while
+`task.operation_id` selects its replayable events. Read-only methods return
+their values directly. Pagination methods return a bounded list, not an HTTP
+`{items,next_cursor}` envelope; that envelope is added by FastAPI.
 
 
 ## Development and testing
