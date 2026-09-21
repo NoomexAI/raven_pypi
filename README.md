@@ -1417,8 +1417,8 @@ range. Each stored section receives an ID shaped as:
 ```
 
 For example, `a83fd91c20b4-3` identifies the third semantic section of that
-file. Section metadata includes a summary, keywords, conditions, definitions,
-raw content, source element IDs, and the source range used for navigation.
+file. A stored section has a summary, keywords, conditions, definitions,
+source element IDs, a source range for navigation, and separate raw content.
 
 The complete stored file record has this shape:
 
@@ -1433,7 +1433,8 @@ The complete stored file record has this shape:
 }
 ```
 
-A complete section record returned by navigation has this shape:
+A complete section record returned by the high-level API or FastAPI navigation
+has this shape (the agent's `list_sections` tool returns a smaller view):
 
 ```json
 {
@@ -2271,6 +2272,67 @@ Their argument contracts are:
 | `save_preference` | `text` | `text` | Persists an explicit enduring preference; applies to the next run. |
 | `remove_preference` | `preference_id` | `preference_id` | Removes the exact saved preference; applies to the next run. |
 
+These are **agent tool calls**, not FastAPI routes or the high-level Raven
+navigation methods. The latter still return complete stored section records.
+
+For example, a global conversation can inspect a section metadata page after
+section index 2 without sending raw section content to the model:
+
+```json
+{"knowledge_name": "engineering", "file_name": "system-design.pdf", "after_section_index": 2, "limit": 1}
+```
+
+The `list_sections` tool returns a `ToolResult` like:
+
+```json
+{
+  "ok": true,
+  "result": [
+    {
+      "section_id": "a83fd91c20b4-3",
+      "section_index": 3,
+      "summary": "Thermal protection requirements",
+      "keywords": ["thermal", "shutdown"],
+      "conditions": ["temperature exceeds the configured limit"],
+      "definitions": [],
+      "source_range": [2, 3]
+    }
+  ],
+  "ui_summary": {
+    "kind": "navigation",
+    "operation": "list_sections",
+    "knowledge_name": "engineering",
+    "file_name": "system-design.pdf",
+    "section_ids": ["a83fd91c20b4-3"],
+    "has_more": true,
+    "next_after_section_index": 3
+  },
+  "evidence": []
+}
+```
+
+When `has_more` is true, the next call can pass
+`"after_section_index": 3`; the cursor is exclusive. For a local
+conversation, omit `knowledge_name` because the tool is bound to that
+conversation's knowledge. `get_content=true` adds `raw_content` to each
+listed section and makes those returned sections evidence; it is intended for
+explicit sequential inspection, not general question answering.
+
+To read selected sections instead, pass IDs from the metadata page to
+`get_sections` (up to five IDs from one knowledge per call):
+
+```json
+{"knowledge_name": "engineering", "section_ids": ["a83fd91c20b4-3", "a83fd91c20b4-4"]}
+```
+
+Its `result` is a list in the requested order. Each item includes its own
+`section_id`, `file_name`, `knowledge_name`, metadata, and complete
+`raw_content`. Its `evidence` and `ui_summary.sections` contain only the
+knowledge/file/section references, not raw content. For a local conversation,
+omit `knowledge_name`. Invalid page sizes or more than five section IDs return
+`ok=false`; a missing ID also fails the whole `get_sections` call rather than
+returning a partial list.
+
 Navigation is not retrieval. Listing knowledges/files/sections answers
 structural questions, while `get_sections` directly inspects known sections.
 Retrieval searches by relevance to an open-ended query.
@@ -2311,8 +2373,7 @@ UI metadata:
       "file_name": "system-design.pdf",
       "section_id": "a83fd91c20b4-3"
     }
-  ],
-  "next_action": null
+  ]
 }
 ```
 
