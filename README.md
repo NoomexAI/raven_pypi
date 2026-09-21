@@ -2252,7 +2252,7 @@ The non-retrieval tools are:
 - `list_knowledges`
 - `list_files`
 - `list_sections`
-- `get_section`
+- `get_sections`
 - `search_memory`
 - `list_preferences`
 - `save_preference`
@@ -2264,15 +2264,15 @@ Their argument contracts are:
 | --- | --- | --- | --- |
 | `list_knowledges` | No arguments; returns only the bound knowledge | No arguments; returns all knowledge metadata | Structural discovery only. |
 | `list_files` | No arguments | `knowledge_name` | Returns stored file records in the selected knowledge. |
-| `list_sections` | `file_name` | `knowledge_name`, `file_name` | Returns section metadata and IDs without requiring semantic retrieval. |
-| `get_section` | `section_id` | `knowledge_name`, `section_id` | Returns metadata plus complete `raw_content`; successful lookup creates evidence. |
+| `list_sections` | `file_name`; optional `get_content`, `after_section_index`, `limit` | `knowledge_name`, `file_name`; same options | Returns section IDs and metadata, without `raw_content` by default. Paged: 20 by default, maximum 50. With `get_content=true`, 3 by default, maximum 5. Use `ui_summary.next_after_section_index` when `ui_summary.has_more` is true. |
+| `get_sections` | `section_ids` (1–5 IDs) | `knowledge_name`, `section_ids` | Returns a list of sections in requested order, each with metadata and `raw_content`; successful lookups create evidence. |
 | `search_memory` | `query` | `query` | Returns semantically relevant messages from this conversation only. |
 | `list_preferences` | No arguments | No arguments | Returns this conversation's preference IDs and text. |
 | `save_preference` | `text` | `text` | Persists an explicit enduring preference; applies to the next run. |
 | `remove_preference` | `preference_id` | `preference_id` | Removes the exact saved preference; applies to the next run. |
 
 Navigation is not retrieval. Listing knowledges/files/sections answers
-structural questions, while `get_section` directly inspects a known section.
+structural questions, while `get_sections` directly inspects known sections.
 Retrieval searches by relevance to an open-ended query.
 
 An invalid retrieval mode or a global-only mode requested for a local

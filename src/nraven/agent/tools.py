@@ -90,6 +90,12 @@ RECOVERABLE_ERRORS = frozenset(
     }
 )
 
+SECTION_PAGE_SIZE = 20
+CONTENT_SECTION_PAGE_SIZE = 3
+MAX_SECTION_PAGE_SIZE = 50
+MAX_CONTENT_SECTION_PAGE_SIZE = 5
+MAX_SECTION_FETCH = 5
+
 
 @dataclass(frozen=True, slots=True)
 class ToolResult:
@@ -299,7 +305,7 @@ class ToolBuilder:
             self._list_knowledges_tool(conversation, operation),
             self._list_files_tool(conversation, operation),
             self._list_sections_tool(conversation, operation),
-            self._get_section_tool(conversation, operation),
+            self._get_sections_tool(conversation, operation),
         ]
 
 
@@ -424,47 +430,61 @@ class ToolBuilder:
             async def list_sections_global(
                 knowledge_name: str,
                 file_name: str,
-                get_content_metadata: bool = False,
+                get_content: bool = False,
+                after_section_index: int = 0,
+                limit: int | None = None,
             ) -> str:
                 return await self._list_sections(
                     knowledge_name,
                     file_name,
                     operation,
-                    get_content_metadata=get_content_metadata,
+                    get_content=get_content,
+                    after_section_index=after_section_index,
+                    limit=limit,
                 )
 
             return FunctionTool.from_defaults(
                 async_fn=list_sections_global,
                 name="list_sections",
                 description=(
-                    "List section IDs in a named file within a named knowledge. "
-                    "By default, returns only IDs. Set get_content_metadata=true "
-                    "only when the user explicitly requests all section content "
-                    "and metadata. Never use this instead of retrieval for a "
-                    "general knowledge question."
+                    "List section IDs and selection metadata (summary, keywords, "
+                    "conditions, definitions) in a named file and knowledge. "
+                    "Returns a page of 20 by default; pass after_section_index "
+                    "from the prior result's ui_summary to continue. Optional "
+                    "limit is at most 50, or 5 with get_content=true. "
+                    "Set get_content=true only to inspect a few sections' raw "
+                    "content explicitly. Prefer get_sections for chosen IDs. "
+                    "Never use this instead of retrieval for a general question."
                 ),
             )
 
         async def list_sections_local(
             file_name: str,
-            get_content_metadata: bool = False,
+            get_content: bool = False,
+            after_section_index: int = 0,
+            limit: int | None = None,
         ) -> str:
             return await self._list_sections(
                 conversation.knowledge_name or "",
                 file_name,
                 operation,
-                get_content_metadata=get_content_metadata,
+                get_content=get_content,
+                after_section_index=after_section_index,
+                limit=limit,
             )
 
         return FunctionTool.from_defaults(
             async_fn=list_sections_local,
             name="list_sections",
             description=(
-                "List section IDs in a file within the bound knowledge. By "
-                "default, returns only IDs. Set get_content_metadata=true only "
-                "when the user explicitly requests all section content and "
-                "metadata. Never use this instead of retrieval for a general "
-                "knowledge question."
+                "List section IDs and selection metadata (summary, keywords, "
+                "conditions, definitions) in a file in the bound knowledge. "
+                "Returns a page of 20 by default; pass after_section_index "
+                "from the prior result's ui_summary to continue. Optional "
+                "limit is at most 50, or 5 with get_content=true. "
+                "Set get_content=true only to inspect a few sections' raw "
+                "content explicitly. Prefer get_sections for chosen IDs. "
+                "Never use this instead of retrieval for a general question."
             ),
         )
 
@@ -475,28 +495,67 @@ class ToolBuilder:
         file_name: str,
         operation: Operation,
         *,
-        get_content_metadata: bool = False,
+        get_content: bool = False,
+        after_section_index: int = 0,
+        limit: int | None = None,
     ) -> str:
         try:
             operation.raise_if_cancelled()
+            if type(get_content) is not bool:
+                raise RavenError(ErrorCode.INVALID_METADATA, "get_content must be a boolean.")
+            if type(after_section_index) is not int or after_section_index < 0:
+                raise RavenError(ErrorCode.INVALID_METADATA, "after_section_index must be a non-negative integer.")
+            maximum = MAX_CONTENT_SECTION_PAGE_SIZE if get_content else MAX_SECTION_PAGE_SIZE
+            page_size = limit if limit is not None else (
+                CONTENT_SECTION_PAGE_SIZE if get_content else SECTION_PAGE_SIZE
+            )
+            if type(page_size) is not int or not 1 <= page_size <= maximum:
+                raise RavenError(
+                    ErrorCode.INVALID_METADATA,
+                    f"limit must be an integer between 1 and {maximum} for this view.",
+                )
             knowledge = self._knowledge(knowledge_name)
-            sections = await asyncio.to_thread(knowledge.list_sections, file_name)
-            file_exists = await asyncio.to_thread(knowledge.file_exists, file_name)
-            if not sections and not file_exists:
+            page = await asyncio.to_thread(
+                knowledge.list_sections_page,
+                file_name,
+                page_size + 1,
+                after_section_index,
+            )
+            if not page and not await asyncio.to_thread(knowledge.file_exists, file_name):
                 raise RavenError(
                     ErrorCode.FILE_NOT_FOUND,
                     f"File '{file_name}' does not exist in knowledge '{knowledge_name}'.",
                 )
+            has_more = len(page) > page_size
+            sections = page[:page_size]
             section_ids = [section["section_id"] for section in sections]
+            result = [
+                {
+                    key: section.get(key)
+                    for key in (
+                        "section_id", "section_index", "summary", "keywords",
+                        "conditions", "definitions", "source_range",
+                    )
+                }
+                | ({"raw_content": section.get("raw_content", "")} if get_content else {})
+                for section in sections
+            ]
+            next_index = sections[-1]["section_index"] if has_more else None
+            evidence = section_references(
+                [{"knowledge_name": knowledge_name, **section} for section in sections]
+            ) if get_content else []
             return ToolResult(
                 ok=True,
-                result=sections if get_content_metadata else section_ids,
+                result=result,
+                evidence=evidence,
                 ui_summary={
                     "kind": "navigation",
                     "operation": "list_sections",
                     "knowledge_name": knowledge_name,
                     "file_name": file_name,
                     "section_ids": section_ids,
+                    "has_more": has_more,
+                    "next_after_section_index": next_index,
                 },
             ).to_model_text()
         except asyncio.CancelledError:
@@ -509,61 +568,74 @@ class ToolBuilder:
             )
 
 
-    def _get_section_tool(
+    def _get_sections_tool(
         self,
         conversation: Conversation,
         operation: Operation,
     ) -> FunctionTool:
         if conversation.type == "global":
-            async def get_section_global(knowledge_name: str, section_id: str) -> str:
-                return await self._get_section(knowledge_name, section_id, operation)
+            async def get_sections_global(knowledge_name: str, section_ids: list[str]) -> str:
+                return await self._get_sections(knowledge_name, section_ids, operation)
 
             return FunctionTool.from_defaults(
-                async_fn=get_section_global,
-                name="get_section",
+                async_fn=get_sections_global,
+                name="get_sections",
                 description=(
-                    "Get metadata and raw content for a section in an explicitly "
-                    "named knowledge. Use only when the user explicitly asks "
-                    "to inspect a particular section. Do not use it in place "
-                    "of retrieval for general knowledge questions."
+                    "Get metadata and raw content for 1 to 5 selected section_ids "
+                    "in an explicitly named knowledge. Use after list_sections "
+                    "when the user explicitly asks to inspect sections. Returns "
+                    "a list in requested order. Do not replace retrieval for "
+                    "general knowledge questions."
                 ),
             )
 
-        async def get_section_local(section_id: str) -> str:
-            return await self._get_section(
+        async def get_sections_local(section_ids: list[str]) -> str:
+            return await self._get_sections(
                 conversation.knowledge_name or "",
-                section_id,
+                section_ids,
                 operation,
             )
 
         return FunctionTool.from_defaults(
-            async_fn=get_section_local,
-            name="get_section",
+            async_fn=get_sections_local,
+            name="get_sections",
             description=(
-                "Get metadata and raw content for a section in the bound knowledge. "
-                "Use only when the user explicitly asks to inspect a particular "
-                "section. Do not use it in place of retrieval for general "
-                "knowledge questions."
+                "Get metadata and raw content for 1 to 5 selected section_ids "
+                "in the bound knowledge. Use after list_sections when the user "
+                "explicitly asks to inspect sections. Returns a list in requested "
+                "order. Do not replace retrieval for general knowledge questions."
             ),
         )
 
 
-    async def _get_section(
+    async def _get_sections(
         self,
         knowledge_name: str,
-        section_id: str,
+        section_ids: list[str],
         operation: Operation,
     ) -> str:
         try:
             operation.raise_if_cancelled()
-            knowledge = self._knowledge(knowledge_name)
-            section = await asyncio.to_thread(knowledge.get_section, section_id)
-            if section is None:
+            if (
+                not isinstance(section_ids, list)
+                or not 1 <= len(section_ids) <= MAX_SECTION_FETCH
+                or any(not isinstance(section_id, str) or not section_id.strip() for section_id in section_ids)
+            ):
                 raise RavenError(
-                    ErrorCode.SECTION_NOT_FOUND,
-                    f"Section '{section_id}' does not exist in knowledge '{knowledge_name}'.",
+                    ErrorCode.INVALID_METADATA,
+                    f"section_ids must contain 1 to {MAX_SECTION_FETCH} non-empty strings.",
                 )
-            result = {"knowledge_name": knowledge_name, **section}
+            knowledge = self._knowledge(knowledge_name)
+            result: list[dict[str, Any]] = []
+            for section_id in section_ids:
+                operation.raise_if_cancelled()
+                section = await asyncio.to_thread(knowledge.get_section, section_id)
+                if section is None:
+                    raise RavenError(
+                        ErrorCode.SECTION_NOT_FOUND,
+                        f"Section '{section_id}' does not exist in knowledge '{knowledge_name}'.",
+                    )
+                result.append({"knowledge_name": knowledge_name, **section})
             evidence = section_references(result)
             return ToolResult(
                 ok=True,
@@ -578,9 +650,9 @@ class ToolBuilder:
             raise
         except Exception as exc:
             return self._recoverable_result(
-                "get_section",
+                "get_sections",
                 exc,
-                "Check the knowledge_name and section_id, then retry.",
+                "Check the knowledge_name and section_ids from list_sections, then retry.",
             )
 
 

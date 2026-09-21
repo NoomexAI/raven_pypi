@@ -100,7 +100,11 @@ class WorkflowEventTranslator:
         self._next_step += 1
         self.tool_call_count += 1
         self._call_steps[call_id] = self._next_step
-        if name in RETRIEVAL_TOOL_NAMES.values() or name == "get_section":
+        if (
+            name in RETRIEVAL_TOOL_NAMES.values()
+            or name == "get_sections"
+            or (name == "list_sections" and arguments.get("get_content") is True)
+        ):
             self.knowledge_tool_used = True
         return Event(
             type=EventType.CHAT_TOOL_CALL,
