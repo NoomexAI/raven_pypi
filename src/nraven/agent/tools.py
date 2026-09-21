@@ -421,33 +421,50 @@ class ToolBuilder:
         operation: Operation,
     ) -> FunctionTool:
         if conversation.type == "global":
-            async def list_sections_global(knowledge_name: str, file_name: str) -> str:
-                return await self._list_sections(knowledge_name, file_name, operation)
+            async def list_sections_global(
+                knowledge_name: str,
+                file_name: str,
+                get_content_metadata: bool = False,
+            ) -> str:
+                return await self._list_sections(
+                    knowledge_name,
+                    file_name,
+                    operation,
+                    get_content_metadata=get_content_metadata,
+                )
 
             return FunctionTool.from_defaults(
                 async_fn=list_sections_global,
                 name="list_sections",
                 description=(
-                    "List section metadata in a named file within a named knowledge. "
-                    "Use this when you need section IDs, boundaries, or metadata "
-                    "before inspecting a specific section."
+                    "List section IDs in a named file within a named knowledge. "
+                    "By default, returns only IDs. Set get_content_metadata=true "
+                    "only when the user explicitly requests all section content "
+                    "and metadata. Never use this instead of retrieval for a "
+                    "general knowledge question."
                 ),
             )
 
-        async def list_sections_local(file_name: str) -> str:
+        async def list_sections_local(
+            file_name: str,
+            get_content_metadata: bool = False,
+        ) -> str:
             return await self._list_sections(
                 conversation.knowledge_name or "",
                 file_name,
                 operation,
+                get_content_metadata=get_content_metadata,
             )
 
         return FunctionTool.from_defaults(
             async_fn=list_sections_local,
             name="list_sections",
             description=(
-                "List section metadata in a file within the bound knowledge. Use "
-                "this when you need section IDs, boundaries, or metadata before "
-                "inspecting a specific section."
+                "List section IDs in a file within the bound knowledge. By "
+                "default, returns only IDs. Set get_content_metadata=true only "
+                "when the user explicitly requests all section content and "
+                "metadata. Never use this instead of retrieval for a general "
+                "knowledge question."
             ),
         )
 
@@ -457,6 +474,8 @@ class ToolBuilder:
         knowledge_name: str,
         file_name: str,
         operation: Operation,
+        *,
+        get_content_metadata: bool = False,
     ) -> str:
         try:
             operation.raise_if_cancelled()
@@ -468,16 +487,16 @@ class ToolBuilder:
                     ErrorCode.FILE_NOT_FOUND,
                     f"File '{file_name}' does not exist in knowledge '{knowledge_name}'.",
                 )
-            metadata = [section_metadata(section) for section in sections]
+            section_ids = [section["section_id"] for section in sections]
             return ToolResult(
                 ok=True,
-                result=metadata,
+                result=sections if get_content_metadata else section_ids,
                 ui_summary={
                     "kind": "navigation",
                     "operation": "list_sections",
                     "knowledge_name": knowledge_name,
                     "file_name": file_name,
-                    "section_ids": [item.get("section_id") for item in metadata],
+                    "section_ids": section_ids,
                 },
             ).to_model_text()
         except asyncio.CancelledError:
@@ -504,9 +523,9 @@ class ToolBuilder:
                 name="get_section",
                 description=(
                     "Get metadata and raw content for a section in an explicitly "
-                    "named knowledge. Use this when the user identifies a specific "
-                    "section or when list_sections has provided a section_id that "
-                    "needs direct inspection."
+                    "named knowledge. Use only when the user explicitly asks "
+                    "to inspect a particular section. Do not use it in place "
+                    "of retrieval for general knowledge questions."
                 ),
             )
 
@@ -522,9 +541,9 @@ class ToolBuilder:
             name="get_section",
             description=(
                 "Get metadata and raw content for a section in the bound knowledge. "
-                "Use this when the user identifies a specific section or when "
-                "list_sections has provided a section_id that needs direct "
-                "inspection."
+                "Use only when the user explicitly asks to inspect a particular "
+                "section. Do not use it in place of retrieval for general "
+                "knowledge questions."
             ),
         )
 
@@ -781,15 +800,6 @@ def section_references(value: Any) -> list[dict[str, str]]:
 
     visit(value)
     return list(references.values())
-
-
-def section_metadata(section: dict[str, Any]) -> dict[str, Any]:
-    """Return navigation metadata without the full section body."""
-    return {
-        key: value
-        for key, value in section.items()
-        if key not in {"raw_content", "chunks"}
-    }
 
 
 def message_record(message: Any) -> dict[str, str]:

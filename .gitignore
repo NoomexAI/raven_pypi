@@ -94,6 +94,7 @@ Desktop.ini
 
 # Tests, fixtures, and temp runtime data
 /tests/
+/test_results/
 /test_docs/
 /_tmp_root/
 /plans/
