@@ -25,54 +25,58 @@ from .policy import (
 
 RETRIEVAL_DESCRIPTIONS = {
     RetrievalMode.LOCAL_EMBEDDED: (
-        "Retrieve relevant sections from one knowledge using vector similarity. "
-        "Use this for focused scientific, factual, or numeric questions where "
-        "narrow semantic matching and precision are most important."
+        "Retrieve sections from one knowledge using embedding similarity. Use "
+        "this when the user needs a specific fact, exact detail, definition, "
+        "number, requirement, or other narrowly focused information. Prefer "
+        "vector-conditioned retrieval for questions that need broader context."
     ),
     RetrievalMode.LOCAL_HIERARCHICAL: (
-        "Retrieve relevant sections from one knowledge using hierarchical "
-        "metadata and reasoning-based scoring. Use this when understanding "
-        "broader document context, narrative structure, or relationships is more "
-        "important than finding one narrowly matching fact. This is costly; "
-        "prefer vector-conditioned retrieval when it can provide similar context "
-        "more efficiently."
+        "Retrieve sections from one knowledge by reasoning over section metadata "
+        "and document structure. Use this for narrative context, chronology, "
+        "themes, relationships, or questions whose answer depends on the wider "
+        "document. This is compute-intensive and is not the normal choice unless "
+        "capable hardware is available; prefer vector-conditioned retrieval when "
+        "it can answer the question."
     ),
     RetrievalMode.LOCAL_AGREEMENT: (
-        "Retrieve sections from one knowledge using agreement between embedded "
-        "and hierarchical retrieval. Use this only as a last resort when a "
-        "high-confidence cross-check is necessary. It is the most expensive "
-        "retrieval strategy."
+        "Retrieve from one knowledge through both embedded and hierarchical "
+        "paths, then preserve their separate results for agreement checking. Use "
+        "this only when retrieval accuracy is critical and independent pathways "
+        "should corroborate the evidence. It is the most expensive strategy and "
+        "is not recommended for ordinary questions."
     ),
     RetrievalMode.LOCAL_VECTOR_CONDITIONED: (
-        "Use vector retrieval to select candidate files in one knowledge, then "
-        "score their sections hierarchically. Use this when broader context or "
-        "document reasoning is needed but full hierarchical retrieval would be "
-        "too costly."
+        "Retrieve from one knowledge by using vectors to narrow the search before "
+        "hierarchical scoring. This is the default choice when no other strategy "
+        "is clearly required because it provides the best balance of factual "
+        "relevance, contextual reasoning, speed, and compute cost."
     ),
     RetrievalMode.GLOBAL_EMBEDDED: (
-        "Retrieve relevant sections across all knowledges using vector similarity. "
-        "Use this for focused scientific, factual, or numeric questions where "
-        "narrow semantic matching and precision are most important."
+        "Retrieve sections across all knowledges using embedding similarity. Use "
+        "this when the user needs a specific fact, exact detail, definition, "
+        "number, requirement, or other narrowly focused information. Prefer "
+        "global vector-conditioned retrieval for questions that need broader context."
     ),
     RetrievalMode.GLOBAL_HIERARCHICAL: (
-        "Retrieve relevant sections across knowledges using hierarchical metadata "
-        "and reasoning-based scoring. Use this when understanding broader document "
-        "context, narrative structure, or relationships is more important than "
-        "finding one narrowly matching fact. This is costly; prefer global "
-        "vector-conditioned retrieval when it can provide similar context more "
-        "efficiently."
+        "Retrieve sections across knowledges by reasoning over knowledge, file, "
+        "and section metadata. Use this for narrative context, chronology, themes, "
+        "relationships, or questions whose answer depends on wider document context. "
+        "This is compute-intensive and is not the normal choice unless capable "
+        "hardware is available; prefer global vector-conditioned retrieval when "
+        "it can answer the question."
     ),
     RetrievalMode.GLOBAL_AGREEMENT: (
-        "Retrieve sections across knowledges using agreement between embedded and "
-        "hierarchical retrieval. Use this only as a last resort when a high-"
-        "confidence cross-check is necessary. It is the most expensive retrieval "
-        "strategy."
+        "Retrieve across knowledges through both embedded and hierarchical paths, "
+        "then preserve their separate results for agreement checking. Use this "
+        "only when retrieval accuracy is critical and independent pathways should "
+        "corroborate the evidence. It is the most expensive strategy and is not "
+        "recommended for ordinary questions."
     ),
     RetrievalMode.GLOBAL_VECTOR_CONDITIONED: (
-        "Use vector retrieval to select candidate knowledges, then score their "
-        "sections hierarchically. Use this when broader context or document "
-        "reasoning is needed but full global hierarchical retrieval would be too "
-        "costly."
+        "Retrieve across knowledges by using vectors to narrow the search before "
+        "hierarchical scoring. This is the default choice when no other strategy "
+        "is clearly required because it provides the best balance of factual "
+        "relevance, contextual reasoning, speed, and compute cost."
     ),
 }
 

@@ -2226,18 +2226,32 @@ tool. Automatic mode changes which concrete tools are exposed and lets the
 agent choose among them. A restricted mode physically omits the other
 retrieval tools from the `FunctionAgent` configuration.
 
+> **Small-model behavior:** Automatic tool selection depends on the selected
+> model's instruction-following and function-calling ability. Small models may
+> occasionally answer from their general knowledge, claim that they cannot
+> access the knowledge base, or refuse a safety-sensitive question—especially
+> a critical medical question—without calling a retrieval tool. When grounding
+> matters, tell the model explicitly to use retrieval and answer only from the
+> retrieved evidence. In a global conversation, also name the intended
+> knowledge when it is known. For example: `Use the retrieval tools with the
+> clinical knowledge and answer only from retrieved evidence.` Selecting a
+> concrete `retrieval_mode` limits which retrieval tool is available, but it
+> cannot force a model that declines to call tools. Retrieved medical material
+> is still reference information and is not a substitute for qualified medical
+> judgment.
+
 The exact retrieval tool names and arguments are:
 
 | Tool | Local-conversation arguments | Global-conversation arguments | Use |
 | --- | --- | --- | --- |
-| `local_embedded_retrieval` | `query` | `knowledge_name`, `query` | Focused semantic facts in one knowledge. |
-| `local_hierarchical_retrieval` | `query` | `knowledge_name`, `query` | LLM metadata reasoning inside one knowledge. |
-| `local_vector_conditioned_retrieval` | `query` | `knowledge_name`, `query` | Vector-narrowed contextual reasoning inside one knowledge. |
-| `local_agreement_retrieval` | `query` | `knowledge_name`, `query` | Expensive embedded/hierarchical cross-check in one knowledge. |
-| `global_embedded_retrieval` | Not exposed | `query` | Focused semantic facts across the user's knowledges. |
-| `global_hierarchical_retrieval` | Not exposed | `query` | Global LLM metadata reasoning. |
-| `global_vector_conditioned_retrieval` | Not exposed | `query` | Vector-narrowed reasoning across knowledges. |
-| `global_agreement_retrieval` | Not exposed | `query` | Most expensive global cross-check. |
+| `local_embedded_retrieval` | `query` | `knowledge_name`, `query` | Specific facts, exact details, definitions, numbers, or requirements in one knowledge. |
+| `local_hierarchical_retrieval` | `query` | `knowledge_name`, `query` | Narrative context, chronology, themes, and relationships in one knowledge. Compute-intensive; use when capable hardware is available and vector-conditioned retrieval is insufficient. |
+| `local_vector_conditioned_retrieval` | `query` | `knowledge_name`, `query` | **Default local choice:** best general balance of factual relevance, context, speed, and compute cost. |
+| `local_agreement_retrieval` | `query` | `knowledge_name`, `query` | Critical retrieval where embedded and hierarchical pathways should corroborate evidence. Most expensive; avoid for ordinary questions. |
+| `global_embedded_retrieval` | Not exposed | `query` | Specific facts, exact details, definitions, numbers, or requirements across knowledges. |
+| `global_hierarchical_retrieval` | Not exposed | `query` | Narrative context, chronology, themes, and relationships across knowledges. Compute-intensive; use when capable hardware is available and vector-conditioned retrieval is insufficient. |
+| `global_vector_conditioned_retrieval` | Not exposed | `query` | **Default global choice:** best general balance of factual relevance, context, speed, and compute cost. |
+| `global_agreement_retrieval` | Not exposed | `query` | Critical retrieval where embedded and hierarchical pathways should corroborate evidence. Most expensive; avoid for ordinary questions. |
 
 In a local conversation, the bound `knowledge_name` is injected by the tool
 wrapper and the model cannot replace it. In a global conversation, local tools
