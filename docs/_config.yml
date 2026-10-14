@@ -1,0 +1,55 @@
+title: RAVEN
+description: >-
+  An asynchronous RAG and agent backend with persistent knowledge,
+  conversations, replayable events, and transparent source reconstruction.
+lang: en
+url: "https://noomexai.github.io"
+baseurl: "/raven_pypi"
+repository: "NoomexAI/raven_pypi"
+repository_url: "https://github.com/NoomexAI/raven_pypi"
+package_url: "https://pypi.org/project/noomexai-raven/"
+
+# Jekyll processes HTML layouts and renders Markdown documentation.
+theme: null
+markdown: kramdown
+highlighter: rouge
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
+  syntax_highlighter_opts:
+    block:
+      line_numbers: false
+
+plugins:
+  - jekyll-relative-links
+  - jekyll-optional-front-matter
+
+optional_front_matter:
+  remove_originals: true
+
+defaults:
+  - scope:
+      path: ""
+      type: pages
+    values:
+      layout: default
+      lang: en
+
+navigation:
+  - title: Home
+    url: "/"
+  - title: In action
+    url: "/demo/"
+  - title: Architecture
+    url: "/architecture/"
+  - title: Integration guides
+    url: "/guides/"
+  - title: Development notes
+    url: "/development/"
+
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - vendor
+  - node_modules
+  - .gitkeep

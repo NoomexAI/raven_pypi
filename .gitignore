@@ -18,6 +18,19 @@ build/
 *.egg
 src/*.egg-info/
 
+# Local-only Ruby/Jekyll preview dependencies and build state
+/docs/Gemfile
+/docs/Gemfile.lock
+/docs/.ruby-version
+/docs/.ruby-gemset
+*.gem
+/docs/_site/
+/docs/.jekyll-cache/
+/docs/.jekyll-metadata
+/docs/.sass-cache/
+/docs/.bundle/
+/docs/vendor/
+
 # Distribution / packaging
 *.tar.gz
 *.whl

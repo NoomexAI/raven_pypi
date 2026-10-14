@@ -1,0 +1,121 @@
+---
+title: RAVEN
+layout: landing
+stylesheets:
+  - /assets/css/landing.css
+scripts:
+  - /assets/js/landing.js
+description: >-
+  Build document assistants with inspectable sources, agent-directed retrieval,
+  and conversations that continue beyond a single answer.
+---
+
+<section class="rv-hero">
+<h1>Build document assistants with answers you can inspect.</h1>
+<p class="rv-sub">RAVEN is an open-source RAG framework for developers building assistants around their own documents. Agent-directed retrieval, source reconstruction, and persistent conversations, in a backend you can use from Python or connect to your own interface.</p>
+<div class="rv-install"><code>pip install noomexai-raven</code><button type="button" class="rv-copy" data-rv-copy="pip install noomexai-raven" aria-label="Copy install command">Copy</button></div>
+<div class="rv-actions"><a class="rv-btn rv-btn-primary" href="https://github.com/NoomexAI/raven_pypi/blob/main/README.md">Get started</a><a class="rv-btn" href="https://github.com/NoomexAI/raven_pypi">View on GitHub</a><a class="rv-btn" href="https://pypi.org/project/noomexai-raven/0.2.0/">RAVEN v0.2.0 on PyPI &rarr;</a></div>
+</section>
+
+<ul class="rv-facts"><li>MIT licensed</li><li>Python 3.11+</li><li>Ollama or LiteLLM models</li><li>SQLite + local Qdrant</li><li>Optional FastAPI server</li></ul>
+
+<section class="rv-sec rv-center">
+<h2>From a question to something you can check</h2>
+<p class="rv-sub">An answer alone leaves the reader with another question: <em>where did that come from?</em> With RAVEN, your application can show the search the model performed and the document sections supplied to it, highlighted within their surrounding content.</p>
+<div class="rv-grid">
+<div class="rv-card"><span class="rv-label">A reader asks</span><p class="rv-q">&ldquo;How do the reaction-wheel anomaly, battery condition, and safe-hold response fit together?&rdquo;</p></div>
+<div class="rv-card"><span class="rv-label">The model investigates</span><p>It chooses and sequences retrieval tools, and your interface can show each step as it happens.</p></div>
+<div class="rv-card"><span class="rv-label">The sources appear</span><p>The sections supplied to the model, highlighted inside a readable reconstruction of the file.</p></div>
+<div class="rv-card"><span class="rv-label">The reader follows up</span><p>They check the passage and the conditions around it, then ask the next question in the same conversation.</p></div>
+</div>
+<p class="rv-note">An illustrative workflow, not a recorded model response or a built-in chat interface. RAVEN supplies the backend; you decide how to present it.</p>
+</section>
+
+<section class="rv-row">
+<div class="rv-text">
+<h2>Let the model investigate</h2>
+<p>A precise specification, a narrative explanation, and a question spanning several documents call for different searches. RAVEN gives the agent retrieval tools it can choose and use in sequence, instead of forcing every question through one fixed search step.</p>
+<p>Let it choose among the strategies or restrict a turn to one. Focus a conversation on a single knowledge collection, or explore across several.</p>
+<p class="rv-note">You control the available tools and scope; the model decides how to work within them.</p>
+</div>
+<div>
+<div class="rv-pairs">
+<div class="rv-card"><h3>Embedded</h3><p>Specific facts, numbers, and requirements.</p></div>
+<div class="rv-card"><h3>Vector-conditioned</h3><p>A balance of precision and context.</p></div>
+<div class="rv-card"><h3>Hierarchical</h3><p>Narrative structure and relationships.</p></div>
+<div class="rv-card"><h3>Agreement</h3><p>Cross-checking critical questions.</p></div>
+</div>
+<div class="rv-scope"><span>Local: one collection</span><span>Global: across your collections</span></div>
+</div>
+</section>
+
+<section class="rv-row rv-flip">
+<div class="rv-text">
+<h2>Let the reader check the source</h2>
+<p>A source reference tells someone where to look. RAVEN&rsquo;s <strong>source reconstruction</strong> helps them see what to look at: the sections supplied to the model, highlighted inside a readable reconstruction of the file.</p>
+<p>Your application can put the answer and its supporting material side by side, without asking the reader to hunt through an entire document. For documents with preserved page ranges, your interface can link back to the original pages.</p>
+<p class="rv-note">The highlights show what the model received, not a guarantee that every claim in its answer is correct. They make checking possible rather than replacing it.</p>
+</div>
+<div class="rv-doc" role="img" aria-label="Schematic of a reconstructed file with one highlighted section">
+<div class="rv-doc-head"><span>Reconstructed file</span><span>Schematic</span></div>
+<div class="rv-sect"><span class="rv-tag">Surrounding context</span><i></i><i></i></div>
+<div class="rv-sect rv-hit"><span class="rv-tag">Supplied to the model</span><i></i><i></i><i></i><small>Page range preserved for linking back</small></div>
+<div class="rv-sect"><span class="rv-tag">Surrounding context</span><i></i><i></i></div>
+</div>
+</section>
+
+<section class="rv-row">
+<div class="rv-text">
+<h2>Keep the conversation going</h2>
+<p>Working with documents rarely ends at the first answer. People clarify a detail, connect it to another file, or return later with a new question.</p>
+<p>RAVEN keeps conversation history, including tool interactions, and gives the agent memory tools for recalling earlier discussions. Your interface can stream the response, show tool activity, and display sources as they become available.</p>
+</div>
+<ul class="rv-list">
+<li><b>History that includes tool use</b>Messages, tool calls, and results are persisted with each turn.</li>
+<li><b>Memory the agent can search</b>Earlier discussion stays recallable as conversations grow.</li>
+<li><b>Context compaction</b>Longer conversations fit the model&rsquo;s context without losing the full transcript.</li>
+<li><b>Saved preferences</b>Each conversation can be tuned to the person using it.</li>
+</ul>
+</section>
+
+<section class="rv-sec rv-center">
+<h2>From documents to a checkable answer</h2>
+<p class="rv-sub">Four steps, all through one Python API.</p>
+<ol class="rv-steps">
+<li><h3>Install</h3><p>Install the package from PyPI, plus a running Ollama server if you want local models.</p></li>
+<li><h3>Configure</h3><p>Pick one LLM and one embedding model: local through Ollama, cloud through LiteLLM, or a mix.</p></li>
+<li><h3>Ingest</h3><p>Add <code>.txt</code>, <code>.md</code>, <code>.pdf</code>, or <code>.docx</code> files. RAVEN parses, sections, and embeds them.</p></li>
+<li><h3>Ask</h3><p>Start a conversation, stream the events, and show the reader the sources behind the answer.</p></li>
+</ol>
+</section>
+
+<section class="rv-sec rv-center">
+<h2>Your application, your models</h2>
+<p class="rv-sub">Build a desktop research workspace, add a document assistant to an existing Python application, or connect a web interface through your own backend. RAVEN provides the document and conversation machinery; it does not prescribe a frontend.</p>
+<div class="rv-grid">
+<div class="rv-card"><h3>Python or HTTP</h3><p>Use the <code>Raven</code> class directly, or run the optional FastAPI server with bearer authentication and Server-Sent Events for a browser or desktop UI.</p></div>
+<div class="rv-card"><h3>Local or cloud models</h3><p>Run models locally through Ollama, use supported cloud models through LiteLLM, or choose a different provider for each role.</p></div>
+<div class="rv-card"><h3>Observable, recoverable work</h3><p>Long-running work has status, replayable events, cancellation, and explicit retry for eligible tasks. Interrupted operations are detected after a restart.</p></div>
+<div class="rv-card"><h3>Data you keep</h3><p>Knowledge, conversations, and vectors live in a directory you control, isolated per user. Pair it with local models to keep inference local too.</p></div>
+</div>
+</section>
+
+<section class="rv-sec rv-center">
+<h2>Go further</h2>
+<p class="rv-sub">See RAVEN in action, explore its architecture, and learn how to build with it.</p>
+<div class="rv-grid">
+<a class="rv-card rv-link" href="{{ '/demo/' | relative_url }}"><h3>RAVEN in action</h3><p>A real application and a reproducible demonstration of the interaction.</p></a>
+<a class="rv-card rv-link" href="{{ '/architecture/' | relative_url }}"><h3>Architecture and design</h3><p>How RAVEN works and why its components are designed this way.</p></a>
+<a class="rv-card rv-link" href="{{ '/guides/' | relative_url }}"><h3>Integration guides</h3><p>How to connect RAVEN to the application you want to build.</p></a>
+<a class="rv-card rv-link" href="{{ '/development/' | relative_url }}"><h3>Development notes</h3><p>Current limitations and the direction of future work.</p></a>
+</div>
+</section>
+
+<section class="rv-cta">
+<h2>Build an assistant whose answers can be checked.</h2>
+<p class="rv-sub">RAVEN v0.2.0 is on PyPI. The README has the installation steps, executable examples, and the API reference.</p>
+<div class="rv-install"><code>pip install noomexai-raven</code><button type="button" class="rv-copy" data-rv-copy="pip install noomexai-raven" aria-label="Copy install command">Copy</button></div>
+<div class="rv-actions"><a class="rv-btn rv-btn-primary" href="https://github.com/NoomexAI/raven_pypi/blob/main/README.md">Read the README</a><a class="rv-btn" href="https://github.com/NoomexAI/raven_pypi">Explore the source</a></div>
+</section>
+
+<p class="rv-foot"><a href="https://github.com/NoomexAI/raven_pypi">Source code</a> &middot; <a href="https://github.com/NoomexAI/raven_pypi/blob/v0.2.0/LICENSE.txt">MIT License</a> &middot; <a href="https://github.com/NoomexAI/raven_pypi/issues">Issues and feedback</a></p>
