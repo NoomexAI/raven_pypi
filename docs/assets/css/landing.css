@@ -92,7 +92,7 @@
   margin-top: 26px;
   padding: 9px 9px 9px 18px;
   border-radius: 12px;
-  border: 1px solid var(--site-accent);
+  border: 2px solid var(--site-accent);
   background: transparent;
   color: var(--site-foreground);
 }
@@ -468,13 +468,17 @@
 }
 
 .rv-link {
+  border-width: 1px;
   text-decoration: none;
   color: inherit;
   display: block;
 }
 
-.rv-link:hover {
+.rv-link:hover,
+.rv-link:focus-visible {
   border-color: var(--rv-accent);
+  /* Add visual weight without changing layout at fractional zoom levels. */
+  box-shadow: inset 0 0 0 1px var(--rv-accent);
 }
 
 .rv-soon {
