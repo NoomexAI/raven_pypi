@@ -3,6 +3,13 @@
 .landing-body {
   font-size: 16px;
   line-height: 1.5;
+  text-align: left;
+}
+
+.site-content.landing-body {
+  max-width: 1280px;
+  padding-inline: var(--site-page-gutter);
+  padding-block: 48px 72px;
 }
 
 .landing-body a {
@@ -53,14 +60,14 @@
 }
 
 .rv-hero {
-  text-align: center;
-  padding: 48px 0 32px;
+  text-align: left;
+  padding: 80px 0 56px;
 }
 
 .rv-hero h1 {
   font-size: clamp(2.1rem,5.4vw,3.4rem);
   max-width: 16em;
-  margin: 22px auto 16px;
+  margin: 22px 0 16px;
   text-wrap: balance;
 }
 
@@ -72,8 +79,8 @@
   text-wrap: pretty;
 }
 
-.rv-hero .rv-sub,.rv-center .rv-sub,.rv-cta .rv-sub {
-  margin-left: auto;
+.rv-hero .rv-sub,.rv-sec .rv-sub,.rv-cta .rv-sub {
+  margin-left: 0;
   margin-right: auto;
 }
 
@@ -100,13 +107,42 @@
 }
 
 .rv-copy {
-  border: 1px solid var(--site-accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
   background: transparent;
   color: inherit;
   border-radius: 8px;
-  padding: 6px 12px;
-  font-size: .82rem;
+  padding: 6px;
+  line-height: 1;
   cursor: pointer;
+}
+
+.rv-copy svg {
+  display: block;
+  flex-shrink: 0;
+}
+
+.rv-copy .rv-copied-icon,
+.rv-copy[data-copy-state="copied"] .rv-copy-icon {
+  display: none;
+}
+
+.rv-copy[data-copy-state="copied"] .rv-copied-icon {
+  display: block;
+}
+
+.rv-copy-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .rv-copy:hover {
@@ -117,7 +153,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
-  justify-content: center;
+  justify-content: flex-start;
   margin-top: 18px;
 }
 
@@ -142,17 +178,33 @@
 }
 
 .rv-facts {
-  list-style: none;
   margin: 24px 0 0;
   padding: 18px 0;
   display: flex;
   flex-wrap: wrap;
   gap: 10px 26px;
-  justify-content: center;
+  justify-content: flex-start;
   border-top: 1px solid var(--rv-line);
   border-bottom: 1px solid var(--rv-line);
   font-size: .9rem;
   opacity: .85;
+}
+
+.rv-facts ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 26px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.rv-facts-features {
+  flex: 1 1 480px;
+}
+
+.rv-facts .rv-facts-meta {
+  margin-inline-start: auto;
 }
 
 .rv-facts li {
@@ -162,10 +214,6 @@
 
 .rv-sec {
   padding: 64px 0 24px;
-}
-
-.rv-center {
-  text-align: center;
 }
 
 .rv-sec h2,.rv-row h2,.rv-cta h2 {
@@ -218,6 +266,10 @@
   margin: 18px 0 0;
   font-size: .92rem;
   opacity: .75;
+}
+
+.landing-body .rv-grid + .rv-note {
+  margin-top: 24px;
 }
 
 .rv-text .rv-note {
@@ -438,7 +490,7 @@
 .rv-cta {
   margin: 56px 0 24px;
   padding: 52px 24px;
-  text-align: center;
+  text-align: left;
   border: 1px solid var(--rv-line);
   border-radius: 20px;
   background: linear-gradient(135deg,rgba(var(--site-accent-rgb),.08),rgba(var(--site-accent-rgb),.02));
@@ -446,7 +498,7 @@
 
 .rv-foot {
   margin: 28px 0 8px;
-  text-align: center;
+  text-align: left;
   font-size: .92rem;
   opacity: .8;
 }
@@ -467,7 +519,11 @@
   }
 
   .rv-hero {
-    padding-top: 28px;
+    padding-top: 40px;
+  }
+
+  .site-content.landing-body {
+    padding-block: 32px 48px;
   }
 
   .rv-sec {

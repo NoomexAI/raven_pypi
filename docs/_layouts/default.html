@@ -24,13 +24,7 @@
 
     <header class="site-header">
       <div class="site-shell">
-        <div class="site-heading">
-          <a class="site-brand" href="{{ '/' | relative_url }}">{{ site.title | escape }}</a>
-          <div class="site-links">
-            <a href="{{ site.repository_url | escape }}">GitHub</a>
-            <a href="{{ site.package_url | escape }}">PyPI</a>
-          </div>
-        </div>
+        <a class="site-brand" href="{{ '/' | relative_url }}">{{ site.title | escape }}</a>
 
         <nav aria-label="Main navigation">
           <ul class="site-navigation">
@@ -50,6 +44,10 @@
             {% endfor %}
           </ul>
         </nav>
+        <div class="site-links">
+          <a href="{{ site.repository_url | escape }}">GitHub</a>
+          <a href="{{ site.package_url | escape }}">PyPI</a>
+        </div>
       </div>
     </header>
 

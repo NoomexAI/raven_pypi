@@ -1,6 +1,7 @@
 /* Shared site shell. Content styles are selected by the page's layout. */
 
 :root {
+  --site-page-gutter: clamp(12px, 2.5vw, 40px);
   color-scheme: light;
   --site-background: #ffffff;
   --site-foreground: #202020;
@@ -68,39 +69,52 @@ a:focus-visible {
   padding-inline: 45px;
 }
 
-.site-header {
-  border-bottom: 1px solid var(--site-border);
-}
-
 .site-header .site-shell {
-  padding-top: 24px;
-}
-
-.site-heading {
-  display: flex;
+  display: grid;
+  grid-template-areas: "brand navigation links";
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 16px;
+  gap: 48px;
+  max-width: 1280px;
+  padding: 24px var(--site-page-gutter);
 }
 
-.site-heading .site-brand {
+.site-header .site-brand {
+  grid-area: brand;
+  justify-self: start;
+  padding-block: 8px;
   color: var(--site-foreground);
-  font-size: 20px;
+  font-size: 24px;
   font-weight: 600;
   letter-spacing: 0.04em;
 }
 
+.site-header nav {
+  grid-area: navigation;
+  min-width: 0;
+}
+
 .site-links {
+  grid-area: links;
+  justify-self: end;
   display: flex;
-  gap: 20px;
-  font-size: 14px;
+  align-items: center;
+  gap: 12px;
+  font-size: 16px;
+}
+
+.site-links a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 8px 6px;
 }
 
 .site-navigation {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 16px;
+  justify-content: flex-end;
+  gap: 4px 6px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -108,10 +122,12 @@ a:focus-visible {
 
 .site-navigation a {
   display: block;
-  padding: 10px 2px;
+  padding: 12px;
   border-bottom: 2px solid transparent;
   color: var(--site-muted);
-  font-size: 14px;
+  font-size: 16px;
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 .site-navigation a:hover {
@@ -171,6 +187,8 @@ a:focus-visible {
   justify-content: space-between;
   gap: 12px;
   padding-block: 20px;
+  max-width: 1280px;
+  padding-inline: var(--site-page-gutter);
 }
 
 .skip-link {
@@ -189,14 +207,29 @@ a:focus-visible {
   transform: translateY(0);
 }
 
+@media (max-width: 1099px) {
+  .site-header .site-shell {
+    grid-template-areas:
+      "brand links"
+      "navigation navigation";
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px 16px;
+    padding-block: 12px;
+  }
+}
+
 @media (max-width: 767px) {
   .site-shell,
   .site-content {
     padding-inline: 15px;
   }
 
-  .site-navigation {
-    gap: 0 12px;
+  .site-header .site-shell {
+    padding-inline: var(--site-page-gutter);
+  }
+
+  .site-navigation a {
+    padding-inline: 10px;
   }
 
   .site-content {
