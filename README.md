@@ -2769,8 +2769,10 @@ reconnect, send that value as `Last-Event-ID`; RAVEN replays retained events
 after it and then waits for new events. SSE heartbeat comments keep idle
 connections alive. The stream closes after a final event. If retention cleanup
 has created a gap before the supplied cursor, the API returns `410 Gone`
-rather than silently skipping events. A fully expired operation is no longer a
-resource and returns `404 Not Found`.
+rather than silently skipping events. An operation removed by cleanup is no
+longer a resource and returns `404 Not Found`. Operation cleanup is scheduled
+by the application or deployment host, not automatically by RAVEN; see
+[Backup, restore, and cleanup](#backup-restore-and-cleanup).
 
 Render event types independently: thinking is not response text, tool calls
 and bounded tool results describe agent work, `reconstruction.file` supplies
@@ -3114,8 +3116,11 @@ defaults into three configuration types.
 
 `SystemConfig` is immutable for the lifetime of a running server. It controls
 host, port, logging, allowed origins and hosts, request and upload limits,
-operation retention, SSE heartbeat timing, concurrency limits, cache bounds,
+SSE heartbeat timing, concurrency limits, cache bounds,
 trusted-path ingestion, and deployment-wide safety ceilings.
+It also stores operation-cleanup policy values that an application can use
+when scheduling `OperationCleanupService`; those values do not enable
+automatic operation cleanup on their own.
 
 The server uses one shared `SystemConfig` for every user runtime. It is not a
 per-user preference object and cannot be changed through the HTTP API.
@@ -3215,9 +3220,9 @@ Unknown fields, invalid types, non-finite numbers, and unsupported
 | Field | Default | Accepted value | Purpose |
 | --- | ---: | --- | --- |
 | `operation_sync_interval_seconds` | `1.0` | Finite number greater than zero | Interval used by the operation manager's periodic durable-store synchronization service. Lifecycle checkpoints are still written immediately where required. |
-| `operation_retention_seconds` | `86400.0` (24 hours) | Finite number greater than or equal to zero | Time terminal operations, tasks, and events remain eligible for replay before cleanup. Zero makes completed history immediately eligible. |
-| `operation_cleanup_interval_seconds` | `300.0` (5 minutes) | Finite number greater than zero | Interval between background cleanup passes. |
-| `operation_cleanup_batch_size` | `100` | Positive integer | Maximum expired operations removed by one cleanup pass. |
+| `operation_retention_seconds` | `86400.0` (24 hours) | Finite number greater than or equal to zero | Retention policy value for an application-created `OperationCleanupService`. Pass it as a `timedelta` to the service. Zero makes terminal history immediately eligible; passing the deadline alone does not delete it. |
+| `operation_cleanup_interval_seconds` | `300.0` (5 minutes) | Finite number greater than zero | Interval an application can use to schedule operation cleanup. RAVEN does not schedule operation cleanup itself. This value also bounds the server's maintenance-loop interval for runtime eviction and upload cleanup. |
+| `operation_cleanup_batch_size` | `100` | Positive integer | Batch-size policy value to pass to an application-created `OperationCleanupService`; limits the expired operations considered per pass. |
 | `event_replay_page_size` | `256` | Positive integer | Number of persisted events loaded per page while replaying an operation stream. |
 | `operation_page_size` | `50` | Positive integer | Default and maximum page size exposed by operation and resource-list HTTP endpoints. |
 | `finished_operation_cache_size` | `256` | Non-negative integer | Maximum completed `Operation` objects retained in the in-memory LRU cache. Zero disables that completed-operation cache. Durable records remain in SQLite until retention cleanup. |
@@ -3590,17 +3595,48 @@ production home. Malformed resources are reported by
 `GET /api/v1/runtime/discovery-issues`; do not edit SQLite or Qdrant files
 under a live process to repair them.
 
-Operation/event history becomes eligible for automatic removal after
-`operation_retention_seconds`; the cleanup service runs every
-`operation_cleanup_interval_seconds` and removes at most
-`operation_cleanup_batch_size` expired operations per pass. This is a
-retention policy, not a promise that rows disappear at the exact deadline.
+RAVEN provides the machinery for operation-history cleanup through
+`OperationCleanupService`, but neither `Raven` nor the bundled FastAPI server
+schedules it automatically. The desktop application's bridge layer or the
+host's backend around RAVEN owns the retention policy and cleanup schedule.
+Without that integration, persisted operations, tasks, retry inputs, and events
+remain on disk even after the configured retention period has passed.
+
+For a started `Raven` instance, an application can perform one cleanup pass:
+
+```python
+from datetime import timedelta
+
+from nraven import OperationCleanupService
+
+cleanup = OperationCleanupService(
+    raven.operation_manager,
+    retention=timedelta(seconds=raven.system_config.operation_retention_seconds),
+    batch_size=raven.system_config.operation_cleanup_batch_size,
+)
+cleanup_result = await cleanup.run_once()
+```
+
+To make cleanup automatic, the bridge or host must schedule `run_once()`
+periodically, for example using `operation_cleanup_interval_seconds`, and own
+that scheduler's startup, shutdown, and error handling. The service uses the
+owning runtime's operation manager; the bundled HTTP API does not expose an
+operation-cleanup endpoint. Each user has a separate operation store, so cleanup
+must be arranged for each user's store.
+
+Each pass considers a bounded batch of terminal operations older than the
+supplied retention period and reports deleted, skipped, and failed IDs.
+Deleting an operation also removes its tasks, events, and retry inputs, so that
+operation can no longer be replayed or retried. Retention expiry alone does not
+make its HTTP resource disappear; deletion does.
+
+Upload cleanup is separate and is implemented automatically in the server.
 Private staged browser uploads have their own
 `upload_retry_retention_seconds` window; successful uploads are removed after
 ingestion, while failed sources expire and are cleaned up. After that, the
 original task may still appear in history but its upload can no longer be
 retried: the client must upload again. Never delete individual live database
-files as a substitute for configured cleanup.
+files as a substitute for the cleanup service.
 
 
 ## Security and deployment responsibilities
