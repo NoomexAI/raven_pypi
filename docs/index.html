@@ -3,8 +3,12 @@ title: RAVEN
 layout: landing
 stylesheets:
   - /assets/css/landing.css
+  - /assets/css/retrieval-player.css
 scripts:
   - /assets/js/landing.js
+  - /assets/js/retrieval-example.js
+  - /assets/js/retrieval-camera.js
+  - /assets/js/retrieval-player.js
 description: >-
   Build document assistants with inspectable sources, agent-directed retrieval,
   and conversations that continue beyond a single answer.
@@ -32,31 +36,108 @@ description: >-
 <section class="rv-sec">
 <h2>From a question to something you can check</h2>
 <p class="rv-sub">An answer alone leaves the reader with another question: <em>where did that come from?</em> With RAVEN, your application can show the search the model performed and the document sections supplied to it, highlighted within their surrounding content.</p>
-<div class="rv-grid">
-<div class="rv-card"><span class="rv-label">A reader asks</span><p class="rv-q">&ldquo;How do the reaction-wheel anomaly, battery condition, and safe-hold response fit together?&rdquo;</p></div>
-<div class="rv-card"><span class="rv-label">The model investigates</span><p>It chooses and sequences retrieval tools, and your interface can show each step as it happens.</p></div>
-<div class="rv-card"><span class="rv-label">The sources appear</span><p>The sections supplied to the model, highlighted inside a readable reconstruction of the file.</p></div>
-<div class="rv-card"><span class="rv-label">The reader follows up</span><p>They check the passage and the conditions around it, then ask the next question in the same conversation.</p></div>
+<div class="rv-flow" data-rv-flow>
+<p class="rv-flow-hint">Select a step to explore the workflow.</p>
+<ol class="rv-flow-path" aria-label="From question to follow-up">
+<li><a class="rv-flow-node" href="#workflow-question" id="workflow-step-question" data-flow-step><span class="rv-flow-number" aria-hidden="true">01</span><span>A reader asks</span></a><span class="rv-flow-arrow" aria-hidden="true">&rarr;</span></li>
+<li><a class="rv-flow-node" href="#workflow-investigation" id="workflow-step-investigation" data-flow-step><span class="rv-flow-number" aria-hidden="true">02</span><span>The model investigates</span></a><span class="rv-flow-arrow" aria-hidden="true">&rarr;</span></li>
+<li><a class="rv-flow-node" href="#workflow-sources" id="workflow-step-sources" data-flow-step><span class="rv-flow-number" aria-hidden="true">03</span><span>The sources appear</span></a><span class="rv-flow-arrow" aria-hidden="true">&rarr;</span></li>
+<li><a class="rv-flow-node" href="#workflow-follow-up" id="workflow-step-follow-up" data-flow-step><span class="rv-flow-number" aria-hidden="true">04</span><span>The reader follows up</span></a></li>
+</ol>
+<div class="rv-flow-details">
+<section class="rv-flow-panel" id="workflow-question" data-flow-panel>
+<span class="rv-label">01 / Question</span>
+<h3>Start with the question you want to investigate.</h3>
+<blockquote>&ldquo;How do the reaction-wheel anomaly, battery condition, and safe-hold response fit together?&rdquo;</blockquote>
+<p>In this example, the reader is working with engineering documents. A conversation can focus on one knowledge or explore the whole knowledge base.</p>
+</section>
+<section class="rv-flow-panel" id="workflow-investigation" data-flow-panel>
+<span class="rv-label">02 / Investigation</span>
+<h3>The agent decides how to look.</h3>
+<p>It chooses from the tools available for this conversation and turn. It can retrieve information, chain additional tool calls when needed, or ask the reader for clarification.</p>
+<p class="rv-flow-example">Your interface can show which tool is running and when its result arrives. This diagram illustrates that process; it does not execute any tools.</p>
+</section>
+<section class="rv-flow-panel" id="workflow-sources" data-flow-panel>
+<span class="rv-label">03 / Source inspection</span>
+<h3>See the material supplied to the model.</h3>
+<p>Source reconstruction presents the retrieved sections inside a readable view of the file, preserving the surrounding content so the reader can check the passage in context.</p>
+<div class="rv-flow-example"><span class="rv-label">Illustrative source view</span><p>Surrounding document context</p><p><mark>Sections supplied to the model</mark></p><p>Nearby context remains available to inspect.</p></div>
+</section>
+<section class="rv-flow-panel" id="workflow-follow-up" data-flow-panel>
+<span class="rv-label">04 / Follow-up</span>
+<h3>Check the context, then ask the next question.</h3>
+<blockquote>&ldquo;Which battery condition changes that response?&rdquo;</blockquote>
+<p>The reader continues in the same conversation. RAVEN retains the discussion and tool interactions, and the agent can investigate the follow-up using the available tools.</p>
+</section>
+</div>
+<div class="rv-flow-controls" hidden>
+<button type="button" data-flow-previous>&larr; Previous step</button>
+<span class="rv-flow-position" data-flow-position role="status"></span>
+<button type="button" data-flow-next>Next step &rarr;</button>
+</div>
 </div>
 <p class="rv-note">An illustrative workflow, not a recorded model response or a built-in chat interface. RAVEN supplies the backend; you decide how to present it.</p>
 </section>
 
-<section class="rv-row">
+<section class="rv-retrieval" data-rv-retrieval>
+<div class="rv-row">
 <div class="rv-text">
 <h2>Let the model investigate</h2>
 <p>A precise specification, a narrative explanation, and a question spanning several documents call for different searches. RAVEN gives the agent retrieval tools it can choose and use in sequence, instead of forcing every question through one fixed search step.</p>
-<p>Let it choose among the strategies or restrict a turn to one. Focus a conversation on a single knowledge collection, or explore across several.</p>
+<p>Let it choose among the strategies or restrict a turn to one. Focus a conversation on a single knowledge, or explore the whole knowledge base.</p>
 <p class="rv-note">You control the available tools and scope; the model decides how to work within them.</p>
 </div>
 <div>
-<div class="rv-pairs">
-<div class="rv-card"><h3>Embedded</h3><p>Specific facts, numbers, and requirements.</p></div>
-<div class="rv-card"><h3>Vector-conditioned</h3><p>A balance of precision and context.</p></div>
-<div class="rv-card"><h3>Hierarchical</h3><p>Narrative structure and relationships.</p></div>
-<div class="rv-card"><h3>Agreement</h3><p>Cross-checking critical questions.</p></div>
+<p class="rv-retrieval-hint">Choose a strategy and scope to see how it works.</p>
+<div class="rv-pairs" role="group" aria-label="Retrieval strategy">
+<button type="button" class="rv-card rv-retrieval-choice" data-retrieval-mode="embedded" aria-pressed="true" aria-controls="retrieval-diagram" disabled><span class="rv-choice-title">Embedded</span><span class="rv-choice-description">Specific facts, numbers, and requirements.</span></button>
+<button type="button" class="rv-card rv-retrieval-choice" data-retrieval-mode="vector-conditioned" aria-pressed="false" aria-controls="retrieval-diagram" disabled><span class="rv-choice-title">Vector-conditioned</span><span class="rv-choice-description">A balance of precision and context.</span></button>
+<button type="button" class="rv-card rv-retrieval-choice" data-retrieval-mode="hierarchical" aria-pressed="false" aria-controls="retrieval-diagram" disabled><span class="rv-choice-title">Hierarchical</span><span class="rv-choice-description">Narrative structure and relationships.</span></button>
+<button type="button" class="rv-card rv-retrieval-choice" data-retrieval-mode="agreement" aria-pressed="false" aria-controls="retrieval-diagram" disabled><span class="rv-choice-title">Agreement</span><span class="rv-choice-description">Cross-checking critical questions.</span></button>
 </div>
-<div class="rv-scope"><span>Local: one collection</span><span>Global: across your collections</span></div>
+<div class="rv-scope" role="group" aria-label="Retrieval scope">
+<button type="button" data-retrieval-scope="local" aria-pressed="true" aria-controls="retrieval-diagram" disabled>Local: one knowledge</button>
+<button type="button" data-retrieval-scope="global" aria-pressed="false" aria-controls="retrieval-diagram" disabled>Global: whole knowledge base</button>
 </div>
+</div>
+</div>
+<section class="rv-retrieval-diagram" id="retrieval-diagram" aria-labelledby="retrieval-diagram-title">
+<div class="rv-retrieval-heading"><div><span class="rv-label">Inside the retrieval tool</span><h3 id="retrieval-diagram-title" data-retrieval-title>Embedded retrieval</h3></div><span class="rv-retrieval-badge" data-retrieval-badge>Local scope</span></div>
+<p class="rv-retrieval-summary" data-retrieval-summary>Search one knowledge by vector similarity, then return the matching sections.</p>
+<div class="rv-film" data-retrieval-player hidden>
+<div class="rv-film-query"><span class="rv-label">Example question</span><span data-film-query>What triggers spacecraft safe-hold, and what battery charge is required?</span></div>
+<div class="rv-film-stage">
+<div class="rv-film-viewport" data-film-viewport></div>
+<div class="rv-film-caption"><span class="rv-label" data-film-phase>Structure tour</span><h4 data-film-title>Start with a knowledge</h4><p data-film-caption></p></div>
+</div>
+<progress class="rv-film-progress" data-film-progress max="1000" value="0" aria-hidden="true"></progress>
+<div class="rv-film-source-text" data-film-source-text hidden></div>
+<div class="rv-film-controls" role="group" aria-label="Retrieval animation controls">
+<button type="button" class="rv-film-play" data-film-play aria-label="Play walkthrough"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path data-film-play-icon d="M7 4v16l14-8Z"/></svg><span data-film-play-label>Play</span></button>
+<button type="button" data-film-previous aria-label="Previous scene" title="Previous scene"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6 5v14m13-14-9 7 9 7Z"/></svg></button>
+<button type="button" data-film-next aria-label="Next scene" title="Next scene"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M18 5v14M5 5l9 7-9 7Z"/></svg></button>
+<button type="button" data-film-replay><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 10a8 8 0 1 1 1 8M4 4v6h6"/></svg><span>Replay</span></button>
+<span class="rv-film-position" data-film-position></span>
+</div>
+<label class="rv-film-timeline"><span class="rv-label">Explore the scenes</span><input type="range" min="0" max="6" value="0" step="1" data-film-seek aria-label="Walkthrough scene"></label>
+<p class="rv-film-motion-note" data-film-motion-note hidden>Reduced motion is enabled. Use the step buttons or timeline to explore without animation.</p>
+</div>
+<div data-retrieval-fallback>
+<div class="rv-retrieval-source"><span class="rv-label">Search boundary</span><div class="rv-knowledge-set" data-retrieval-knowledges><span class="rv-knowledge">One selected knowledge</span></div></div>
+<div data-retrieval-routes>
+<ol class="rv-retrieval-route">
+<li class="rv-retrieval-stage"><span class="rv-stage-number">01</span><h4>Embed the query</h4><p>The embedding model turns the question into a vector.</p></li>
+<li class="rv-retrieval-stage"><span class="rv-stage-number">02</span><h4>Search vectors</h4><p>Search the selected knowledge for similar chunks.</p></li>
+<li class="rv-retrieval-stage"><span class="rv-stage-number">03</span><h4>Select sections</h4><p>Resolve chunk hits to unique sections, keeping the highest-ranked matches.</p></li>
+<li class="rv-retrieval-stage rv-stage-result"><span class="rv-stage-number">04</span><h4>Return content</h4><p>Return the selected sections with their file and knowledge names.</p></li>
+</ol>
+</div>
+</div>
+<p class="rv-retrieval-detail" data-retrieval-detail>No LLM relevance-scoring pass is needed for this strategy.</p>
+<p class="rv-retrieval-status" data-retrieval-status role="status"></p>
+<noscript><p class="rv-note">This is the local embedded workflow. Enable JavaScript to explore the other strategies and scopes.</p></noscript>
+</section>
+<p class="rv-note rv-retrieval-note">Excerpts come from the project&rsquo;s sample documents. Labels such as Section A are visual aliases, not stored section names. Knowledge assignments, section boundaries, metadata, and matches illustrate the workflow; this is not a live search or validated engineering guidance. No model calls are made. Vector-search animations trace matched chunks back to their sources; they do not simulate sequential file scanning.</p>
 </section>
 
 <section class="rv-row rv-flip">
