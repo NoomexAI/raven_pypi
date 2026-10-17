@@ -6,7 +6,7 @@
 }
 
 .rv-film {
-  margin-top: 24px;
+  margin-top: 0;
   border: 1px solid var(--rv-line);
   border-radius: 12px;
   overflow: hidden;

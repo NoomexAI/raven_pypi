@@ -170,20 +170,7 @@ document.querySelectorAll("[data-rv-retrieval]").forEach((explorer) => {
     player.querySelector("[data-film-query]").textContent = example.questions[scope];
     modes.forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.retrievalMode === mode)));
     scopes.forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.retrievalScope === scope)));
-    explorer.querySelector("[data-retrieval-title]").textContent = titles[mode];
-    explorer.querySelector("[data-retrieval-badge]").textContent = `${scope === "global" ? "Global" : "Local"} scope`;
-    explorer.querySelector("[data-retrieval-summary]").textContent = {
-      embedded: "From chunk similarity to complete source sections.",
-      "vector-conditioned": scope === "global" ? "Vector matches shortlist knowledges; LLM ranking selects sections within them." : "Vector matches shortlist files; LLM ranking selects sections within them.",
-      hierarchical: "Let the LLM rank metadata instead of matching chunk vectors.",
-      agreement: "Two retrieval passes, followed by a comparison of their outputs.",
-    }[mode];
-    explorer.querySelector("[data-retrieval-detail]").textContent = {
-      embedded: "Follow a match outward: chunk → parent section → file → knowledge → source record → answering model.",
-      "vector-conditioned": "Vector matching narrows the boundary; LLM section ranking can select other sections within that boundary.",
-      hierarchical: scope === "global" ? "Default global retrieval ranks knowledge summaries before section metadata. full_retrieval skips the knowledge shortlist." : "Local hierarchical retrieval scores section metadata in one knowledge; it does not require vector search.",
-      agreement: "The two passes run sequentially. Agreement describes their retrieval results, not a guarantee that an answer is correct.",
-    }[mode];
+    explorer.querySelector("#retrieval-diagram").setAttribute("aria-label", `${titles[mode]}, ${scope} scope walkthrough`);
     goTo(0, false);
   }
 

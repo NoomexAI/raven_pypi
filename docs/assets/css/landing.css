@@ -710,40 +710,6 @@
   outline-offset: 4px;
 }
 
-.rv-retrieval-diagram {
-  padding: 28px;
-  border: 1px solid var(--rv-line);
-  border-radius: 16px;
-  background: var(--rv-soft);
-}
-
-.rv-retrieval-heading {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
-.landing-body .rv-retrieval-heading h3 {
-  margin: 0;
-  font-size: 1.4rem;
-}
-
-.rv-retrieval-badge {
-  border: 1px solid var(--site-accent);
-  border-radius: 999px;
-  padding: 5px 12px;
-  font-size: .8rem;
-  font-weight: 600;
-}
-
-.rv-retrieval-summary {
-  max-width: 52rem;
-  color: var(--site-muted);
-}
-
 .rv-retrieval-source {
   display: flex;
   flex-wrap: wrap;
@@ -892,14 +858,6 @@
   font-size: .9rem;
 }
 
-.landing-body .rv-retrieval-detail {
-  margin: 24px 0 0;
-  padding-top: 16px;
-  border-top: 1px solid var(--rv-line);
-  color: var(--site-muted);
-  font-size: .9rem;
-}
-
 .rv-retrieval-status {
   position: absolute;
   width: 1px;
@@ -942,12 +900,6 @@
 
   .rv-retrieval-comparison .rv-stage-art {
     position: static;
-  }
-}
-
-@media (max-width: 540px) {
-  .rv-retrieval-diagram {
-    padding: 20px;
   }
 }
 
