@@ -34,6 +34,47 @@
   border-bottom: 1px solid var(--rv-line);
 }
 
+.rv-film-screen {
+  position: relative;
+  min-width: 0;
+  isolation: isolate;
+}
+
+.rv-film-overlay {
+  position: absolute;
+  z-index: 2;
+  left: 50%;
+  bottom: 8px;
+  width: calc(100% - 24px);
+  max-width: 440px;
+  padding: 4px 10px 6px;
+  border: 1px solid var(--rv-line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--site-background) 94%, transparent);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .12);
+  backdrop-filter: blur(8px);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 6px);
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.rv-film-screen:hover .rv-film-overlay,
+.rv-film-screen:has(:focus-visible) .rv-film-overlay {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(-50%, 0);
+}
+
+.rv-film-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .rv-film-viewport {
   position: relative;
   isolation: isolate;
@@ -293,25 +334,7 @@
 }
 
 .rv-film-progress {
-  display: block;
-  width: 100%;
-  height: 3px;
-  border: 0;
-  appearance: none;
-  background: var(--rv-soft);
-  color: var(--site-accent);
-}
-
-.rv-film-progress::-webkit-progress-bar {
-  background: var(--rv-soft);
-}
-
-.rv-film-progress::-webkit-progress-value {
-  background: var(--site-accent);
-}
-
-.rv-film-progress::-moz-progress-bar {
-  background: var(--site-accent);
+  display: none;
 }
 
 .landing-body .rv-film-caption h4 {
@@ -330,33 +353,31 @@
 
 .rv-film-controls {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  padding: 16px 22px 0;
+  justify-content: center;
+  gap: 4px;
 }
 
 .rv-film-controls button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  min-width: 44px;
-  min-height: 44px;
-  padding: 10px 12px;
-  border: 1px solid var(--rv-line);
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
   border-radius: 8px;
   background: transparent;
   color: var(--site-foreground);
   font: inherit;
   font-size: .85rem;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .rv-film-controls .rv-film-play {
   background: var(--site-accent);
   color: var(--site-accent-contrast);
   border-color: var(--site-accent);
-  min-width: 90px;
 }
 
 .rv-film-controls button:disabled {
@@ -369,29 +390,27 @@
 }
 
 .rv-film-position {
-  margin-left: auto;
   color: var(--site-muted);
   font-variant-numeric: tabular-nums;
-  font-size: .85rem;
+  font-size: .75rem;
+  white-space: nowrap;
 }
 
 .rv-film-timeline {
-  display: block;
-  padding: 12px 22px 16px;
-}
-
-.rv-film-timeline .rv-label {
-  margin: 0;
-  font-size: .65rem;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
 }
 
 .rv-film-timeline input {
   display: block;
   width: 100%;
-  height: 32px;
+  height: 24px;
   margin: 0;
   cursor: pointer;
   accent-color: var(--site-accent);
+  -webkit-tap-highlight-color: transparent;
 }
 
 .rv-film-timeline input:focus-visible {
@@ -399,11 +418,36 @@
   outline-offset: 2px;
 }
 
-.landing-body .rv-film-motion-note {
-  margin: 0;
-  padding: 0 22px 18px;
-  font-size: .85rem;
+.rv-film-controls button:focus-visible {
+  outline: 2px solid var(--site-accent);
+  outline-offset: 2px;
+}
+
+.landing-body .rv-film-caption .rv-film-motion-note {
+  margin: 12px 0 0;
+  padding: 0;
+  font-size: .8rem;
   color: var(--site-muted);
+}
+
+@media (hover: none), (pointer: coarse) {
+  .rv-film-overlay {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translate(-50%, 0);
+  }
+}
+
+.rv-film-screen[data-controls-dismissed="true"] .rv-film-overlay {
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 6px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rv-film-overlay {
+    transition: none;
+  }
 }
 
 @media (max-width: 1000px) {
@@ -458,25 +502,4 @@
     min-height: 150px;
   }
 
-  .rv-film-controls {
-    padding: 12px 12px 0;
-    gap: 6px;
-  }
-
-  .rv-film-controls button {
-    padding: 10px;
-  }
-
-  .rv-film-controls .rv-film-play {
-    min-width: 80px;
-  }
-
-  .rv-film-position {
-    flex-basis: 100%;
-    margin: 6px 0 0;
-  }
-
-  .rv-film-timeline {
-    padding-inline: 16px;
-  }
 }

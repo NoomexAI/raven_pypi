@@ -4,6 +4,7 @@
 document.querySelectorAll("[data-rv-retrieval]").forEach((explorer) => {
   const example = RAVEN_RETRIEVAL_EXAMPLE;
   const player = explorer.querySelector("[data-retrieval-player]");
+  const screen = player.querySelector(".rv-film-screen");
   const viewport = player.querySelector("[data-film-viewport]");
   const playButton = player.querySelector("[data-film-play]");
   const previous = player.querySelector("[data-film-previous]");
@@ -70,8 +71,8 @@ document.querySelectorAll("[data-rv-retrieval]").forEach((explorer) => {
 
   function updateControls() {
     player.dataset.playing = String(playing);
-    playButton.querySelector("[data-film-play-label]").textContent = playing ? "Pause" : "Play";
     playButton.setAttribute("aria-label", playing ? "Pause walkthrough" : "Play walkthrough");
+    playButton.title = playing ? "Pause walkthrough" : "Play walkthrough";
     playButton.querySelector("[data-film-play-icon]").setAttribute("d", playing ? "M6 4h4v16H6Zm8 0h4v16h-4Z" : "M7 4v16l14-8Z");
     playButton.disabled = reduced.matches;
     previous.disabled = index === 0;
@@ -194,6 +195,15 @@ document.querySelectorAll("[data-rv-retrieval]").forEach((explorer) => {
     button.disabled = false;
     button.addEventListener("click", () => { scope = button.dataset.retrievalScope; configure(); });
   });
+  // Leaving the video dismisses controls without moving keyboard focus.
+  screen.addEventListener("pointerleave", (event) => {
+    if (event.pointerType !== "touch") screen.dataset.controlsDismissed = "true";
+  });
+  screen.addEventListener("pointerenter", () => { delete screen.dataset.controlsDismissed; });
+  screen.addEventListener("focusin", (event) => {
+    if (event.target.matches(":focus-visible")) delete screen.dataset.controlsDismissed;
+  });
+  screen.addEventListener("keydown", () => { delete screen.dataset.controlsDismissed; });
   playButton.addEventListener("click", () => playing ? pause() : play());
   previous.addEventListener("click", () => { pause(); goTo(index - 1); });
   next.addEventListener("click", () => { pause(); goTo(index + 1); });

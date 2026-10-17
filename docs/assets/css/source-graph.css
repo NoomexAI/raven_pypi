@@ -1,0 +1,125 @@
+/* A scroll-linked, geometric view of source provenance. */
+.landing-body .rv-source-trail {
+  width: min(100%, 1080px);
+  margin: clamp(64px, 9vw, 128px) auto clamp(48px, 7vw, 96px);
+  outline: none;
+}
+
+.rv-source-trail > svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+  color: var(--site-foreground);
+  font-family: inherit;
+  font-size: 14px;
+}
+
+.rv-trail-plane {
+  fill: var(--site-background);
+  stroke: currentColor;
+  stroke-opacity: .4;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.rv-trail-output > .rv-trail-plane {
+  stroke-opacity: .8;
+}
+
+.rv-trail-content text {
+  fill: currentColor;
+  pointer-events: none;
+}
+
+.rv-trail-content .rv-trail-kicker {
+  font-size: 9px;
+  letter-spacing: 1.2px;
+  opacity: .6;
+}
+
+.rv-trail-content .rv-trail-file {
+  font-size: 12px;
+}
+
+.rv-trail-content .rv-trail-section {
+  font-size: 10px;
+}
+
+.rv-trail-edges path {
+  stroke: currentColor;
+  stroke-opacity: .35;
+  stroke-width: 1.2;
+  vector-effect: non-scaling-stroke;
+}
+
+.rv-trail-context {
+  fill: var(--rv-soft);
+}
+
+.rv-trail-hit {
+  fill: var(--rv-soft);
+  stroke: currentColor;
+  stroke-width: 1.1;
+  vector-effect: non-scaling-stroke;
+}
+
+.rv-trail-node {
+  cursor: pointer;
+  outline: none;
+}
+
+.rv-trail-node[data-active="true"] > .rv-trail-plane,
+.rv-trail-node:focus-visible > .rv-trail-plane {
+  stroke-opacity: 1;
+  stroke-width: 2;
+}
+
+.rv-trail-edges path[data-active="true"] {
+  stroke-opacity: 1;
+  stroke-width: 2;
+}
+
+.rv-trail-hit[data-active="true"] {
+  stroke-width: 2;
+  fill: rgba(var(--site-accent-rgb), .12);
+}
+
+.rv-source-trail[data-enhanced="true"]:not([data-unfolded="true"]) .rv-trail-node {
+  pointer-events: none;
+  cursor: default;
+}
+
+.rv-source-trail:focus-visible {
+  outline: 1px dashed var(--rv-line);
+  outline-offset: 12px;
+}
+
+.rv-source-trail .rv-trail-details {
+  max-width: 660px;
+  min-height: 100px;
+  margin: 8px auto 0;
+  text-align: center;
+}
+
+.rv-trail-details > span {
+  display: block;
+  margin-bottom: 9px;
+  font-size: .7rem;
+  font-weight: 600;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.landing-body .rv-trail-details p {
+  margin: 0;
+  color: var(--site-muted);
+  font-size: .85rem;
+  line-height: 1.6;
+}
+
+@media (max-width: 700px) {
+  .rv-source-trail .rv-trail-details {
+    min-height: 150px;
+  }
+}

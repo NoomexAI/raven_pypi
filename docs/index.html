@@ -4,11 +4,13 @@ layout: landing
 stylesheets:
   - /assets/css/landing.css
   - /assets/css/retrieval-player.css
+  - /assets/css/source-graph.css
 scripts:
   - /assets/js/landing.js
   - /assets/js/retrieval-example.js
   - /assets/js/retrieval-camera.js
   - /assets/js/retrieval-player.js
+  - /assets/js/source-graph.js
 description: >-
   Build document assistants with inspectable sources, agent-directed retrieval,
   and conversations that continue beyond a single answer.
@@ -107,20 +109,24 @@ description: >-
 <div class="rv-film" data-retrieval-player hidden>
 <div class="rv-film-query"><span class="rv-label">Example question</span><span data-film-query>What triggers spacecraft safe-hold, and what battery charge is required?</span></div>
 <div class="rv-film-stage">
+<div class="rv-film-screen">
 <div class="rv-film-viewport" data-film-viewport></div>
-<div class="rv-film-caption"><span class="rv-label" data-film-phase>Structure tour</span><h4 data-film-title>Start with a knowledge</h4><p data-film-caption></p></div>
-</div>
+<div class="rv-film-overlay">
+<label class="rv-film-timeline"><span class="rv-film-sr-only">Explore the scenes</span><input type="range" min="0" max="6" value="0" step="1" data-film-seek aria-label="Walkthrough scene"><span class="rv-film-position" data-film-position></span></label>
 <progress class="rv-film-progress" data-film-progress max="1000" value="0" aria-hidden="true"></progress>
-<div class="rv-film-source-text" data-film-source-text hidden></div>
 <div class="rv-film-controls" role="group" aria-label="Retrieval animation controls">
-<button type="button" class="rv-film-play" data-film-play aria-label="Play walkthrough"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path data-film-play-icon d="M7 4v16l14-8Z"/></svg><span data-film-play-label>Play</span></button>
+<button type="button" class="rv-film-play" data-film-play aria-label="Play walkthrough" title="Play walkthrough"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path data-film-play-icon d="M7 4v16l14-8Z"/></svg></button>
 <button type="button" data-film-previous aria-label="Previous scene" title="Previous scene"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6 5v14m13-14-9 7 9 7Z"/></svg></button>
 <button type="button" data-film-next aria-label="Next scene" title="Next scene"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M18 5v14M5 5l9 7-9 7Z"/></svg></button>
-<button type="button" data-film-replay><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 10a8 8 0 1 1 1 8M4 4v6h6"/></svg><span>Replay</span></button>
-<span class="rv-film-position" data-film-position></span>
+<button type="button" data-film-replay aria-label="Replay walkthrough" title="Replay walkthrough"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 10a8 8 0 1 1 1 8M4 4v6h6"/></svg></button>
 </div>
-<label class="rv-film-timeline"><span class="rv-label">Explore the scenes</span><input type="range" min="0" max="6" value="0" step="1" data-film-seek aria-label="Walkthrough scene"></label>
+</div>
+</div>
+<div class="rv-film-caption"><span class="rv-label" data-film-phase>Structure tour</span><h4 data-film-title>Start with a knowledge</h4><p data-film-caption></p>
 <p class="rv-film-motion-note" data-film-motion-note hidden>Reduced motion is enabled. Use the step buttons or timeline to explore without animation.</p>
+</div>
+</div>
+<div class="rv-film-source-text" data-film-source-text hidden></div>
 </div>
 <div data-retrieval-fallback>
 <div class="rv-retrieval-source"><span class="rv-label">Search boundary</span><div class="rv-knowledge-set" data-retrieval-knowledges><span class="rv-knowledge">One selected knowledge</span></div></div>
@@ -139,6 +145,64 @@ description: >-
 </section>
 <p class="rv-note rv-retrieval-note">Excerpts come from the project&rsquo;s sample documents. Labels such as Section A are visual aliases, not stored section names. Knowledge assignments, section boundaries, metadata, and matches illustrate the workflow; this is not a live search or validated engineering guidance. No model calls are made. Vector-search animations trace matched chunks back to their sources; they do not simulate sequential file scanning.</p>
 </section>
+
+<figure class="rv-source-trail" data-source-trail tabindex="0" aria-label="Explore the source trail. Scroll to unfold, or focus this diagram and tab through its nodes.">
+<svg viewBox="0 0 1080 470" role="group" aria-labelledby="rv-trail-title rv-trail-description">
+<title id="rv-trail-title">From a query to reconstructed sources</title>
+<desc id="rv-trail-description">Retrieval returns three source records. Sections B and C belong to Reaction_wheel.txt in Engineering; Section D belongs to EPS.txt in Spacecraft. Reconstruction groups these records into two files and highlights the corresponding sections. Section letters and assignments are illustrative.</desc>
+<g class="rv-trail-edges" fill="none" aria-hidden="true">
+<path data-from="query" data-to="retrieval" d="M165 235H205"/>
+<path data-from="retrieval" data-to="record-b" data-route="B" d="M355 235C376 235 376 100 397 100"/>
+<path data-from="retrieval" data-to="record-c" data-route="C" d="M355 235H397"/>
+<path data-from="retrieval" data-to="record-d" data-route="D" d="M355 235C376 235 376 370 397 370"/>
+<path data-from="record-b" data-to="reconstruction" data-route="B" d="M573 100C602 100 602 235 631 235"/>
+<path data-from="record-c" data-to="reconstruction" data-route="C" d="M573 235H631"/>
+<path data-from="record-d" data-to="reconstruction" data-route="D" d="M573 370C602 370 602 235 631 235"/>
+<path data-from="reconstruction" data-to="wheel" data-route="B C" d="M799 235C835 235 835 140 871 140"/>
+<path data-from="reconstruction" data-to="eps" data-route="D" d="M799 235C835 235 835 335 871 335"/>
+</g>
+<g class="rv-trail-node" data-node="query" data-label="The question" data-detail="What triggers spacecraft safe-hold, and how does EPS respond to low bus voltage?" transform="translate(90 235)" tabindex="0" role="button" aria-label="Inspect the query" aria-pressed="false">
+<rect class="rv-trail-plane" x="-75" y="-40" width="150" height="80" rx="9"/>
+<g class="rv-trail-content"><text class="rv-trail-kicker" x="-59" y="-18">QUERY</text><text x="-59" y="4">Safe-hold triggers</text><text x="-59" y="23">and EPS response?</text></g>
+</g>
+<g class="rv-trail-node" data-node="retrieval" data-label="Retrieval" data-detail="The selected retrieval tool finds relevant sections and returns their content with knowledge, file, and section references. This illustration does not run a search." transform="translate(280 235)" tabindex="0" role="button" aria-label="Inspect retrieval" aria-pressed="false">
+<rect class="rv-trail-plane" x="-75" y="-40" width="150" height="80" rx="9"/>
+<g class="rv-trail-content"><text class="rv-trail-kicker" x="-59" y="-18">RETRIEVAL</text><text x="-59" y="5">Find the relevant</text><text x="-59" y="24">source sections</text></g>
+</g>
+<g class="rv-trail-node" data-node="record-b" data-route="B" data-label="Source record · Section B" data-detail="Engineering → Reaction_wheel.txt → Section B. The retrieved passage describes the reaction-wheel anomaly that triggers safe-hold. Its reference remains tied to this file." transform="translate(485 100)" tabindex="0" role="button" aria-label="Inspect source record B" aria-pressed="false">
+<rect class="rv-trail-plane" x="-88" y="-43" width="176" height="86" rx="9"/>
+<g class="rv-trail-content"><text class="rv-trail-kicker" x="-72" y="-20">SOURCE RECORD / B</text><text x="-72" y="3">Engineering</text><text class="rv-trail-file" x="-72" y="24">Reaction_wheel.txt</text></g>
+</g>
+<g class="rv-trail-node" data-node="record-c" data-route="C" data-label="Source record · Section C" data-detail="Engineering → Reaction_wheel.txt → Section C. This passage covers the battery condition for recovery. It is a different section of the same file, not a second document." transform="translate(485 235)" tabindex="0" role="button" aria-label="Inspect source record C" aria-pressed="false">
+<rect class="rv-trail-plane" x="-88" y="-43" width="176" height="86" rx="9"/>
+<g class="rv-trail-content"><text class="rv-trail-kicker" x="-72" y="-20">SOURCE RECORD / C</text><text x="-72" y="3">Engineering</text><text class="rv-trail-file" x="-72" y="24">Reaction_wheel.txt</text></g>
+</g>
+<g class="rv-trail-node" data-node="record-d" data-route="D" data-label="Source record · Section D" data-detail="Spacecraft → EPS.txt → Section D. This passage describes the EPS low-voltage load-shedding response. It belongs to EPS.txt, so it is reconstructed separately from the reaction-wheel file." transform="translate(485 370)" tabindex="0" role="button" aria-label="Inspect source record D" aria-pressed="false">
+<rect class="rv-trail-plane" x="-88" y="-43" width="176" height="86" rx="9"/>
+<g class="rv-trail-content"><text class="rv-trail-kicker" x="-72" y="-20">SOURCE RECORD / D</text><text x="-72" y="3">Spacecraft</text><text class="rv-trail-file" x="-72" y="24">EPS.txt</text></g>
+</g>
+<g class="rv-trail-node" data-node="reconstruction" data-label="Reconstruction" data-detail="Group the source records by knowledge and file, load their surrounding sections, and mark the sections supplied to the model. Three records become two reconstructed files; reconstruction does not generate an answer." transform="translate(715 235)" tabindex="0" role="button" aria-label="Inspect reconstruction" aria-pressed="false">
+<rect class="rv-trail-plane" x="-84" y="-40" width="168" height="80" rx="9"/>
+<g class="rv-trail-content"><text class="rv-trail-kicker" x="-68" y="-18">RECONSTRUCTION</text><text x="-68" y="5">Restore context.</text><text x="-68" y="24">Keep the references.</text></g>
+</g>
+<g class="rv-trail-node rv-trail-output" data-node="wheel" data-route="B C" data-label="Reaction_wheel.txt · Engineering" data-detail="Sections B and C are highlighted in one reconstructed file. The unhighlighted sections remain available as surrounding context. Highlights identify supplied material, not verified claims or an exact reproduction of the original page layout." transform="translate(965 140)" tabindex="0" role="button" aria-label="Inspect reconstructed Reaction_wheel.txt" aria-pressed="false">
+<rect class="rv-trail-plane" x="-94" y="-82" width="188" height="164" rx="9"/>
+<g class="rv-trail-content"><text class="rv-trail-kicker" x="-78" y="-60">ENGINEERING</text><text class="rv-trail-file" x="-78" y="-39">Reaction_wheel.txt</text>
+<rect class="rv-trail-context" x="-78" y="-25" width="156" height="22" rx="3"/><text class="rv-trail-section" x="-68" y="-10">Section A · context</text>
+<rect class="rv-trail-hit" data-section="B" x="-78" y="4" width="156" height="28" rx="3"/><text class="rv-trail-section" x="-68" y="22">Section B · supplied</text>
+<rect class="rv-trail-hit" data-section="C" x="-78" y="39" width="156" height="28" rx="3"/><text class="rv-trail-section" x="-68" y="57">Section C · supplied</text></g>
+</g>
+<g class="rv-trail-node rv-trail-output" data-node="eps" data-route="D" data-label="EPS.txt · Spacecraft" data-detail="Section D is highlighted inside EPS.txt, with the surrounding sections left unhighlighted. Its source record stays associated with Spacecraft / EPS.txt throughout the chain." transform="translate(965 335)" tabindex="0" role="button" aria-label="Inspect reconstructed EPS.txt" aria-pressed="false">
+<rect class="rv-trail-plane" x="-94" y="-82" width="188" height="164" rx="9"/>
+<g class="rv-trail-content"><text class="rv-trail-kicker" x="-78" y="-60">SPACECRAFT</text><text class="rv-trail-file" x="-78" y="-39">EPS.txt</text>
+<rect class="rv-trail-context" x="-78" y="-25" width="156" height="22" rx="3"/><text class="rv-trail-section" x="-68" y="-10">Surrounding context</text>
+<rect class="rv-trail-hit" data-section="D" x="-78" y="4" width="156" height="28" rx="3"/><text class="rv-trail-section" x="-68" y="22">Section D · supplied</text>
+<rect class="rv-trail-context" x="-78" y="39" width="156" height="28" rx="3"/><text class="rv-trail-section" x="-68" y="57">Surrounding context</text></g>
+</g>
+</svg>
+<figcaption class="rv-trail-details" aria-live="polite" aria-atomic="true"><span data-trail-label>The source trail</span><p data-trail-detail>Scroll to unfold. Hover or select a node to inspect how three source records become two reconstructed files.</p></figcaption>
+<noscript><p class="rv-note">Illustrative source trail: query → retrieval → three source records → reconstruction → two files with highlighted sections. Section letters are visual aliases.</p></noscript>
+</figure>
 
 <section class="rv-row rv-flip">
 <div class="rv-text">
@@ -180,10 +244,12 @@ description: >-
 </ol>
 </section>
 
-<section class="rv-sec">
+<section class="rv-row rv-applications">
+<div class="rv-text">
 <h2>Your application, your models</h2>
 <p class="rv-sub">Build a desktop research workspace, add a document assistant to an existing Python application, or connect a web interface through your own backend. RAVEN provides the document and conversation machinery; it does not prescribe a frontend.</p>
-<div class="rv-grid">
+</div>
+<div class="rv-application-layers" data-application-deck>
 <div class="rv-card"><h3>Python or HTTP</h3><p>Use the <code>Raven</code> class directly, or run the optional FastAPI server with bearer authentication and Server-Sent Events for a browser or desktop UI.</p></div>
 <div class="rv-card"><h3>Local or cloud models</h3><p>Run models locally through Ollama, use supported cloud models through LiteLLM, or choose a different provider for each role.</p></div>
 <div class="rv-card"><h3>Observable, recoverable work</h3><p>Long-running work has status, replayable events, cancellation, and explicit retry for eligible tasks. Interrupted operations are detected after a restart.</p></div>

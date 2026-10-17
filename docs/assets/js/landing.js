@@ -1,5 +1,76 @@
 "use strict";
 
+// Inspect each card in place by fading only the layers in front of it.
+document.querySelectorAll("[data-application-deck]").forEach((deck, deckIndex) => {
+  const cards = [...deck.querySelectorAll(".rv-card")];
+  let pinned = null;
+  const buttons = cards.map((card, index) => {
+    const content = document.createElement("div");
+    content.className = "rv-layer-content";
+    content.id = `application-deck-${deckIndex}-${index}`;
+    content.append(...card.childNodes);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "rv-layer-handle";
+    button.setAttribute("aria-controls", content.id);
+    const label = document.createElement("span");
+    label.textContent = content.querySelector("h3").textContent;
+    button.append(label);
+    card.append(button, content);
+    return button;
+  });
+
+  function select(index) {
+    deck.dataset.locked = String(pinned !== null);
+    deck.style.setProperty("--pinned-layer", String(pinned === null ? 0 : cards.length - 1 - pinned));
+    cards.forEach((card, current) => {
+      const active = current === index;
+      card.dataset.active = String(active);
+      card.dataset.muted = String(current < index);
+      card.dataset.pinned = String(current === pinned);
+      buttons[current].setAttribute("aria-expanded", String(active));
+      buttons[current].setAttribute("aria-pressed", String(current === pinned));
+      card.querySelector(".rv-layer-content").setAttribute("aria-hidden", String(!active));
+    });
+  }
+
+  buttons.forEach((button, index) => {
+    cards[index].addEventListener("pointerenter", (event) => {
+      const keyboardFocused = buttons.some((control) => control === document.activeElement && control.matches(":focus-visible"));
+      if (event.pointerType !== "touch" && pinned === null && !keyboardFocused) select(index);
+    });
+    button.addEventListener("focus", () => { if (pinned === null) select(index); });
+    cards[index].addEventListener("click", () => {
+      pinned = index;
+      select(index);
+    });
+  });
+  deck.addEventListener("pointerleave", (event) => {
+    if (event.pointerType === "touch" || pinned !== null) return;
+    const focused = buttons.findIndex((button) => button === document.activeElement && button.matches(":focus-visible"));
+    select(focused < 0 ? 0 : focused);
+  });
+  deck.addEventListener("focusout", (event) => {
+    if (pinned === null && !deck.contains(event.relatedTarget)) select(0);
+  });
+  document.addEventListener("click", (event) => {
+    const card = event.target instanceof Element ? event.target.closest(".rv-card") : null;
+    if (cards.includes(card)) return;
+    pinned = null;
+    select(0);
+    if (deck.contains(document.activeElement)) document.activeElement.blur();
+  });
+  deck.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      pinned = null;
+      select(0);
+      buttons[0].focus({ preventScroll: true });
+    }
+  });
+  deck.dataset.enhanced = "true";
+  select(0);
+});
+
 // Keep installation commands selectable if clipboard access is unavailable.
 document.querySelectorAll("[data-rv-copy]").forEach((button) => {
   const status = button.parentElement.querySelector(".rv-copy-status");
