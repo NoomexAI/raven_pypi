@@ -73,6 +73,7 @@ dmypy.json
 
 # Project specific
 /RAVEN/
+/tui_example/
 example_tests/
 *.log
 
