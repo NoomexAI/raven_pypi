@@ -94,6 +94,25 @@ Run all commands below in **PowerShell inside VS Code's integrated terminal**.
 Use the same terminal throughout the walkthrough so that shortcuts such as
 Shift+Enter work as described.
 
+### Watch the workflow
+
+The recording follows environment setup, model configuration, knowledge
+creation, document ingestion, chat, and source inspection. Play it for an
+overview, then follow the instructions below to reproduce the workflow. Use
+the player's fullscreen control to read the terminal at a larger size.
+
+<video controls playsinline preload="metadata" width="1920" height="1080" aria-label="RAVEN terminal demo: setup, model configuration, ingestion, chat, and source inspection">
+  <source src="{{ '/assets/videos/raven_tui_demo.mp4' | relative_url }}" type="video/mp4">
+  This browser cannot play the embedded recording. Use the download link below to watch it locally.
+</video>
+
+*Recording: 2 minutes 22 seconds. The recorded chat uses a global conversation;
+the written steps below select the local `engineering` scope for a focused
+document question. Both use the same model-configuration, ingestion, and
+source-inspection controls.*
+
+[Download the recording (MP4, approximately 41 MiB)]({{ '/assets/videos/raven_tui_demo.mp4' | relative_url }}){: download="raven_tui_demo.mp4"}
+
 ### Prerequisites
 
 | Requirement | Purpose |
@@ -447,3 +466,426 @@ saved conversation and its source-backed answers.
 
 This completes the application workflow. The following sections examine the
 source files and explain how each interaction is connected to RAVEN.
+
+## 3. Rebuilding the TUI
+
+Section 2 runs the complete application. This guide begins a separate walkthrough
+of rebuilding its RAVEN integration; it is not an additional setup step required
+to use the downloaded demo.
+
+The application needs a way to turn a request in the terminal into backend
+work, then bring the outcome back to the screen. We start with that connection,
+rather than the terminal layout. Textual supplies the controls; RAVEN supplies
+the knowledge base, models, conversations, agent execution, and persistence.
+
+For a concrete first feature, we build the connection for **creating a knowledge**.
+It establishes the pattern we will reuse for ingestion and chat:
+
+1. The interface collects the inputs.
+2. An application-side adapter calls the corresponding `Raven` method.
+3. RAVEN performs the work and exposes its result and, for operation-backed
+   work, its events.
+4. The interface renders those outputs without implementing the backend itself.
+
+The excerpts below are taken from the downloaded `tui_example/` source.
+Methods belong to their named classes and use that file's imports and
+surrounding definitions; they are not separate scripts. Repeated class declarations
+identify the owner of each excerpt: the methods belong to a single class in the
+corresponding file, not separate class definitions to add repeatedly. The expandable
+complete-file panels provide the surrounding context. They show the finished
+application, including features we will build in later sections.
+
+### 3.1 Giving the application one RAVEN instance
+
+We create an application-side adapter in `raven_client.py`. Its first
+responsibility is to hold the backend instance that subsequent actions will use:
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename">raven_client.py</figcaption>
+
+```python
+class RavenClient:
+
+    def __init__(self, home: Path) -> None:
+        self.home = home
+        self.raven: Raven | None = None
+
+
+    async def start(self) -> None:
+        # Import the model/document dependencies without freezing the UI.
+        module = await asyncio.to_thread(import_module, "nraven")
+        self.raven = module.Raven(self.home)
+        await self.raven.start()
+
+
+    async def close(self) -> None:
+        if self.raven is not None:
+            await self.raven.close()
+```
+
+</figure>
+
+The module imports `asyncio`, `Path` from `pathlib`, and `import_module`
+from `importlib`. It uses postponed annotations and imports `Raven` under
+`TYPE_CHECKING` for its type annotation; the actual backend import happens in
+`start()`.
+
+`module.Raven(self.home)` constructs the high-level API. `await self.raven.start()`
+starts its owned backend resources. Later calls use this same instance, and
+`close()` releases it when the application exits. Starting RAVEN does not
+configure the models; that will be a separate action.
+
+This adapter is named `RavenClient`, but it is **not an HTTP client**.
+Everything runs in one Python process. The adapter is optional application glue:
+it gives the TUI a small interface for calling RAVEN and preparing display data.
+It neither owns a second knowledge database nor replaces RAVEN's managers.
+
+In `app.py`, we anchor the home beside the application:
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename">app.py</figcaption>
+
+```python
+RAVEN_HOME = Path(__file__).resolve().parent / "raven_home"
+```
+
+</figure>
+
+That location is passed to `RavenClient`. The application will create the
+directory and call `start()` during startup. Section 4 will connect those
+lifecycle calls to the running interface, including readiness and shutdown.
+
+### 3.2 Passing form inputs to a RAVEN operation
+
+The creation form supplies two values: the knowledge's `name` and `summary`.
+We connect those inputs to RAVEN through this method in `RavenClient`:
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename">raven_client.py</figcaption>
+
+```python
+class RavenClient:
+
+    async def create_knowledge(self, name: str, summary: str) -> dict[str, Any]:
+        assert self.raven is not None
+        task = await self.raven.create_knowledge(name, summary)
+        knowledge = await task.result()
+        return knowledge.meta
+```
+
+</figure>
+
+The important boundary is the call to `self.raven.create_knowledge(name, summary)`.
+The adapter does not create directories, open Qdrant, or write metadata.
+RAVEN performs those tasks.
+
+This RAVEN method returns an `OperationTask`, not the knowledge itself.
+`await task.result()` waits for that task to finish and returns the created
+`Knowledge` object. If the task fails, awaiting its result raises the failure
+instead of returning a successful object.
+
+The adapter then returns `knowledge.meta`, the metadata dictionary needed by
+the interface. The knowledge object and its resources remain managed by
+RAVEN; the interface receives the information needed to display the outcome.
+
+We therefore preserve an important distinction when building around the API:
+**receiving a task is not confirmation that its work succeeded**.
+A success message must follow the confirmed result.
+
+### 3.3 Bringing the confirmed result back into the TUI
+
+Next, we connect the form to `RavenDemo`, which will pass its values to the
+adapter. When `/knowledges/create` is selected, `RavenDemo.submit_text()` mounts
+`CreateKnowledgeForm` in the transcript with
+`await chat.mount(CreateKnowledgeForm())`. The form is imported from
+`widgets.py`; it collects the name and optional summary but does not call RAVEN.
+
+We give the form a nested `Submitted` message to carry those values back to
+the application:
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename">widgets.py</figcaption>
+
+```python
+class CreateKnowledgeForm(Vertical):
+
+    class Submitted(Message):
+
+        def __init__(self, form: CreateKnowledgeForm, name: str, summary: str) -> None:
+            super().__init__()
+            self.form = form
+            self.name = name
+            self.summary = summary
+
+
+    @on(Input.Submitted, ".knowledge-summary")
+    @on(Button.Pressed, ".create-knowledge")
+    def submit(self, event: Input.Submitted | Button.Pressed) -> None:
+        event.stop()
+        name = self.query_one(".knowledge-name", Input).value.strip()
+        if (
+            not re.fullmatch(r"[A-Za-z0-9_-]+", name)
+            or not name.strip("_")
+            or name.strip("_").casefold() == "create"
+        ):
+            self.show_error("Use letters, numbers, _ or -. The name 'create' is reserved for the command.")
+            return
+        summary = self.query_one(".knowledge-summary", Input).value.strip()
+        self.post_message(self.Submitted(self, name, summary))
+```
+
+</figure>
+
+This excerpt shows the message definition and submission method from the same
+form class. Its input fields, error display, and imports are in the complete
+file below. `Message` comes from `textual.message`; `on`, `Input`, and
+`Button` provide the Textual event handlers shown here.
+
+Clicking **Create**, or pressing Enter in the summary field, invokes `submit()`.
+After checking the inputs, the form posts `Submitted(self, name, summary)`.
+The message carries three pieces of information: the originating `form`, the
+knowledge `name`, and the `summary`. Keeping the form reference lets the
+application disable it, display an error, or remove it after success.
+
+This is a **Textual UI message**, not a persisted RAVEN event. Because the form
+is mounted within `RavenDemo`, its message bubbles to the application. We connect
+it to a handler with `@on(CreateKnowledgeForm.Submitted)`:
+
+{% include source_file.html name="widgets.py" source="tui_example/widgets.py" language="python" id="complete-widgets-py" %}
+
+In `app.py`, we import `CreateKnowledgeForm` from `widgets`. The
+`create_knowledge()` handler below receives the posted message, checks backend
+readiness, marks the form busy, and schedules `save_knowledge()` as a managed
+Textual worker. That worker passes the submitted values to the adapter:
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename">app.py</figcaption>
+
+```python
+class RavenDemo(App[None]):
+
+    @on(CreateKnowledgeForm.Submitted)
+    def create_knowledge(self, event: CreateKnowledgeForm.Submitted) -> None:
+        event.stop()
+        if not self.backend_ready or self._backend_busy:
+            event.form.show_error("Please wait for RAVEN to finish its current action.")
+            return
+        self._backend_busy = True
+        event.form.set_busy(True)
+        event.form.show_error("")
+        self.query_one("#status", Static).update(f"Creating {event.name}…")
+        self.run_worker(self.save_knowledge(event), name="Create knowledge", group="backend")
+
+
+    async def save_knowledge(self, event: CreateKnowledgeForm.Submitted) -> None:
+        assert self.client is not None
+        chat = self.query_one("#chat", VerticalScroll)
+        try:
+            metadata = await self.client.create_knowledge(event.name, event.summary)
+            name = metadata["name"]
+            self._knowledge_names = [item["name"] for item in await self.client.list_knowledges()]
+            details = await self.client.knowledge_details(name)
+            await event.form.remove()
+            await chat.mount(ChatMessage("Created", f"Knowledge '{name}' was saved."))
+            await chat.mount(KnowledgeDetails(details))
+            self.query_one("#status", Static).update("Knowledge created · /knowledges to browse")
+            self.query_one("#message", PromptEditor).focus()
+        except Exception as error:
+            event.form.show_error(str(error))
+            self.query_one("#status", Static).update("Knowledge creation failed · Edit the name or cancel")
+        finally:
+            self._backend_busy = False
+            if event.form.is_mounted:
+                event.form.set_busy(False)
+            chat.scroll_end(animate=False)
+```
+
+</figure>
+
+`event.name` and `event.summary` are the values collected by the form.
+After `self.client.create_knowledge()` returns, the worker has confirmed metadata,
+not a guessed outcome. It uses the returned name to request the current
+knowledge list and file details, then displays those backend records.
+
+`ChatMessage` and `KnowledgeDetails` are display components from the demo.
+Their role here is to present the confirmation and details; neither creates
+the knowledge. If the call raises an exception, the form displays the error
+and remains available for correction. The `finally` block restores the
+interface's busy state.
+
+The data flow is therefore:
+
+**Form inputs → Textual `Submitted` message → `RavenDemo` handler and worker →
+adapter → RAVEN operation task → knowledge metadata → refreshed list and details.**
+
+We ask RAVEN for the refreshed state through the interface. The interface does not
+assume that a button click changed the database, or read RAVEN's storage files
+to discover what happened.
+
+{% include source_file.html name="app.py" source="tui_example/app.py" language="python" id="complete-app-py" %}
+
+### 3.4 Adding progress without replacing the result
+
+Knowledge creation needs little progress display, but document ingestion may
+take much longer. We keep the same request/result boundary and add an event path
+alongside it.
+
+In `RavenClient`, we add an `ingest()` method that checks model readiness,
+validates the source path, and consumes the RAVEN operation:
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename">raven_client.py</figcaption>
+
+```python
+class RavenClient:
+
+    async def ingest(
+        self,
+        knowledge_name: str,
+        source_path: str,
+        on_progress: Callable[[str, str], Awaitable[None]],
+    ) -> dict[str, Any]:
+        from nraven.core.events import EventType
+
+        if not self.models_ready:
+            raise RuntimeError("Configure both models with /models/configure before ingestion.")
+        assert self.raven is not None
+        text = source_path.strip()
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+            text = text[1:-1]
+
+        def validate_path() -> Path:
+            path = Path(text).expanduser().resolve()
+            if not path.is_file():
+                raise FileNotFoundError(f"Source file '{path}' was not found.")
+            if path.suffix.lower() not in {".txt", ".md", ".pdf", ".docx"}:
+                raise ValueError("This demo accepts .txt, .md, .pdf, and .docx files.")
+            return path
+
+        path = await asyncio.to_thread(validate_path)
+        task = await self.raven.ingest(knowledge_name, path)
+        try:
+            async for event in task.events():
+                if event.type == EventType.INGESTION_PROGRESS:
+                    await on_progress(str(event.data.get("stage", "ingestion")), ingestion_progress_text(event.data))
+            return await task.result()
+        except BaseException:
+            if not task.is_finished:
+                await task.cancel()
+            raise
+```
+
+</figure>
+
+Here, `knowledge_name` is the target, `path` is the validated source file,
+`EventType` comes from `nraven.core.events`, and `on_progress` is an async
+callback supplied by the application. `ingestion_progress_text()`, defined in
+the same adapter file, formats the event's stage and counts for display.
+
+Two outputs now travel back from RAVEN:
+
+- **Events** describe work while it happens. The adapter forwards
+  `INGESTION_PROGRESS` as stage-specific display updates.
+- **The task result** confirms the outcome. After consuming the events,
+  `await task.result()` returns the ingestion result or raises the failure.
+
+These are not interchangeable. A progress event is not proof that the whole
+ingestion succeeded, and the final result does not replace live feedback.
+
+In `RavenDemo.save_ingestion()`, we connect that callback to the visible progress
+component. The method creates and mounts an `IngestionProgress` view, while
+`event` carries the submitted knowledge name and source path:
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename">app.py</figcaption>
+
+```python
+class RavenDemo(App[None]):
+
+    async def save_ingestion(self, event: IngestionForm.Submitted) -> None:
+        assert self.client is not None
+        chat = self.query_one("#chat", VerticalScroll)
+        progress = IngestionProgress()
+        try:
+            await chat.mount(progress)
+            chat.scroll_end(animate=False)
+            self.query_one("#status", Static).update("Ingestion starting… · Stop ingestion to cancel")
+
+            async def show_progress(stage: str, text: str) -> None:
+                progress.update_progress(stage, text)
+                self.query_one("#status", Static).update(text)
+
+            result = await self.client.ingest(event.knowledge_name, event.source_path, show_progress)
+        except asyncio.CancelledError:
+            if self.is_running and progress.is_attached:
+                progress.finish("Ingestion stopped. The file list below reflects any completed writes.")
+                self.query_one("#status", Static).update("Ingestion stopped · You can edit the form and try again")
+                await self.refresh_ingestion_details(event.knowledge_name)
+            raise
+        except Exception as error:
+            if self.is_running and progress.is_attached:
+                progress.finish(f"Ingestion failed: {error}")
+                event.form.show_error(str(error))
+                self.query_one("#status", Static).update("Ingestion failed · Edit the path or cancel")
+        else:
+            progress.finish(
+                f"Ingested {result['file']} into {event.knowledge_name} · "
+                f"{result['section_count']} sections · {result['chunk_count']} chunks"
+            )
+            await event.form.remove()
+            refreshed = await self.refresh_ingestion_details(event.knowledge_name)
+            self.query_one("#status", Static).update(
+                "Ingestion completed · File details refreshed below" if refreshed
+                else "Ingestion completed · File refresh failed; use /knowledges to check"
+            )
+            self.query_one("#message", PromptEditor).focus()
+        finally:
+            self._backend_busy = False
+            self._ingestion_worker = None
+            if event.form.is_attached:
+                event.form.set_busy(False)
+            if progress.is_attached:
+                progress.query_one(".ingestion-spinner").display = False
+                progress.query_one(".stop-ingestion", Button).disabled = True
+            if self.is_running:
+                chat.scroll_end(animate=False)
+```
+
+</figure>
+
+The callback runs whenever the adapter forwards a relevant event. It updates
+the stage display and status line; it does not parse the document, split
+sections, generate embeddings, or write vectors. Those remain RAVEN's work.
+The handler displays success only after `ingest()` returns, or reports
+failure/cancellation. Section 6 will connect this method to the ingestion form
+and examine the document workflow in detail.
+
+The adapter's exception path also forwards cancellation to an unfinished
+RAVEN task before propagating the exception. Cancelling a UI worker must not
+silently leave the backend operation running.
+
+{% include source_file.html name="raven_client.py" source="tui_example/raven_client.py" language="python" id="complete-raven-client-py" %}
+
+### 3.5 Reusing the boundary for the remaining features
+
+The rest of the application follows the same division of responsibility.
+The form or message box changes; the backend remains behind the `Raven` API.
+
+| Interface action | Information sent to RAVEN | Information returned to the interface |
+| --- | --- | --- |
+| Configure models | LLM and embedding `ModelSpec` values | Configuration events and the confirmed task result. |
+| Ingest a document | Knowledge name and local source path | Stage progress and the final ingestion result. |
+| Open a conversation | Conversation ID | Conversation metadata and canonical saved messages, rather than compacted model context. |
+| Send a question | A temporary session over the active conversation, the query, and `retrieval_mode="auto"` | Separate thinking, tool-activity, and answer events, followed by the collected run result. |
+| Inspect an answer's sources | Conversation ID and turn ID | A saved reconstruction, or reconstructed files from that turn's evidence. |
+
+Chat will use `run.stream` and `run.collect()` rather than the ingestion
+task's `events()` and `result()` calls. The integration principle stays the
+same: we display live events, then confirm completion through the corresponding
+result API. The chat section will also distinguish answer generation from
+successful turn persistence.
+
+No part of this arrangement requires the interface to implement a retrieval
+pipeline or an agent loop. The interface supplies inputs and presents outputs;
+RAVEN manages the work between them. With that boundary established, the next
+step is to connect backend startup and shutdown to the application lifecycle.

@@ -164,6 +164,95 @@ a:focus-visible {
   color: var(--site-link);
 }
 
+.markdown-body .code-snippet {
+  position: relative;
+  min-width: 0;
+  margin: 0 0 16px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--site-hover);
+}
+
+.markdown-body .code-snippet-filename {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  z-index: 1;
+  margin: 0;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--site-hover);
+  color: var(--site-muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: right;
+  pointer-events: none;
+  user-select: none;
+}
+
+.markdown-body .code-snippet > div,
+.markdown-body .code-snippet pre {
+  margin: 0;
+  border-radius: 0;
+}
+
+.markdown-body .code-snippet pre,
+.markdown-body .source-file-content pre {
+  padding-top: 32px;
+}
+
+.markdown-body .source-file-code {
+  position: relative;
+}
+
+.markdown-body .source-file {
+  min-width: 0;
+  margin-block: 20px 32px;
+  border: 1px solid var(--site-border);
+  border-radius: 8px;
+  background: var(--site-background);
+}
+
+.markdown-body .source-file > summary {
+  padding: 14px 16px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.markdown-body .source-file > summary:hover {
+  background: var(--site-hover);
+}
+
+.markdown-body .source-file > summary:focus-visible,
+.markdown-body .source-file-content:focus-visible {
+  outline: 2px solid var(--site-link);
+  outline-offset: 3px;
+}
+
+.markdown-body .source-file[open] > summary {
+  border-bottom: 1px solid var(--site-border);
+}
+
+.markdown-body .source-file-content {
+  max-height: 32rem;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border-radius: 0 0 8px 8px;
+}
+
+.markdown-body .source-file-content .highlight,
+.markdown-body .source-file-content pre {
+  margin: 0;
+  border-radius: 0;
+}
+
+.markdown-body .source-file-content pre {
+  width: max-content;
+  min-width: 100%;
+  overflow: visible;
+}
+
 .markdown-body h1,
 .markdown-body h2,
 .markdown-body h3,
