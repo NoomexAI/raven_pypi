@@ -1,7 +1,7 @@
 <details class="source-file" id="{{ include.id | escape }}">
   <summary>Show complete <code>{{ include.name | escape }}</code></summary>
   <div class="source-file-code">
-  <div class="code-snippet-filename">{{ include.name | escape }}</div>
+  <div class="code-snippet-filename"><a href="#{{ include.id | escape }}">{{ include.name | escape }}</a></div>
   <div class="source-file-content" role="region" aria-label="Complete {{ include.name | escape }} source" tabindex="0">
 {% if include.language == 'css' %}
 {% highlight css %}{% include {{ include.source }} %}{% endhighlight %}

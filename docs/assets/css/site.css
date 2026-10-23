@@ -197,6 +197,10 @@ a:focus-visible {
   border-radius: 0;
 }
 
+.markdown-body .code-snippet-filename a {
+  pointer-events: auto;
+}
+
 .markdown-body .code-snippet pre,
 .markdown-body .source-file-content pre {
   padding-top: 32px;
@@ -208,6 +212,7 @@ a:focus-visible {
 
 .markdown-body .source-file {
   min-width: 0;
+  scroll-margin-top: 24px;
   margin-block: 20px 32px;
   border: 1px solid var(--site-border);
   border-radius: 8px;
