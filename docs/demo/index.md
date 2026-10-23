@@ -2012,3 +2012,1135 @@ ingestion task → stage updates → confirmed result → refreshed persisted st
 We have connected document management without reproducing RAVEN's ingestion
 pipeline in the application. Next, we will connect a conversation to the
 configured backend and stream an answer based on the ingested material.
+
+## 7. Connecting conversations to streamed chat
+
+A knowledge holds the documents; a conversation holds an interaction with the
+assistant. We now connect the message box to that persistent conversation,
+letting RAVEN manage context, tool use, response generation, and turn
+persistence while the TUI presents the work as it happens.
+
+We keep three objects distinct:
+
+- The **conversation** is the persistent record: identity, scope, messages, and
+  conversation memory.
+- A **session** is a temporary interaction medium over that conversation.
+  In this demo, we create one for each submitted question and close it afterward.
+- [`StreamingResponse`](#complete-chat-widgets-py "chat_widgets.py") is a temporary view of one turn. Its text buffers and
+  activity labels are not the conversation database.
+
+That separation lets us reopen a conversation without restarting an agent,
+and send a follow-up without keeping an old session alive.
+
+### 7.1 Creating a conversation with optional knowledge scope
+
+We begin with [`CreateConversationForm`](#complete-conversation-widgets-py "conversation_widgets.py") from [`conversation_widgets.py`](#complete-conversation-widgets-py "conversation_widgets.py").
+[`RavenDemo.show_conversation_route()`](#complete-app-py "app.py") mounts it when
+`/conversations/create` is selected, supplying the current knowledge names.
+
+The form defaults to **Global · All knowledges**. Selecting a knowledge creates
+a local conversation restricted to it; leaving the default creates a global
+conversation without a knowledge binding. A knowledge is not mandatory for
+creating a conversation, and neither creation nor history browsing requires
+configured models.
+
+The form converts its selection into a Textual message:
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename"><a href="#complete-conversation-widgets-py">conversation_widgets.py</a></figcaption>
+
+```python
+class CreateConversationForm(Vertical):
+
+    class Submitted(Message):
+
+        def __init__(self, form: CreateConversationForm, knowledge_name: str | None) -> None:
+            super().__init__()
+            self.form = form
+            self.knowledge_name = knowledge_name
+
+
+    @on(Button.Pressed, ".create-conversation")
+    def submit(self, event: Button.Pressed) -> None:
+        event.stop()
+        knowledge = self.query_one(Select).value
+        self.post_message(self.Submitted(self, knowledge if isinstance(knowledge, str) and knowledge else None))
+```
+
+</figure>
+
+The global option has an empty-string value in the selection control.
+[`CreateConversationForm.submit()`](#complete-conversation-widgets-py "conversation_widgets.py") converts that value to `None`; a selected
+knowledge remains its name. The message carries the form and that optional
+name, rather than asking the TUI to infer scope later.
+
+The form's controls, imports, and the conversation history view are available
+in the complete module:
+
+{% include source_file.html name="conversation_widgets.py" source="tui_example/conversation_widgets.py" language="python" id="complete-conversation-widgets-py" %}
+
+We connect its message to [`RavenDemo`](#complete-app-py "app.py") in [`app.py`](#complete-app-py "app.py"):
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename"><a href="#complete-app-py">app.py</a></figcaption>
+
+```python
+class RavenDemo(App[None]):
+
+    @on(CreateConversationForm.Submitted)
+    def create_conversation(self, event: CreateConversationForm.Submitted) -> None:
+        event.stop()
+        if not self.backend_ready or self._backend_busy:
+            event.form.show_error("Please wait for RAVEN to finish its current action.")
+            return
+        self._backend_busy = True
+        event.form.set_busy(True)
+        event.form.show_error("")
+        self.query_one("#status", Static).update("Creating conversation…")
+        self.run_worker(self.save_conversation(event), name="Create conversation", group="backend")
+
+
+    async def save_conversation(self, event: CreateConversationForm.Submitted) -> None:
+        assert self.client is not None
+        try:
+            metadata = await self.client.create_conversation(event.knowledge_name)
+        except Exception as error:
+            event.form.show_error(str(error))
+            self.query_one("#status", Static).update("Conversation creation failed · Try again or cancel")
+        else:
+            await event.form.remove()
+            try:
+                await self.display_conversation(metadata["conversation_id"])
+                self.query_one("#status", Static).update("Conversation created and opened · Configure models, then ask a question")
+            except Exception as error:
+                await self.query_one("#chat", VerticalScroll).mount(ChatMessage(
+                    "Open error", f"Conversation {metadata['conversation_id']} was created, "
+                    f"but could not be opened: {error}. Use /conversations to try again.",
+                ))
+                self.query_one("#status", Static).update("Conversation saved · Opening failed; previous selection is unchanged")
+        finally:
+            self._backend_busy = False
+            if event.form.is_attached:
+                event.form.set_busy(False)
+            if self.is_running:
+                self.query_one("#chat", VerticalScroll).scroll_end(animate=False)
+```
+
+</figure>
+
+The handler checks readiness and schedules [`RavenDemo.save_conversation()`](#complete-app-py "app.py")
+with the submitted message. Its adapter call is:
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename"><a href="#complete-raven-client-py">raven_client.py</a></figcaption>
+
+```python
+class RavenClient:
+
+    async def create_conversation(self, knowledge_name: str | None = None) -> dict[str, Any]:
+        assert self.raven is not None
+        task = await self.raven.create_conversation(knowledge_name)
+        try:
+            conversation = await task.result()
+            return conversation.to_dict()
+        except BaseException:
+            if not task.is_finished:
+                await task.cancel()
+            raise
+```
+
+</figure>
+
+`Raven.create_conversation()` supplies an operation task. We await its result
+and return metadata from the created conversation. The UI then opens that
+conversation using the returned ID.
+
+Creation and opening are separate outcomes. If creation succeeds but reading
+the new conversation fails, [`RavenDemo.save_conversation()`](#complete-app-py "app.py") reports that it
+was saved and keeps the previous selection. It does not encourage creating
+another conversation merely because the view could not be opened.
+
+### 7.2 Opening canonical history, not the model's compacted context
+
+We make saved conversations discoverable through `/conversations`.
+[`ConversationList`](#complete-conversation-widgets-py "conversation_widgets.py") displays each title, scope, and a shortened ID, while its
+selectable option carries the full `/conversations/<id>` path.
+[`RavenDemo.open_conversation()`](#complete-app-py "app.py") sends a selected path through the same router
+as a typed command.
+
+In the adapter, listing is a metadata read. Opening also retrieves the
+conversation object and its saved messages:
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename"><a href="#complete-raven-client-py">raven_client.py</a></figcaption>
+
+```python
+class RavenClient:
+
+    def list_conversations(self) -> list[dict[str, Any]]:
+        assert self.raven is not None
+        return sorted(
+            self.raven.list_conversations(),
+            key=lambda item: (item["created_at"], item["conversation_id"]),
+            reverse=True,
+        )
+
+
+    async def open_conversation(self, conversation_id: str) -> dict[str, Any]:
+        assert self.raven is not None
+        conversation = self.raven.get_conversation(conversation_id)
+        records = []
+        cursor = 0
+        while True:
+            page = await self.raven.get_conversation_messages_page(
+                conversation_id, limit=100, after_message_id=cursor,
+            )
+            records.extend(page)
+            if len(page) < 100:
+                break
+            cursor = page[-1]["message_id"]
+        turns: dict[str, dict[str, Any]] = {}
+        for record in records:
+            turn = turns.setdefault(record["turn_id"], {
+                "turn_id": record["turn_id"], "messages": [], "has_sources": False,
+            })
+            turn["messages"].append(record["message"])
+            turn["has_sources"] |= message_has_sources(record["message"])
+        return {
+            "conversation": conversation,
+            "metadata": conversation.to_dict(),
+            "messages": [record["message"] for record in records],
+            "turns": list(turns.values()),
+        }
+```
+
+</figure>
+
+The message API returns bounded pages of **canonical, uncompacted history**.
+We request 100 records at a time and advance `after_message_id` to the last
+record read. We continue until a shorter page is returned, so a conversation
+with more than 100 messages does not silently lose its older or newer turns
+from the interface.
+
+We group those records by `turn_id`. This keeps a user message, tool exchange,
+assistant answer, and any source action associated with the same turn.
+[`message_has_sources()`](#complete-raven-client-py "raven_client.py") checks saved tool evidence for the source controls;
+Section 8 will explain that check.
+
+[`ConversationHistory`](#complete-conversation-widgets-py "conversation_widgets.py") renders the user and assistant messages. Saved tool
+calls and results appear as compact activity labels rather than dumping full
+tool payloads into the transcript. The model-facing compacted summary is not
+substituted for the messages the reader originally saw. RAVEN manages that
+summary and vector memory separately when preparing a turn.
+
+We attach the loaded data to the active UI state only after the read succeeds:
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename"><a href="#complete-app-py">app.py</a></figcaption>
+
+```python
+class RavenDemo(App[None]):
+
+    async def display_conversation(self, conversation_id: str) -> None:
+        """Read first; only replace the active view when loading succeeds."""
+        assert self.client is not None
+        opened = await self.client.open_conversation(conversation_id)
+        chat = self.query_one("#chat", VerticalScroll)
+        await chat.query(".chat-message").remove()
+        await chat.mount(ConversationHistory(opened["metadata"], opened["messages"], opened.get("turns")))
+        self.active_conversation = opened["conversation"]
+        self.conversation_knowledge = opened["metadata"]["knowledge_name"]
+        self.update_conversation_header(opened["metadata"])
+        self.query_one("#message", PromptEditor).focus()
+```
+
+</figure>
+
+[`RavenDemo.display_conversation()`](#complete-app-py "app.py") first awaits the adapter, then replaces
+the current transcript and updates the active conversation object and scope.
+A failed backend read therefore does not first discard the previous view.
+
+The selected conversation supplies the scope for later chat and Attach
+actions. Browsing another knowledge does not change it, and reopening a
+conversation does not run the LLM.
+
+### 7.3 Accepting a question without losing a rejected draft
+
+For ordinary input, [`RavenDemo.submit_text()`](#complete-app-py "app.py") calls
+[`RavenDemo.request_response()`](#complete-app-py "app.py") rather than routing a slash command.
+We check the conditions for accepting the turn before clearing the editor:
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename"><a href="#complete-app-py">app.py</a></figcaption>
+
+```python
+class RavenDemo(App[None]):
+
+    async def request_response(self, query: str) -> None:
+        assert self.client is not None
+        reason = None
+        if not self.backend_ready:
+            reason = "RAVEN is not ready yet. Check the startup status."
+        elif self._backend_busy:
+            reason = "A backend action is still running. Wait or stop the current response first."
+        elif self.active_conversation is None:
+            reason = "Open a conversation with /conversations or create one with /conversations/create."
+        elif not self.client.models_ready:
+            reason = "Configure both models with /models/configure before chatting."
+        chat = self.query_one("#chat", VerticalScroll)
+        self.query_one("#welcome").display = False
+        if reason is not None:
+            await chat.mount(ChatMessage("Cannot send", reason))
+            self.query_one("#status", Static).update("Message not sent · Your draft is unchanged")
+            chat.scroll_end(animate=False)
+            return
+
+        self._backend_busy = True
+        self.dismiss_command_menu()
+        self.query_one("#message", PromptEditor).load_text("")
+        for notice in self.query(".empty-history"):
+            notice.display = False
+        await chat.mount(ChatMessage("You", query))
+        response = StreamingResponse()
+        await chat.mount(response)
+        self._chat_worker = self.run_worker(self.generate_response(query, response), name="Chat turn", group="backend")
+        self._chat_stopping = False
+        button = self.query_one("#send", Button)
+        button.label = "Stop"
+        button.tooltip = "Stop the active response"
+        button.disabled = False
+        self.query_one("#ingest", Button).disabled = True
+        self.query_one("#status", Static).update("Preparing conversation… · Retrieval: auto")
+        chat.scroll_end(animate=False)
+```
+
+</figure>
+
+If startup is incomplete, another action is running, no conversation is open,
+or the model pair is missing, the request is rejected with an explanation.
+The draft remains in the editor.
+
+Once accepted, we echo the user text, mount a [`StreamingResponse`](#complete-chat-widgets-py "chat_widgets.py"), and start
+[`RavenDemo.generate_response()`](#complete-app-py "app.py") as a managed worker. We also change Send to
+Stop and disable Attach until the action ends.
+
+This is the demo's one-action policy, not a limitation on RAVEN's ability to
+serve independent conversations. It prevents a conversation switch or another
+backend action from making this single transcript ambiguous while a turn runs.
+
+### 7.4 Running a temporary session over the selected conversation
+
+The worker passes the active conversation and query to
+[`RavenClient.generate_response()`](#complete-raven-client-py "raven_client.py"). The adapter creates a temporary session
+through the same `Raven` instance used elsewhere:
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename"><a href="#complete-raven-client-py">raven_client.py</a></figcaption>
+
+```python
+class RavenClient:
+
+    async def generate_response(
+        self,
+        conversation: Conversation,
+        query: str,
+        on_event: Callable[[Event], Awaitable[None]],
+    ) -> AgentRunResult:
+        """Use a temporary session; RAVEN owns generation and turn persistence."""
+        if not self.models_ready:
+            raise RuntimeError("Configure both models with /models/configure before chatting.")
+        assert self.raven is not None
+        session = self.raven.session(conversation)
+        run = None
+        try:
+            await session.start()
+            run = await session.generate_response(query, retrieval_mode="auto")
+            async for event in run.stream:
+                await on_event(event)
+            # chat.completed is not enough: the parent session still saves the turn.
+            return await run.collect()
+        except BaseException:
+            if run is not None and not run.task.is_finished:
+                await run.cancel()
+            raise
+        finally:
+            await session.close()
+```
+
+</figure>
+
+The `Conversation` and event/result types used in this signature come from
+RAVEN, with imports identified in the complete adapter module.
+`session.start()` opens the conversation for this interaction;
+`session.generate_response()` starts a turn and returns its run handle.
+
+We use `retrieval_mode="auto"` because the demo has no retrieval-mode selector.
+RAVEN exposes the tools permitted by the conversation scope, and the model
+decides whether to answer directly or use tools in sequence. Local conversations
+remain restricted to their knowledge. Global conversations can use global
+retrieval or target a particular knowledge through local retrieval tools.
+
+The TUI does not implement a query classifier or a
+query → retrieval → answer loop. It submits the question and consumes the
+agent's events. A follow-up may use conversation memory without retrieving the
+same document again; that choice belongs to the running agent.
+
+Each event from `run.stream` is passed to an async UI callback. After the
+stream, `run.collect()` awaits the complete session task and returns its
+collected result. It does not start generation a second time.
+
+The `finally` block closes the temporary session on success, failure, or
+cancellation. That does not delete the conversation, close the application's
+`Raven` instance, or require the next turn to start a new conversation.
+The next question creates a fresh session over the same persistent object.
+
+### 7.5 Keeping thinking, tools, and answer text separate
+
+We project backend events into the response view through
+[`StreamingResponse.apply_event()`](#complete-chat-widgets-py "chat_widgets.py") from [`chat_widgets.py`](#complete-chat-widgets-py "chat_widgets.py").
+The view keeps separate state for answer text, thinking, and tool activity:
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename"><a href="#complete-chat-widgets-py">chat_widgets.py</a></figcaption>
+
+```python
+class StreamingResponse(Vertical):
+
+    def __init__(self) -> None:
+        super().__init__(classes="chat-message streaming-response")
+        self.response = ""
+        self.thinking = ""
+        self.tool_activity: dict[str, str] = {}
+        self.tool_names: list[str] = []
+        self.event_types: list[str] = []
+        self.turn_id: str | None = None
+        self.has_sources = False
+
+
+    def apply_event(self, event: Event) -> str | None:
+        """Project only UI-relevant events; never display raw retrieval contexts."""
+        kind, data = event.type.value, event.data
+        if kind not in self.event_types:
+            self.event_types.append(kind)
+        status = None
+        if kind == "chat.thinking_delta":
+            self.thinking += str(data.get("delta") or "")
+            self.query_one(".thinking-text", Static).update(self.thinking)
+            self.query_one(".chat-thinking").display = bool(self.thinking)
+            status = "Thinking…"
+        elif kind == "chat.response_delta":
+            self.response += str(data.get("delta") or "")
+            self.query_one(".response-text", Static).update(self.response)
+            status = "Responding…"
+        elif kind in {"chat.tool_call", "chat.tool_result"}:
+            call_id = str(data.get("call_id") or data.get("name") or "tool")
+            name = str(data.get("name") or "tool")
+            if kind == "chat.tool_call":
+                self.tool_names.append(name)
+                text = f"{data.get('step', '?')}. {name} · running"
+            else:
+                state = "done" if data.get("ok") is True else "failed (agent may recover)"
+                text = f"{data.get('step', '?')}. {name} · {state}"
+                if data.get("ok") is True and data.get("evidence"):
+                    self.has_sources = True
+            self.tool_activity[call_id] = text
+            self.query_one(".tool-activity", Static).update("\n".join(self.tool_activity.values()))
+            self.query_one(".tool-activity").display = True
+            status = f"Using {name}…" if kind == "chat.tool_call" else "Tool returned · Agent continuing…"
+        elif kind == "conversation.memory_compaction.started":
+            status = "Compacting conversation context…"
+        elif kind == "conversation.memory_compaction.completed":
+            status = "Context compacted · Agent continuing…"
+        elif kind == "chat.max_iterations":
+            status = "Tool-step limit reached · Waiting for the final answer…"
+        elif kind.startswith("reconstruction."):
+            status = "Reconstructing sources…"
+        elif kind == "chat.completed":
+            status = "Answer generated · Saving turn…"
+        elif kind in {"conversation.turn_commit.completed", "conversation.turn_commit.reused"}:
+            self.turn_id = str(data["turn_id"])
+            status = "Turn committed · Finishing memory and title updates…"
+        if status is not None:
+            self.query_one(".response-outcome", Static).update(status)
+        return status
+```
+
+</figure>
+
+These methods use the controls defined by the same class in the full file.
+The relevant mapping is:
+
+| RAVEN event | Visible meaning |
+| --- | --- |
+| `chat.thinking_delta` | Append thinking text to its own collapsible view when supplied by the model/provider. |
+| `chat.response_delta` | Append answer text independently of thinking and tool activity. |
+| `chat.tool_call` and `chat.tool_result` | Update a tool entry using its correlation ID, step, name, and outcome. |
+| `conversation.memory_compaction.started` and `conversation.memory_compaction.completed` | Explain that RAVEN is preparing a compacted context rather than leaving an unexplained wait. |
+| `chat.max_iterations` | Report the tool-step limit while waiting for RAVEN's final outcome. |
+| `reconstruction.*` | Indicate that supporting material is being reconstructed. |
+| `chat.completed` | The answer was generated; the session may still be saving the turn. |
+| `conversation.turn_commit.completed` or `conversation.turn_commit.reused` | Capture the durable turn ID while the session finishes its remaining work. |
+
+Not every turn emits every event. Thinking depends on the model and provider,
+casual questions may use no tools, and compaction occurs only when needed.
+
+We correlate a tool result with its call rather than presenting it as unrelated
+text. A failed tool result is shown as a failure the agent may recover from;
+it is not automatically treated as failure of the entire turn. The view does
+not print raw retrieved contexts, even though the backend supplies the model
+with the material needed to answer.
+
+{% include source_file.html name="chat_widgets.py" source="tui_example/chat_widgets.py" language="python" id="complete-chat-widgets-py" %}
+
+### 7.6 Confirming the saved turn before showing success
+
+The application worker connects that event renderer to the adapter:
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename"><a href="#complete-app-py">app.py</a></figcaption>
+
+```python
+class RavenDemo(App[None]):
+
+    async def generate_response(self, query: str, response: StreamingResponse) -> None:
+        assert self.client is not None and self.active_conversation is not None
+        conversation = self.active_conversation
+        chat = self.query_one("#chat", VerticalScroll)
+        try:
+            async def show_event(event: Event) -> None:
+                follow = chat.is_vertical_scroll_end
+                status = response.apply_event(event)
+                if status is not None:
+                    self.query_one("#status", Static).update(status)
+                if follow:
+                    chat.scroll_end(animate=False)
+
+            result = await self.client.generate_response(conversation, query, show_event)
+            response.finish("Saved to conversation", response=result.response)
+            cached_files = getattr(result, "reconstructed_sources", None)
+            if response.turn_id and (response.has_sources or getattr(result, "evidence", None) or cached_files):
+                await response.mount(SourceButton(conversation.conversation_id, response.turn_id, cached_files))
+            self.query_one("#status", Static).update("Ready · Turn saved · Ask a follow-up")
+        except asyncio.CancelledError:
+            if self.is_running and response.is_attached:
+                response.finish("Stopped · Displayed text may be incomplete. Reopen the conversation to inspect saved turns.")
+                self.query_one("#status", Static).update("Response stopped · You can send another message")
+            raise
+        except Exception as error:
+            if self.is_running and response.is_attached:
+                response.finish(f"Failed: {error}\nDisplayed text may be incomplete; reopen the conversation to inspect saved turns.")
+                self.query_one("#status", Static).update("Chat failed · You can try again")
+        finally:
+            self._backend_busy = False
+            self._chat_worker = None
+            self._chat_stopping = False
+            if self.is_running:
+                self.update_conversation_header(conversation.to_dict())
+                button = self.query_one("#send", Button)
+                button.label = "Send"
+                button.tooltip = "Send message"
+                button.disabled = not self.query_one("#message", PromptEditor).text.strip()
+                self.query_one("#ingest", Button).disabled = False
+```
+
+</figure>
+
+The nested [`show_event()`](#complete-app-py "app.py") callback sends events to
+[`StreamingResponse.apply_event()`](#complete-chat-widgets-py "chat_widgets.py") and updates the status line when that method
+returns a status. It follows the transcript's end only when the reader was
+already at the end, rather than forcing the view downward while earlier text
+is being inspected.
+
+There are two completion boundaries:
+
+1. **Answer generation.** `chat.completed` means that the agent has produced
+   its result. The response view still says that the turn is being saved.
+2. **The complete session result.** The adapter returns only after
+   `run.collect()` succeeds and its temporary session is closed. We then call
+   [`StreamingResponse.finish()`](#complete-chat-widgets-py "chat_widgets.py") with the confirmed answer and display
+   **Saved to conversation**.
+
+RAVEN's session, not the TUI callback, persists the turn's messages and result.
+This includes the tool exchange needed for future context. We do not append a
+second copy of the user and assistant messages from the UI.
+
+The backend also handles the initial title-generation attempt. After the
+worker ends, [`RavenDemo.update_conversation_header()`](#complete-app-py "app.py") reads the conversation's
+current metadata so an updated title can replace the initial label. Title
+generation can fail independently of an already saved turn; the TUI does not
+generate its own competing title.
+
+When a saved turn has source evidence or a cached reconstruction, the worker
+can mount a [`SourceButton`](#complete-source-widgets-py "source_widgets.py") with its conversation and turn IDs. A casual answer
+without section evidence does not need one. The complete source-control file
+is available below; Section 8 will trace the inspection and rebuilding paths.
+
+{% include source_file.html name="source_widgets.py" source="tui_example/source_widgets.py" language="python" id="complete-source-widgets-py" %}
+
+### 7.7 Stopping a response without claiming its draft was saved
+
+Send becomes Stop while `self._chat_worker` refers to an active turn.
+[`RavenDemo.send_or_stop()`](#complete-app-py "app.py") uses that state to decide which action applies:
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename"><a href="#complete-app-py">app.py</a></figcaption>
+
+```python
+class RavenDemo(App[None]):
+
+    @on(Button.Pressed, "#send")
+    async def send_or_stop(self) -> None:
+        if self._chat_worker is not None:
+            if not self._chat_stopping:
+                self._chat_stopping = True
+                self.query_one("#send", Button).disabled = True
+                self.query_one("#status", Static).update("Stopping response… · Waiting for safe cleanup")
+                self._chat_worker.cancel()
+        else:
+            await self.show_message()
+```
+
+</figure>
+
+Stop disables further Stop clicks and requests cancellation of the managed
+worker. In [`RavenClient.generate_response()`](#complete-raven-client-py "raven_client.py"), cancellation propagates through
+`run.cancel()` for an unfinished session task, and the session is closed in
+the `finally` block.
+
+The cancellation handler in [`RavenDemo.generate_response()`](#complete-app-py "app.py") leaves the
+displayed partial text visible but labels it **Stopped**, not **Saved to
+conversation**. Ordinary failures similarly mark the output as failed.
+A turn may already have committed before a late cancellation or failure, so
+the interface directs the reader to reopen the conversation to inspect the
+canonical saved state rather than guessing from the partial display.
+
+The worker's final cleanup restores Send, re-enables Attach, clears the busy
+flag, and refreshes the conversation header. Any new draft typed while the
+previous response was running remains in the editor.
+
+We now have the complete chat connection:
+
+**Selected conversation → accepted question → temporary session → agent
+events → separate live views → confirmed session result → saved conversation.**
+
+A follow-up uses that same conversation and its backend-managed memory,
+not a permanently running UI session. Next, we will connect each answer's
+source action to the right saved turn and inspect its reconstructed files.
+
+## 8. Attaching sources to the right answer
+
+An answer and its sources need a more durable connection than “the latest
+retrieval.” Another question may already have been asked when an earlier
+answer is inspected. The application may also have been closed and reopened.
+We therefore identify the sources by **conversation ID and turn ID**, rather
+than by the currently selected knowledge or the last tool call on screen.
+
+RAVEN provides the persisted turn and reconstruction machinery. The TUI adds
+the per-answer action, chooses between a saved snapshot and a rebuild, and
+renders the returned sections.
+
+### 8.1 Keeping a reference with each saved answer
+
+In Section 7, we waited for `run.collect()` before marking an answer saved.
+At that point, [`RavenDemo.generate_response()`](#complete-app-py "app.py")
+can attach a [`SourceButton`](#complete-source-widgets-py "source_widgets.py")
+to that answer. The button carries the two identifiers and, when available,
+the reconstruction already returned with the completed run:
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename"><a href="#complete-source-widgets-py">source_widgets.py</a></figcaption>
+
+```python
+class SourceButton(Button):
+
+    def __init__(
+        self,
+        conversation_id: str,
+        turn_id: str,
+        cached_files: list[dict[str, Any]] | None = None,
+    ) -> None:
+        super().__init__("View sources", classes="source-button", compact=True)
+        self.conversation_id = conversation_id
+        self.turn_id = turn_id
+        self.cached_files = cached_files
+```
+
+</figure>
+
+The cached files avoid another read for a newly completed answer. They are
+not the only copy of the source information: reopening a conversation uses
+its persisted messages and turn results.
+
+When restoring history, [`RavenClient.open_conversation()`](#complete-raven-client-py "raven_client.py")
+groups canonical messages by turn and checks each tool result with
+[`message_has_sources()`](#complete-raven-client-py "raven_client.py"). We
+check the evidence itself, not whether a familiar retrieval tool name appears:
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename"><a href="#complete-raven-client-py">raven_client.py</a></figcaption>
+
+```python
+def message_has_sources(message: Any) -> bool:
+    """A successful tool must supply actual section references, not just a name."""
+    if message.role.value != "tool" or not isinstance(message.content, str):
+        return False
+    try:
+        payload = json.loads(message.content)
+    except ValueError:
+        return False
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        return False
+    evidence = payload.get("evidence")
+    return isinstance(evidence, list) and any(
+        isinstance(item, dict) and all(
+            isinstance(item.get(key), str) and item[key]
+            for key in ("knowledge_name", "file_name", "section_id")
+        ) for item in evidence
+    )
+```
+
+</figure>
+
+A successful content-reading navigation tool can also provide section
+evidence. A tool name alone, a failed call, or an empty evidence list cannot.
+[`ConversationHistory`](#complete-conversation-widgets-py "conversation_widgets.py")
+adds the source action to a restored turn only when it has source evidence
+and nonempty assistant text. Casual answers and answers based only on
+conversation memory normally have no new source action.
+
+### 8.2 Passing that reference to the source viewer
+
+We route a source click through the application, retaining the reference
+stored on the clicked button:
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename"><a href="#complete-app-py">app.py</a></figcaption>
+
+```python
+class RavenDemo(App[None]):
+
+    @on(Button.Pressed, ".source-button")
+    async def view_response_sources(self, event: Button.Pressed) -> None:
+        event.stop()
+        if isinstance(event.button, SourceButton):
+            await self.show_sources(event.button)
+
+
+    async def show_sources(self, reference: SourceButton) -> None:
+        if self.client is None:
+            return
+        if self._backend_busy:
+            self.notify("Wait for the current backend action to finish before opening sources.")
+            return
+        await self.push_screen(SourceViewer(self.client, reference))
+```
+
+</figure>
+
+An earlier answer therefore opens its own turn, even after later answers
+have appeared. The `/sources` command is a convenience route to the last
+source button in the **current conversation view**; it is not a separate
+global source history.
+
+[`SourceViewer`](#complete-source-widgets-py "source_widgets.py") is a modal
+screen. The busy check keeps it from opening during another main backend
+action. We do not check whether models are configured here: reading source
+material is not a new inference request.
+
+### 8.3 Reading the snapshot before rebuilding
+
+We use three levels of access:
+
+| Path | Where the reconstructed files come from | What is required |
+| --- | --- | --- |
+| Current answer's cache | The completed run's files, held on its source button | The current UI view |
+| Persisted snapshot | The saved turn's `result.reconstructed_sources` | The saved conversation turn |
+| Rebuild | Saved tool evidence resolved against current knowledge data | The saved tool messages and referenced knowledge sections |
+
+The first path is handled inside the viewer. The remaining two belong to
+[`RavenClient.turn_sources()`](#complete-raven-client-py "raven_client.py"):
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename"><a href="#complete-raven-client-py">raven_client.py</a></figcaption>
+
+```python
+class RavenClient:
+
+    async def turn_sources(
+        self,
+        conversation_id: str,
+        turn_id: str,
+        *,
+        rebuild: bool,
+        on_progress: Callable[[str], Awaitable[None]],
+    ) -> dict[str, Any]:
+        assert self.raven is not None
+        if not rebuild:
+            turn = await self.raven.get_conversation_turn(conversation_id, turn_id)
+            result = turn.get("result") or {}
+            files = result.get("reconstructed_sources")
+            if isinstance(files, list) and files:
+                return {"files": files, "snapshot": True}
+        await on_progress("Reconstructing from this turn's saved evidence…")
+        task = await self.raven.reconstruct_from_turn(conversation_id, turn_id)
+        try:
+            async for event in task.events():
+                if event.type.value == "reconstruction.file":
+                    await on_progress(f"Reconstructed {event.data.get('file_name', 'file')}")
+            return {"files": await task.result(), "snapshot": False}
+        except BaseException:
+            if not task.is_finished:
+                await task.cancel()
+            raise
+```
+
+</figure>
+
+With `rebuild=False`, a nonempty saved snapshot is returned immediately. If
+none exists, the adapter falls back to `Raven.reconstruct_from_turn()`.
+Selecting **Rebuild from saved evidence** passes `rebuild=True`, bypassing
+the snapshot deliberately.
+
+Rebuilding reads the successful section references in the turn's persisted
+tool messages. It does **not** ask the agent the question again, repeat
+retrieval, or require an LLM or embedding model. The returned task still has
+ordinary operation events and a result, so progress and cancellation use
+the same backend contract as other long-running actions.
+
+There is an important historical distinction. A snapshot contains the
+reconstructed text saved with the turn and remains readable without the
+original document or its knowledge data. A rebuild reads the **current**
+stored knowledge sections; missing references can fail, and changed data
+can produce different material. Rebuilding does not overwrite the saved
+turn result. We therefore label the two outcomes differently in the viewer.
+
+### 8.4 Bringing files and provenance into the view
+
+When [`SourceViewer`](#complete-source-widgets-py "source_widgets.py") mounts,
+[`start_loading()`](#complete-source-widgets-py "source_widgets.py") launches
+a managed worker and disables the file picker and rebuild button during
+the read. The worker runs
+[`load_sources()`](#complete-source-widgets-py "source_widgets.py"):
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename"><a href="#complete-source-widgets-py">source_widgets.py</a></figcaption>
+
+```python
+class SourceViewer(ModalScreen[None]):
+
+    async def load_sources(self, *, rebuild: bool) -> None:
+        try:
+            async def progress(text: str) -> None:
+                self.query_one("#source-status", Static).update(text)
+
+            if not rebuild and self.reference.cached_files:
+                loaded = {"files": self.reference.cached_files, "snapshot": True}
+            else:
+                loaded = await self.client.turn_sources(
+                    self.reference.conversation_id, self.reference.turn_id,
+                    rebuild=rebuild, on_progress=progress,
+                )
+            self.files = loaded["files"]
+            self._shown_index = None
+            selector = self.query_one(Select)
+            selector.display = bool(self.files)
+            selector.set_options([
+                (Text(f"{file['knowledge_name']} / {file['file_name']}"), index)
+                for index, file in enumerate(self.files)
+            ])
+            self.query_one("#source-provenance", Static).update(
+                "Saved snapshot from this turn. Rebuild reads the current knowledge contents."
+                if loaded["snapshot"] else
+                "Rebuilt from saved evidence using current knowledge contents; not a new model response."
+            )
+            if self.files:
+                selector.value = 0
+                await self.show_file(0)
+            else:
+                document = self.query_one("#source-document", VerticalScroll)
+                await document.remove_children()
+                await document.mount(Static("This turn has no reconstructable section evidence."))
+            self.query_one("#source-status", Static).update(f"{len(self.files)} reconstructed file(s) · Esc to close")
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            if self.is_attached:
+                self.query_one("#source-status", Static).update(f"Could not load/rebuild sources: {error}")
+                if not self.files:
+                    document = self.query_one("#source-document", VerticalScroll)
+                    await document.remove_children()
+                    await document.mount(Static("No sources loaded. You can retry rebuilding, or close this view."))
+        finally:
+            if self.is_attached:
+                self.query_one("#source-spinner").display = False
+                self.query_one("#rebuild-sources", Button).disabled = False
+                self.query_one(Select).disabled = not bool(self.files)
+```
+
+</figure>
+
+Each picker option displays both knowledge and file name, so identically
+named files in different knowledges remain distinguishable. The first file
+opens automatically. The provenance line states whether the material is a
+saved snapshot or a reconstruction from current knowledge; the status line
+receives reconstruction progress and the final file count.
+
+If a rebuild fails before returning files, the existing snapshot stays on
+screen and the failure appears in the status line. If nothing has loaded,
+the document area instead explains that no sources are available. An empty
+successful result is also described explicitly, rather than presented as
+an answer with supporting evidence.
+
+### 8.5 Rendering sections without losing their context
+
+RAVEN returns a list of reconstructed files. Each file identifies its
+knowledge, file name, navigation type, and ordered sections. Each section
+contains its ID, raw content, source range, and a `highlighted` flag.
+
+We keep that section order when rendering a selected file:
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename"><a href="#complete-source-widgets-py">source_widgets.py</a></figcaption>
+
+```python
+class SourceViewer(ModalScreen[None]):
+
+    async def show_file(self, index: int) -> None:
+        if self._shown_index == index:
+            return
+        self._shown_index = index
+        file = self.files[index]
+        document = self.query_one("#source-document", VerticalScroll)
+        await document.remove_children()
+        await document.mount(*(
+            SourceSection(section, file.get("navigation_type", "none"))
+            for section in file["sections"]
+        ))
+        document.scroll_home(animate=False)
+```
+
+</figure>
+
+The presentation of one section belongs to
+[`SourceSection`](#complete-source-widgets-py "source_widgets.py"). Its
+styling distinguishes supplied material from surrounding context, while
+the text and location remain backend data:
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename"><a href="#complete-source-widgets-py">source_widgets.py</a></figcaption>
+
+```python
+class SourceSection(Vertical):
+
+    def __init__(self, section: dict[str, Any], navigation_type: str) -> None:
+        super().__init__(classes="source-section source-hit" if section["highlighted"] else "source-section")
+        self.section = section
+        self.navigation_type = navigation_type
+
+
+    def compose(self) -> ComposeResult:
+        label = "SUPPLIED TO MODEL" if self.section["highlighted"] else "Surrounding context"
+        location = self.section.get("source_range")
+        if location is not None:
+            label += f" · {self.navigation_type}: {location[0]}–{location[1]}"
+        yield Static(label, classes="source-section-label", markup=False)
+        yield Static(self.section["section_id"], classes="list-hint", markup=False)
+        yield Static(self.section.get("raw_content") or "(No text content)", markup=False)
+```
+
+</figure>
+
+The `markup=False` arguments keep document text literal rather than treating
+it as interface markup. Ranges are displayed using the file's navigation
+type when a section has a location. They are useful provenance, but this
+demo does not implement a jump into the original document.
+
+![The source viewer displaying a saved reconstruction of Reaction_wheel.txt, with supplied material highlighted and surrounding context retained.]({{ '/assets/images/in-action-sources.svg' | relative_url }})
+
+*The same source view introduced in Section 2. Its content now has a traceable
+path from a saved turn through RAVEN to the highlighted sections.*
+
+This is a readable reconstruction of parsed content, not a reproduction of
+the original PDF or DOCX layout. A highlight means that a section was supplied
+to the model. It does not establish that every claim in the answer follows
+from that section; source inspection enables that check rather than replacing it.
+
+### 8.6 Closing the view without leaving work running
+
+The viewer owns its loading worker. Close and Escape both use
+[`SourceViewer.action_close()`](#complete-source-widgets-py "source_widgets.py"),
+which waits for that worker's cancellation before dismissing the screen:
+
+<figure class="code-snippet" markdown="1">
+<figcaption class="code-snippet-filename"><a href="#complete-source-widgets-py">source_widgets.py</a></figcaption>
+
+```python
+class SourceViewer(ModalScreen[None]):
+
+    @on(Button.Pressed, "#close-sources")
+    async def action_close(self) -> None:
+        await self.stop_loading()
+        self.dismiss()
+
+
+    async def stop_loading(self) -> None:
+        if self._load_worker is not None and not self._load_worker.is_finished:
+            self._load_worker.cancel()
+            try:
+                await self._load_worker.wait()
+            except WorkerCancelled:
+                pass
+
+
+    async def on_unmount(self) -> None:
+        await self.stop_loading()
+```
+
+</figure>
+
+If the adapter is awaiting an unfinished reconstruction task, its exception
+handler requests native task cancellation before propagating the cancellation.
+The unmount hook applies the same cleanup when the screen is removed through
+another route. Neither viewing nor rebuilding changes the chat history.
+
+The complete source path is now:
+
+**Saved answer → conversation and turn reference → cached or persisted
+snapshot → optional rebuild from saved evidence → ordered file sections.**
+
+The full implementations remain available in the expandable
+[`source_widgets.py`](#complete-source-widgets-py "source_widgets.py"),
+[`raven_client.py`](#complete-raven-client-py "raven_client.py"), and
+[`app.py`](#complete-app-py "app.py") references above.
+
+## 9. Reopening and checking the complete workflow
+
+We have connected the visible workflow without moving RAVEN's document,
+conversation, or agent logic into the interface. The final check is not
+another model response. It is whether the workspace still makes sense after
+the interface that created it has gone away.
+
+### 9.1 Separating saved data from a running interface
+
+The demo always uses `raven_home/` beside
+[`app.py`](#complete-app-py "app.py"). RAVEN places user data beneath a
+UUID-named directory inside that home. The demo uses RAVEN's default user
+identity; it does not implement accounts or switch between users.
+
+The main persisted parts are:
+
+| Location beneath `raven_home/<user_id>/` | What it retains |
+| --- | --- |
+| `data/knowledge_base/<knowledge_name>/` | Knowledge metadata, the `file.sqlite3` file/section store, and Qdrant vectors |
+| `data/conversations/<conversation_id>/` | Conversation metadata, canonical messages and saved turn results in `messages.sqlite3`, plus conversation memory and preferences |
+| `operations/operations.sqlite3` | Operation/task records and replayable event history |
+| `runtime_settings/runtime_settings.json` | Saved per-user runtime settings; the demo does not provide a settings editor |
+
+These are backend-owned stores, not files for the interface to edit directly.
+In particular, the source snapshot belongs to the saved turn result; it is
+not a screenshot or an independently maintained TUI source database.
+
+The active conversation selection, text draft, visible widgets, loading
+workers, temporary sessions, and configured model handles belong to the
+running application. This demo does not restore them as live objects after
+a restart. Environment-based API keys likewise remain outside the saved
+conversation and must be available to a new process when configuring a cloud
+model again.
+
+### 9.2 Checking continuity across a restart
+
+We can trace the following sequence using the commands and controls from
+Section 2. The observations matter more than the exact wording of a model's
+answer:
+
+1. **Create and ingest.** We create a knowledge, ingest the sample document,
+   and wait for the confirmed result. Reopening that knowledge shows the
+   stored file; a progress message alone is not the completion check.
+2. **Ask and follow up.** We open a conversation and ask a document question.
+   A successful source-backed turn shows tool activity, a saved answer, and
+   a source action. A follow-up stays attached to the same conversation,
+   even though a new temporary session carries out the turn.
+3. **Inspect an earlier answer.** We open its source button, check the file
+   and highlighted passage, and return to chat. The earlier button continues
+   to identify that turn rather than the most recent response.
+4. **Close and reopen.** After the work has finished, we exit gracefully
+   with Ctrl+C and run the same launch command again, keeping the same
+   home directory. `/conversations` lists the saved conversation by title;
+   opening it restores canonical user/assistant messages and tool activity.
+5. **Read the saved sources before configuring models.** The restored
+   answer's source action can load its persisted reconstruction without
+   inference. This distinguishes saved evidence from a fresh answer that
+   merely happens to look similar.
+6. **Resume model-dependent work.** We configure the model pair again before
+   new chat or ingestion. The embedding model must remain compatible with
+   the vectors already stored. Continuing the conversation then uses its
+   backend-managed context and memory, not reconstructed UI text.
+
+> **Keep the original embedding model.** Existing knowledge and conversation
+> vectors cannot be used interchangeably with embeddings from another model.
+> Equal vector dimensions do not establish compatibility. A different model
+> requires rebuilding the affected embeddings; this demo does not provide
+> that migration workflow.
+
+When a turn was stopped or failed, reopening canonical history is also how
+we check what actually committed. Partial text left on screen is not a
+durability guarantee. After a hard process interruption, RAVEN's recovery
+machinery detects interrupted work; reopening the application does not
+automatically resume the agent loop or retry every failed task.
+
+### 9.3 Keeping the application boundary small
+
+The resulting division of work is deliberate:
+
+| The demo implements | RAVEN supplies |
+| --- | --- |
+| Commands, forms, clickable lists, and the selected conversation | Knowledge and conversation objects, discovery, and persistence |
+| Collecting model specifications and referencing environment credentials | Provider adapters and model configuration |
+| Progress labels, separate thinking/tool/answer views, and Stop controls | Managed operation tasks, events, cancellation, and agent execution |
+| Per-answer source references, a file picker, and section presentation | Saved turn results, evidence references, and reconstruction |
+| Application startup and shutdown hooks | Backend resource lifecycle and recovery behavior |
+
+This is still a focused demonstration: one main backend action at a time,
+local file paths, automatic retrieval-mode selection, and no HTTP connection.
+It does not expose the server's authentication boundary, a retry dashboard,
+all runtime settings, or full knowledge/conversation administration. The
+terminal instructions also remain intentional: the multiline-input workflow
+is intended for the VS Code terminal, rather than promising identical key
+handling in every Windows console.
+
+Two lifecycle boundaries remain outside the demo. Exiting closes its RAVEN
+resources, but **does not stop the external Ollama service or promise to
+unload its resident models**. Also, RAVEN provides operation-cleanup
+machinery, but this TUI does **not** schedule automatic history cleanup.
+An application bridge or hosting backend decides and runs that retention
+policy; saved event history should not be assumed to disappear on its own.
+
+The [complete example archive]({{ '/assets/downloads/tui_example.zip' | relative_url }}){: download="tui_example.zip"}
+and the [sample document]({{ '/assets/downloads/test_files/Reaction_wheel.txt' | relative_url }}){: download="Reaction_wheel.txt"}
+are the same artifacts introduced in Section 2. The expandable source
+references in this guide show how that application is connected, rather
+than defining another implementation. A redistributable copy of the demo
+should contain its source and instructions, not a populated `raven_home/`,
+environment secrets, or machine-specific caches.
+
+## 10. Conclusion
+
+We began with a document and built a complete path from ingestion to a
+conversation-backed answer and its inspectable sources. The resulting
+application can preserve that interaction beyond a single run: a saved
+conversation retains its turns, and an earlier answer remains connected
+to the source material recorded with it. Reconstruction makes that material
+available for checking, without treating the model's answer as its own proof.
+
+The central design decision was to keep interaction separate from backend
+execution and state. The TUI collects inputs, presents events, and waits for
+confirmed results. RAVEN owns document processing, agent execution,
+conversation memory, and persistence. This boundary lets us explain each
+handoff without rebuilding the backend inside the interface.
+
+The terminal is therefore one presentation of the workflow, not the workflow
+itself. A different interface can retain the same pattern: submit a request,
+show its progress, confirm its outcome, and keep the identifiers needed to
+return to saved work. That is the reusable part of this example—a small
+application layer that makes RAVEN's execution and stored evidence accessible
+to the reader.
