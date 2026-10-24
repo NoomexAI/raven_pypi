@@ -1,0 +1,79 @@
+/* All diagrams share a frame and footer; only retrieval diagrams have controls. */
+.markdown-body .architecture-diagram {
+  margin: 24px 0;
+}
+
+.architecture-diagram-stage {
+  position: relative;
+  padding: 8px;
+  border: 1px solid var(--site-border);
+  border-radius: 10px;
+  background: var(--site-background);
+}
+
+.retrieval-diagram-stage {
+  padding-top: 58px;
+}
+
+.retrieval-diagram-controls {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--site-border);
+  border-radius: 8px;
+  background: var(--site-background);
+}
+
+.retrieval-diagram-controls button {
+  min-height: 40px;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--site-foreground);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.retrieval-diagram-controls button:hover {
+  background: var(--site-hover);
+}
+
+.retrieval-diagram-controls button[aria-pressed="true"] {
+  background: var(--site-accent);
+  color: var(--site-accent-contrast);
+}
+
+.retrieval-diagram-controls button:focus-visible {
+  outline: 2px solid var(--site-accent);
+  outline-offset: 3px;
+}
+
+.markdown-body .architecture-diagram img {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 0;
+}
+
+.architecture-diagram figcaption {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 6px 16px;
+  margin-top: 10px;
+  color: var(--site-muted);
+  font-size: 14px;
+}
+
+.architecture-diagram figcaption a {
+  margin-inline-start: auto;
+}
+
+.architecture-diagram [hidden] {
+  display: none !important;
+}

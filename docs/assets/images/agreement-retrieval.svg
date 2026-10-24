@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="840" viewBox="0 0 960 840" role="img" aria-labelledby="title description">
+  <title id="title">Local agreement retrieval</title>
+  <desc id="description">Within Engineering, embedded retrieval completes before hierarchical metadata scoring. The ordered section results are compared. The example changes section order without changing paired file IDs, yielding Weak Agreement.</desc>
+  <style>
+    svg { display: block; margin: 0 auto; color: #202020; background: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .box { fill: #fafafa; stroke: #aaa; stroke-width: 1.5; }
+    .strong { fill: #f0f0f0; stroke: #333; stroke-width: 1.5; }
+    .panel { fill: none; stroke: #ccc; stroke-width: 1; }
+    .line { fill: none; stroke: #777; stroke-width: 1.5; }
+    .optional { stroke-dasharray: 5 4; }
+    .arrow { fill: #777; }
+    text { fill: currentColor; text-anchor: middle; font-size: 16px; }
+    .heading { font-size: 18px; font-weight: 600; }
+    .small { fill: #595959; font-size: 14px; }
+    @media (prefers-color-scheme: dark) {
+      svg { color: #eee; background: #111; }
+      .box { fill: #191919; stroke: #777; }
+      .strong { fill: #292929; stroke: #ccc; }
+      .panel { stroke: #555; }
+      .line { stroke: #aaa; }
+      .arrow { fill: #aaa; }
+      .small { fill: #bbb; }
+    }
+  </style>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="arrow" d="M 0 0 L 10 5 L 0 10 Z"/></marker></defs>
+  <g class="step">
+    <rect class="strong" x="140" y="20" width="680" height="76" rx="8"/>
+  <text class="heading" x="480" y="46">Local agreement retrieval</text>
+  <text x="480" y="64">Query + explicit knowledge: Engineering</text>
+  <text class="small" x="480" y="82">Two sequential selection paths; neither narrows the other.</text>
+  </g>
+  <path class="line" d="M 480 96 V 111 H 229 V 131" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="box" x="24" y="134" width="410" height="194" rx="8"/>
+  <text class="heading" x="229" y="162">1. Local embedded retrieval</text>
+  <text x="229" y="188">#1 · reaction_wheel.txt · Section 1</text>
+  <text x="229" y="214">#2 · EPS.txt · Section 2</text>
+  <text x="229" y="240">#3 · reaction_wheel.txt · Section 3</text>
+  <text class="small" x="229" y="266">Search chunks inside Engineering.</text>
+  </g>
+  <path class="line" d="M 434 231 H 523" marker-end="url(#arrow)"/>
+  <text class="small" x="480" y="216">then</text>
+  <g class="step">
+    <rect class="box" x="526" y="134" width="410" height="194" rx="8"/>
+  <text class="heading" x="731" y="162">2. Local hierarchical retrieval</text>
+  <text x="731" y="188">#1 · reaction_wheel.txt · Section 3</text>
+  <text x="731" y="214">#2 · EPS.txt · Section 2</text>
+  <text x="731" y="240">#3 · reaction_wheel.txt · Section 1</text>
+  <text class="small" x="731" y="266">Score Engineering's section metadata.</text>
+  </g>
+  <path class="line" d="M 229 328 V 354 H 468 V 387" marker-end="url(#arrow)"/>
+  <path class="line" d="M 731 328 V 354 H 492 V 387" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="strong" x="140" y="390" width="680" height="100" rx="8"/>
+  <text class="heading" x="480" y="418">3. Compare complete ordered results before output truncation</text>
+  <text class="small" x="480" y="444">Equal lists → strong; otherwise compare paired file IDs.</text>
+  <text class="small" x="480" y="470">Example above: different sections, same paired files → Weak Agreement.</text>
+  </g>
+  <path class="line" d="M 480 490 V 509 H 164 V 539" marker-end="url(#arrow)"/>
+  <path class="line" d="M 480 509 V 539" marker-end="url(#arrow)"/>
+  <path class="line" d="M 480 509 H 796 V 539" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="box" x="24" y="542" width="280" height="142" rx="8"/>
+  <text class="heading" x="164" y="570">Strong Agreement</text>
+  <text class="small" x="164" y="596">Ordered lists equal</text>
+  <text class="small" x="164" y="622">retrieved_content: one list</text>
+  <text class="small" x="164" y="648">At most top_k items</text>
+  </g>
+  <g class="step">
+    <rect class="strong" x="340" y="542" width="280" height="142" rx="8"/>
+  <text class="heading" x="480" y="570">Weak Agreement</text>
+  <text class="small" x="480" y="596">Lists differ; paired files match</text>
+  <text class="small" x="480" y="622">retrieved_content: two lists</text>
+  <text class="small" x="480" y="648">top_k applies per pathway</text>
+  </g>
+  <g class="step">
+    <rect class="box" x="656" y="542" width="280" height="142" rx="8"/>
+  <text class="heading" x="796" y="570">Disagreement</text>
+  <text class="small" x="796" y="596">A paired file ID differs</text>
+  <text class="small" x="796" y="622">retrieved_content: two lists</text>
+  <text class="small" x="796" y="648">top_k applies per pathway</text>
+  </g>
+  <g class="step">
+    <rect class="box" x="140" y="725" width="680" height="68" rx="8"/>
+  <text class="small" x="480" y="753">Two-list results retain embedded_retrieval and hierarchical_retrieval.</text>
+  <text class="small" x="480" y="779">The three classifications are alternatives, not simultaneous outputs.</text>
+  </g>
+  <text class="small" x="480" y="819">Illustrative section choices. Agreement compares evidence selection, not factual truth; edge cases remain as documented.</text>
+</svg>

@@ -25,7 +25,7 @@ not requirements imposed by RAVEN.
 
 ![The terminal assistant showing a saved follow-up answer about battery state of charge, with a View sources button beneath the earlier answer.]({{ '/assets/images/in-action-chat.svg' | relative_url }})
 
-*Figure 1. The working application during a local-model test with
+*The working application during a local-model test with
 `gemma4:e2b` and `bge-m3:latest`. The earlier answer used retrieval; the follow-up
 shown here used conversation memory without another tool call. The technical
 document is an illustrative test input, not a validated engineering reference.*
@@ -237,7 +237,7 @@ For a local setup, complete the fields as follows:
 
 ![The model configuration form with the LLM set to ollama and gemma4:e2b and the embedding model set to ollama and bge-m3:latest.]({{ '/assets/images/in-action-models.svg' | relative_url }})
 
-*Figure 2. The model configuration form. Both model roles must be supplied before
+*The model configuration form. Both model roles must be supplied before
 ingestion or chat can begin; local Ollama models do not require API keys.*
 
 After completing the fields, select **Configure**. RAVEN downloads any missing
@@ -312,7 +312,7 @@ Complete the form with these values:
 
 ![The knowledge creation form with engineering as the name and Engineering reference documents as the summary.]({{ '/assets/images/in-action-create-knowledge.svg' | relative_url }})
 
-*Figure 3. Creating the knowledge that will hold the example document.*
+*Creating the knowledge that will hold the example document.*
 
 Select **Create**. A confirmation and the knowledge's details will appear.
 Its file count will initially be zero. `/knowledges` displays the saved
@@ -352,7 +352,7 @@ to `engineering`. Enter `Reaction_wheel.txt` in the **Local file path** field.
 
 ![The ingestion form targeting engineering with Reaction_wheel.txt entered as the local file path.]({{ '/assets/images/in-action-ingest.svg' | relative_url }})
 
-*Figure 4. The document path is resolved from the application's launch directory.
+*The document path is resolved from the application's launch directory.
 An absolute path can be used instead if the document was saved elsewhere.*
 
 Select **Ingest**. Progress will appear for parsing, sectioning,
@@ -377,7 +377,7 @@ from the scope dropdown, then select **Create**.
 
 ![The conversation creation form with engineering selected as the optional knowledge scope.]({{ '/assets/images/in-action-create-conversation.svg' | relative_url }})
 
-*Figure 5. Selecting a knowledge creates a local conversation. Leaving the global
+*Selecting a knowledge creates a local conversation. Leaving the global
 option selected instead permits access across the knowledge base.*
 
 The new conversation opens immediately, and its title and scope appear in the
@@ -412,7 +412,7 @@ In that same passage, what battery state-of-charge percentage must be exceeded? 
 
 ![The saved conversation showing a follow-up answer about the fourteen-percent battery threshold and a View sources button on the earlier source-backed answer.]({{ '/assets/images/in-action-chat.svg' | relative_url }})
 
-*Figure 6. A continued conversation. The document specifies a threshold above
+*A continued conversation. The document specifies a threshold above
 fourteen percent; information already available in conversation memory may be
 used without another retrieval call.*
 
@@ -429,7 +429,7 @@ including when an earlier answer is selected rather than the latest one.
 
 ![The reconstructed-source viewer showing engineering and Reaction_wheel.txt, with a supplied section highlighted and the saved-snapshot status visible.]({{ '/assets/images/in-action-sources.svg' | relative_url }})
 
-*Figure 7. The source viewer displays a readable reconstruction, with sections
+*The source viewer displays a readable reconstruction, with sections
 supplied to the model distinguished from surrounding context.*
 
 Select a reconstructed file from the dropdown and scroll through its sections.

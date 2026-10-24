@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="840" viewBox="0 0 960 840" role="img" aria-labelledby="title description">
+  <title id="title">Local vector-conditioned retrieval</title>
+  <desc id="description">Local embedded hits within Engineering identify reaction_wheel.txt. Its file name restricts the next stage to that file. Metadata scoring can return Section 3 even though the seed was Section 1; unrelated files are not included.</desc>
+  <style>
+    svg { display: block; margin: 0 auto; color: #202020; background: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .box { fill: #fafafa; stroke: #aaa; stroke-width: 1.5; }
+    .strong { fill: #f0f0f0; stroke: #333; stroke-width: 1.5; }
+    .panel { fill: none; stroke: #ccc; stroke-width: 1; }
+    .line { fill: none; stroke: #777; stroke-width: 1.5; }
+    .optional { stroke-dasharray: 5 4; }
+    .arrow { fill: #777; }
+    text { fill: currentColor; text-anchor: middle; font-size: 16px; }
+    .heading { font-size: 18px; font-weight: 600; }
+    .small { fill: #595959; font-size: 14px; }
+    @media (prefers-color-scheme: dark) {
+      svg { color: #eee; background: #111; }
+      .box { fill: #191919; stroke: #777; }
+      .strong { fill: #292929; stroke: #ccc; }
+      .panel { stroke: #555; }
+      .line { stroke: #aaa; }
+      .arrow { fill: #aaa; }
+      .small { fill: #bbb; }
+    }
+  </style>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="arrow" d="M 0 0 L 10 5 L 0 10 Z"/></marker></defs>
+  <g class="step">
+    <rect class="strong" x="140" y="20" width="680" height="76" rx="8"/>
+  <text class="heading" x="480" y="46">Local vector-conditioned retrieval</text>
+  <text x="480" y="64">Query + explicit knowledge: Engineering</text>
+  <text class="small" x="480" y="82">The vector stage narrows scope before LLM metadata scoring.</text>
+  </g>
+  <path class="line" d="M 480 96 V 131" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="box" x="140" y="134" width="680" height="126" rx="8"/>
+  <text class="heading" x="480" y="162">1. Embedded retrieval produces an initial section shortlist</text>
+  <text x="480" y="188">Engineering / reaction_wheel.txt / Section 1</text>
+  <text class="small" x="480" y="214">The seed section identifies a promising file.</text>
+  <text class="small" x="480" y="240">embedded_top_k controls the initial shortlist.</text>
+  </g>
+  <path class="line" d="M 480 260 V 299" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="strong" x="140" y="302" width="680" height="100" rx="8"/>
+  <text class="heading" x="480" y="330">2. Deduplicate file names</text>
+  <text x="480" y="356">Selected file: reaction_wheel.txt</text>
+  <text class="small" x="480" y="382">Other Engineering files are excluded from the scoring stage.</text>
+  </g>
+  <path class="line" d="M 480 402 V 426 H 239 V 453" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="box" x="24" y="456" width="430" height="166" rx="8"/>
+  <text class="heading" x="239" y="484">3. Score sections in those files</text>
+  <text x="239" y="510">reaction_wheel.txt · Sections 1, 3, 5</text>
+  <text class="small" x="239" y="536">Not only the seed Section 1.</text>
+  <text class="small" x="239" y="562">Use retrieve_by_file().</text>
+  <text class="small" x="239" y="588">Only metadata is passed for LLM scoring.</text>
+  </g>
+  <path class="line" d="M 454 539 H 503" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="strong" x="506" y="456" width="430" height="166" rx="8"/>
+  <text class="heading" x="721" y="484">4. Rank the expanded candidate set</text>
+  <text x="721" y="510">reaction_wheel.txt / S3 → 9</text>
+  <text x="721" y="536">reaction_wheel.txt / S1 → 7</text>
+  <text class="small" x="721" y="562">A different section can enter the final result.</text>
+  <text class="small" x="721" y="588">Scores are illustrative, not confidence.</text>
+  </g>
+  <path class="line" d="M 721 622 V 649 H 480 V 677" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="box" x="140" y="680" width="680" height="110" rx="8"/>
+  <text class="heading" x="480" y="708">5. Return complete sections, not the initial shortlist</text>
+  <text x="480" y="734">Possible final: Engineering / reaction_wheel.txt / Section 3</text>
+  <text class="small" x="480" y="760">Expansion stays within the selected files.</text>
+  </g>
+  <text class="small" x="480" y="819">The two stages run sequentially as child tasks in one operation. Narrowing can exclude relevant material.</text>
+</svg>

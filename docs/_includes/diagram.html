@@ -1,0 +1,10 @@
+{% assign diagram_path = '/assets/images/' | append: include.id | append: '.svg' %}
+<figure class="architecture-diagram" aria-label="{{ include.label | escape }} diagram">
+  <div class="architecture-diagram-stage">
+    <img src="{{ diagram_path | relative_url }}" alt="{{ include.alt | escape }}" width="{{ include.width | escape }}" height="{{ include.height | escape }}">
+  </div>
+  <figcaption>
+    <span>{{ include.label | escape }}</span>
+    <a href="{{ diagram_path | relative_url }}" aria-label="View {{ include.label | downcase | escape }} diagram at full size">View full-size diagram</a>
+  </figcaption>
+</figure>

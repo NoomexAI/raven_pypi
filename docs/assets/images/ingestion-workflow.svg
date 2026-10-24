@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="840" viewBox="0 0 1000 840" role="img" aria-labelledby="title description">
+  <title id="title">From ingestion request to committed knowledge</title>
+  <desc id="description">Raven.ingest starts an ingestion pipeline task. The pipeline validates and snapshots the source, parses ordered elements, forms provenance-aware semantic sections, and extracts section metadata with the LLM. It passes these prepared sections to a Knowledge.ingest child task in the same operation. Knowledge chunks the section text, embeds the chunks, writes vectors and section references to Qdrant, then commits file and section records in SQLite. The child result returns to the pipeline, which emits ingestion.completed. Progress events span both tasks; the two stores do not share a transaction.</desc>
+  <style>
+    svg { display: block; margin: 0 auto; color: #202020; background: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .lane { fill: #fafafa; stroke: #d2d2d2; stroke-width: 1; }
+    .box { fill: #fff; stroke: #aaa; stroke-width: 1.5; }
+    .strong { fill: #f0f0f0; stroke: #333; stroke-width: 1.7; }
+    .line { fill: none; stroke: #666; stroke-width: 1.7; }
+    .arrow { fill: #666; }
+    text { fill: currentColor; text-anchor: middle; font-size: 16px; }
+    .heading { font-size: 18px; font-weight: 600; }
+    .small { fill: #595959; font-size: 14px; }
+    .event { fill: #444; font-size: 13px; font-family: ui-monospace, Consolas, monospace; }
+    .note { fill: #595959; font-size: 15px; }
+    @media (prefers-color-scheme: dark) {
+      svg { color: #eee; background: #111; }
+      .lane { fill: #171717; stroke: #444; }
+      .box { fill: #202020; stroke: #777; }
+      .strong { fill: #292929; stroke: #ccc; }
+      .line { stroke: #aaa; }
+      .arrow { fill: #aaa; }
+      .small, .note { fill: #bbb; }
+      .event { fill: #ccc; }
+    }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path class="arrow" d="M 0 0 L 10 5 L 0 10 Z"/>
+    </marker>
+  </defs>
+
+  <g class="step">
+    <rect class="strong" x="230" y="20" width="540" height="66" rx="9"/>
+    <text class="heading" x="500" y="47">Raven.ingest(knowledge_name, source_path)</text>
+    <text class="small" x="500" y="70">Start a managed ingestion task · ingestion.started</text>
+  </g>
+
+  <rect class="lane" x="24" y="112" width="444" height="606" rx="12"/>
+  <rect class="lane" x="532" y="112" width="444" height="606" rx="12"/>
+  <text class="heading" x="246" y="142">IngestionPipeline · document preparation</text>
+  <text class="heading" x="754" y="142">Knowledge.ingest() · storage mutation</text>
+
+  <path class="line" d="M 500 86 V 99 H 12 V 157 H 246 V 169" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="box" x="44" y="172" width="404" height="78" rx="8"/>
+    <text class="heading" x="246" y="199">1. Validate and snapshot</text>
+    <text class="small" x="246" y="222">Assign file ID · claim file name · check limits</text>
+    <text class="small" x="246" y="241">Copy the input and verify its digest</text>
+  </g>
+  <path class="line" d="M 246 250 V 278" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="box" x="44" y="281" width="404" height="78" rx="8"/>
+    <text class="heading" x="246" y="308">2. DocumentParser</text>
+    <text class="small" x="246" y="331">Native TXT / Markdown · Docling PDF / DOCX</text>
+    <text class="small" x="246" y="350">Ordered elements + available source ranges</text>
+  </g>
+  <path class="line" d="M 246 359 V 387" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="box" x="44" y="390" width="404" height="78" rx="8"/>
+    <text class="heading" x="246" y="417">3. Semantic sectioning</text>
+    <text class="small" x="246" y="440">Embed neighbouring text windows; choose breaks</text>
+    <text class="small" x="246" y="459">Preserve text, element references, and ranges</text>
+  </g>
+  <path class="line" d="M 246 468 V 496" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="box" x="44" y="499" width="404" height="92" rx="8"/>
+    <text class="heading" x="246" y="526">4. Extract section metadata · LLM</text>
+    <text class="small" x="246" y="549">Summary · keywords · conditions · definitions</text>
+    <text class="small" x="246" y="574">Section raw_content remains source-derived</text>
+  </g>
+
+  <path class="line" d="M 448 545 H 500 V 157 H 754 V 169" marker-end="url(#arrow)"/>
+  <text class="small" x="246" y="631">Handoff: prepared sections + the same file ID</text>
+  <text class="small" x="246" y="655">A child task uses the existing operation.</text>
+  <text class="small" x="246" y="679">No second root operation is needed.</text>
+
+  <g class="step">
+    <rect class="box" x="552" y="172" width="404" height="78" rx="8"/>
+    <text class="heading" x="754" y="199">5. Chunk the section text</text>
+    <text class="small" x="754" y="222">Smaller search units with configured overlap</text>
+    <text class="small" x="754" y="241">Each chunk retains its containing section ID</text>
+  </g>
+  <path class="line" d="M 754 250 V 278" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="box" x="552" y="281" width="404" height="78" rx="8"/>
+    <text class="heading" x="754" y="308">6. Embed chunks</text>
+    <text class="small" x="754" y="331">Use the configured embedding model</text>
+    <text class="small" x="754" y="350">Validate vectors and embedding compatibility</text>
+  </g>
+  <path class="line" d="M 754 359 V 387" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="box" x="552" y="390" width="404" height="78" rx="8"/>
+    <text class="heading" x="754" y="417">7. Upsert Qdrant points</text>
+    <text class="small" x="754" y="440">Chunk vectors + file / section references</text>
+    <text class="event" x="754" y="459">ingestion.vectors_written</text>
+  </g>
+  <path class="line" d="M 754 468 V 496" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="strong" x="552" y="499" width="404" height="92" rx="8"/>
+    <text class="heading" x="754" y="526">8. Commit file.sqlite3 records</text>
+    <text class="small" x="754" y="549">File + ordered sections + metadata + provenance</text>
+    <text class="event" x="754" y="574">ingestion.metadata_committed</text>
+  </g>
+  <path class="line" d="M 754 591 V 627" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="box" x="552" y="630" width="404" height="66" rx="8"/>
+    <text class="heading" x="754" y="657">Return the result to the pipeline</text>
+    <text class="event" x="754" y="680">ingestion.completed</text>
+  </g>
+
+  <rect class="strong" x="24" y="744" width="952" height="48" rx="8"/>
+  <text x="500" y="774">One operation · pipeline and storage tasks · progress events throughout</text>
+  <text class="note" x="500" y="822">Normal success path. Qdrant and SQLite do not share a transaction; recovery handles the write gap.</text>
+</svg>

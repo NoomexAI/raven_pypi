@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="590" viewBox="0 0 960 590" role="img" aria-labelledby="title description">
+  <title id="title">RAVEN component ownership overview</title>
+  <desc id="description">A Python application uses the Raven facade directly. An HTTP application reaches the facade through the optional FastAPI server and its user runtime. Raven composes resource managers, document workflows, conversation execution, and model providers. Operations, tasks, and events span the work. These connections indicate delegation rather than execution order.</desc>
+  <style>
+    svg { display: block; margin: 0 auto; color: #202020; background: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .box { fill: #fafafa; stroke: #b8b8b8; stroke-width: 1.5; }
+    .facade { fill: #f0f0f0; stroke: #333; stroke-width: 2; }
+    .line { fill: none; stroke: #777; stroke-width: 1.5; }
+    .arrow { fill: #777; }
+    text { fill: currentColor; text-anchor: middle; font-size: 15px; }
+    .heading { font-size: 17px; font-weight: 600; }
+    .muted { fill: #606060; font-size: 14px; }
+    @media (prefers-color-scheme: dark) {
+      svg { color: #eee; background: #111; }
+      .box { fill: #191919; stroke: #606060; }
+      .facade { fill: #252525; stroke: #ccc; }
+      .line { stroke: #aaa; }
+      .arrow { fill: #aaa; }
+      .muted { fill: #b8b8b8; }
+    }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path class="arrow" d="M 0 0 L 10 5 L 0 10 Z"/>
+    </marker>
+  </defs>
+  <rect class="box" x="40" y="24" width="300" height="68" rx="9"/>
+  <text class="heading" x="190" y="53">Python application</text>
+  <text class="muted" x="190" y="76">Direct library use</text>
+  <rect class="box" x="620" y="24" width="300" height="68" rx="9"/>
+  <text class="heading" x="770" y="53">HTTP application</text>
+  <text class="muted" x="770" y="76">Through its application / host boundary</text>
+  <path class="line" d="M 770 92 V 127" marker-end="url(#arrow)"/>
+  <rect class="box" x="620" y="130" width="300" height="68" rx="9"/>
+  <text class="heading" x="770" y="159">FastAPI server</text>
+  <text class="muted" x="770" y="182">Leases the user's Raven runtime</text>
+  <path class="line" d="M 190 92 V 216 H 420 V 241" marker-end="url(#arrow)"/>
+  <path class="line" d="M 770 198 V 216 H 540 V 241" marker-end="url(#arrow)"/>
+  <rect class="facade" x="360" y="244" width="240" height="72" rx="9"/>
+  <text class="heading" x="480" y="274">Raven</text>
+  <text class="muted" x="480" y="299">Composition and lifecycle</text>
+  <path class="line" d="M 480 316 V 346 M 127 346 H 832"/>
+  <path class="line" d="M 127 346 V 382" marker-end="url(#arrow)"/>
+  <path class="line" d="M 362 346 V 382" marker-end="url(#arrow)"/>
+  <path class="line" d="M 597 346 V 382" marker-end="url(#arrow)"/>
+  <path class="line" d="M 832 346 V 382" marker-end="url(#arrow)"/>
+  <rect class="box" x="20" y="385" width="215" height="122" rx="9"/>
+  <text class="heading" x="127.5" y="412">Persistent resources</text>
+  <text class="muted" x="127.5" y="438">KnowledgeBase / Knowledge</text>
+  <text class="muted" x="127.5" y="461">ConversationManager /</text>
+  <text class="muted" x="127.5" y="482">Conversation</text>
+  <rect class="box" x="255" y="385" width="215" height="122" rx="9"/>
+  <text class="heading" x="362.5" y="412">Document workflows</text>
+  <text class="muted" x="362.5" y="438">Parsing and sectioning</text>
+  <text class="muted" x="362.5" y="461">Ingestion and retrieval</text>
+  <text class="muted" x="362.5" y="484">Source reconstruction</text>
+  <rect class="box" x="490" y="385" width="215" height="122" rx="9"/>
+  <text class="heading" x="597.5" y="412">Conversation turns</text>
+  <text class="muted" x="597.5" y="438">Session → AgentHarness</text>
+  <text class="muted" x="597.5" y="461">Tools and model execution</text>
+  <text class="muted" x="597.5" y="484">Per-interaction coordination</text>
+  <rect class="box" x="725" y="385" width="215" height="122" rx="9"/>
+  <text class="heading" x="832.5" y="412">Model access</text>
+  <text class="muted" x="832.5" y="438">Provider</text>
+  <text class="muted" x="832.5" y="461">OllamaManager /</text>
+  <text class="muted" x="832.5" y="484">LiteLLMManager</text>
+  <rect class="box" x="20" y="531" width="920" height="42" rx="9"/>
+  <text x="480" y="557">Shared execution tracking: operations · tasks · events</text>
+</svg>

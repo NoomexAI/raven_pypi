@@ -1,0 +1,18 @@
+{% assign diagram_path = '/assets/images/' | append: include.id | append: '.svg' %}
+{% assign global_path = '/assets/images/' | append: include.id | append: '-global.svg' %}
+<figure class="architecture-diagram retrieval-diagram" data-retrieval-diagram aria-label="{{ include.label | escape }} diagrams">
+  <div class="architecture-diagram-stage retrieval-diagram-stage">
+    <div class="retrieval-diagram-controls" role="group" aria-label="{{ include.label | escape }} scope" hidden>
+      <button type="button" data-scope="local" aria-pressed="true" aria-controls="{{ include.id }}-local">Local</button>
+      <button type="button" data-scope="global" aria-pressed="false" aria-controls="{{ include.id }}-global">Global</button>
+    </div>
+    <img id="{{ include.id }}-local" data-diagram-view="local" src="{{ diagram_path | relative_url }}" alt="{{ include.local_alt | escape }}" width="960" height="840">
+    <img id="{{ include.id }}-global" data-diagram-view="global" src="{{ global_path | relative_url }}" alt="{{ include.global_alt | escape }}" width="960" height="840" hidden>
+  </div>
+  <figcaption>
+    <span data-scope-label aria-live="polite">Local scope</span>
+    <a data-diagram-link="local" href="{{ diagram_path | relative_url }}" aria-label="View local {{ include.label | downcase | escape }} diagram at full size">View full-size diagram</a>
+    <a data-diagram-link="global" href="{{ global_path | relative_url }}" aria-label="View global {{ include.label | downcase | escape }} diagram at full size" hidden>View full-size diagram</a>
+  </figcaption>
+  <noscript><p><a href="{{ global_path | relative_url }}">View the global {{ include.label | downcase | escape }} diagram</a> (JavaScript is required to switch views here).</p></noscript>
+</figure>
