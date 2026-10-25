@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="740" viewBox="0 0 960 740" role="img" aria-labelledby="title description">
+  <title id="title">One operation owns a composed session turn</title>
+  <desc id="description">One user's OperationManager creates the operation and owns its shared SQLite store. The operation owns its event stream and the root session task. Agent execution, conversation commit and optional title generation are children of the root. Context, retrieval and reconstruction are descendants of the agent. All use one operation ID and distinct task IDs; this tree is not a parallel-execution schedule.</desc>
+  <style>
+    svg { display: block; margin: 0 auto; color: #202020; background: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .box { fill: #fafafa; stroke: #aaa; stroke-width: 1.5; }
+    .strong { fill: #f0f0f0; stroke: #333; stroke-width: 1.5; }
+    .line { fill: none; stroke: #777; stroke-width: 1.5; }
+    .arrow { fill: #777; }
+    text { fill: currentColor; text-anchor: middle; font-size: 16px; }
+    .heading { font-size: 18px; font-weight: 600; }
+    .small { fill: #595959; font-size: 14px; }
+    @media (prefers-color-scheme: dark) {
+      svg { color: #eee; background: #111; }
+      .box { fill: #191919; stroke: #777; }
+      .strong { fill: #292929; stroke: #ccc; }
+      .line { stroke: #aaa; }
+      .arrow { fill: #aaa; }
+      .small { fill: #bbb; }
+    }
+  </style>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="arrow" d="M 0 0 L 10 5 L 0 10 Z"/></marker></defs>
+  <g class="step">
+    <rect class="strong" x="180" y="20" width="600" height="82" rx="8"/>
+    <text class="heading" x="480" y="50">OperationManager · one user's runtime</text>
+    <text class="small" x="480" y="78">Owns operation registry, shared store and synchronization service</text>
+  </g>
+  <path class="line" d="M 480 102 V 139" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="strong" x="180" y="142" width="600" height="102" rx="8"/>
+    <text class="heading" x="480" y="172">Operation · session.generate_response</text>
+    <text x="480" y="198">One operation UUID · one ordered EventStream</text>
+    <text class="small" x="480" y="224">Root status, cancellation and owned task handles</text>
+  </g>
+  <path class="line" d="M 480 244 V 281" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="strong" x="180" y="284" width="600" height="82" rx="8"/>
+    <text class="heading" x="480" y="314">Root task · session.generate_response</text>
+    <text class="small" x="480" y="342">A task UUID distinct from the operation UUID</text>
+  </g>
+  <path class="line" d="M 480 366 V 390 H 168 V 417" marker-end="url(#arrow)"/>
+  <path class="line" d="M 480 390 V 417" marker-end="url(#arrow)"/>
+  <path class="line" d="M 480 390 H 792 V 417" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="box" x="24" y="420" width="288" height="112" rx="8"/>
+    <text class="heading" x="168" y="450">Agent task</text>
+    <text x="168" y="478">chat.generate_response</text>
+    <text class="small" x="168" y="506">Model and tool loop</text>
+  </g>
+  <g class="step">
+    <rect class="box" x="336" y="420" width="288" height="112" rx="8"/>
+    <text class="heading" x="480" y="450">Commit task</text>
+    <text x="480" y="478">conversation.append_turn</text>
+    <text class="small" x="480" y="506">Runs after agent collection</text>
+  </g>
+  <g class="step">
+    <rect class="box" x="648" y="420" width="288" height="112" rx="8"/>
+    <text class="heading" x="792" y="450">Title task</text>
+    <text x="792" y="478">conversation.generate_title</text>
+    <text class="small" x="792" y="506">Best-effort metadata step</text>
+  </g>
+  <path class="line" d="M 168 532 V 569" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="box" x="24" y="572" width="288" height="138" rx="8"/>
+    <text class="heading" x="168" y="602">Agent descendants</text>
+    <text x="168" y="630">Context preparation</text>
+    <text x="168" y="656">Retrieval invocation(s)</text>
+    <text x="168" y="682">Source reconstruction</text>
+  </g>
+  <g class="step">
+    <rect class="strong" x="360" y="572" width="576" height="138" rx="8"/>
+    <text class="heading" x="648" y="602">All work shares the operation's stream</text>
+    <text x="648" y="630">Different task UUIDs preserve invocation boundaries.</text>
+    <text class="small" x="648" y="656">Root result() waits for the operation's outcome.</text>
+    <text class="small" x="648" y="682">A child reader ends at its own task's terminal event.</text>
+  </g>
+</svg>

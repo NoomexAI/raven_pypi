@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="940" viewBox="0 0 960 940" role="img" aria-labelledby="title description">
+  <title id="title">One service boundary, two trusted application paths</title>
+  <desc id="description">A desktop UI uses a trusted desktop bridge that reads the private launch token and usually omits the user header. A hosted browser calls the host backend, which authenticates the account, chooses its authorized internal UUID, and supplies the service token and X-Raven-User-ID. RAVEN validates service access and UUID format before leasing a reused or lazily initialized user runtime. Account authorization remains with the host; the service token is not an end-user credential. Per-user persistent state remains after runtime closure, but volatile model configuration does not.</desc>
+  <style>
+    svg { display: block; margin: 0 auto; color: #202020; background: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .box { fill: #fafafa; stroke: #aaa; stroke-width: 1.5; }
+    .strong { fill: #f0f0f0; stroke: #333; stroke-width: 1.5; }
+    .line { fill: none; stroke: #777; stroke-width: 1.5; }
+    .arrow { fill: #777; }
+    text { fill: currentColor; text-anchor: middle; font-size: 16px; }
+    .heading { font-size: 18px; font-weight: 600; }
+    .small { fill: #595959; font-size: 14px; }
+    @media (prefers-color-scheme: dark) {
+      svg { color: #eee; background: #111; }
+      .box { fill: #191919; stroke: #777; }
+      .strong { fill: #292929; stroke: #ccc; }
+      .line { stroke: #aaa; }
+      .arrow { fill: #aaa; }
+      .small { fill: #bbb; }
+    }
+  </style>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="arrow" d="M 0 0 L 10 5 L 0 10 Z"/></marker></defs>
+  <g class="step">
+    <rect class="box" x="24" y="20" width="432" height="84" rx="8"/>
+    <text class="heading" x="240" y="50">Desktop UI</text>
+    <text class="small" x="240" y="78">Uses the trusted application's connection</text>
+  </g>
+  <g class="step">
+    <rect class="box" x="504" y="20" width="432" height="84" rx="8"/>
+    <text class="heading" x="720" y="50">Hosted website / browser</text>
+    <text class="small" x="720" y="78">Uses the host's account/session mechanism</text>
+  </g>
+  <path class="line" d="M 240 104 V 141" marker-end="url(#arrow)"/>
+  <path class="line" d="M 720 104 V 141" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="strong" x="24" y="144" width="432" height="152" rx="8"/>
+    <text class="heading" x="240" y="174">Trusted desktop app / bridge</text>
+    <text x="240" y="202">Reads the private launch token</text>
+    <text x="240" y="228">Attaches Authorization: Bearer …</text>
+    <text class="small" x="240" y="254">User header normally omitted</text>
+    <text class="small" x="240" y="278">RAVEN selects its fixed default UUID.</text>
+  </g>
+  <g class="step">
+    <rect class="strong" x="504" y="144" width="432" height="152" rx="8"/>
+    <text class="heading" x="720" y="174">Trusted host backend</text>
+    <text x="720" y="202">Authenticates account → authorized UUID</text>
+    <text x="720" y="228">Attaches Authorization: Bearer …</text>
+    <text x="720" y="254">+ X-Raven-User-ID</text>
+    <text class="small" x="720" y="278">The browser does not receive the launch token.</text>
+  </g>
+  <path class="line" d="M 240 296 V 322 H 480 V 353" marker-end="url(#arrow)"/>
+  <path class="line" d="M 720 296 V 322 H 480"/>
+  <g class="step">
+    <rect class="strong" x="180" y="356" width="600" height="126" rx="8"/>
+    <text class="heading" x="480" y="386">RAVEN's HTTP service boundary</text>
+    <text x="480" y="414">Allowed Host / Origin · private token · UUID format</text>
+    <text class="small" x="480" y="440">A valid UUID selects a runtime; it does not prove account ownership.</text>
+    <text class="small" x="480" y="464">The host must not forward an unchecked browser-supplied identity.</text>
+  </g>
+  <path class="line" d="M 480 482 V 521" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="box" x="180" y="524" width="600" height="100" rx="8"/>
+    <text class="heading" x="480" y="554">UserRuntimeRegistry · UUID → Raven</text>
+    <text x="480" y="580">Reuse an existing runtime or initialize that user's runtime.</text>
+    <text class="small" x="480" y="604">Requests and accepted jobs hold leases; idle runtimes may close.</text>
+  </g>
+  <path class="line" d="M 480 624 V 663" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="strong" x="180" y="666" width="600" height="106" rx="8"/>
+    <text class="heading" x="480" y="696">Raven(selected UUID)</text>
+    <text x="480" y="724">Managers · pipelines · session/harness construction · provider</text>
+    <text class="small" x="480" y="750">One user's paths, operation manager and model-adapter state</text>
+  </g>
+  <path class="line" d="M 480 772 V 811" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="box" x="180" y="814" width="600" height="104" rx="8"/>
+    <text class="heading" x="480" y="844">Persistent state beneath home / selected UUID /</text>
+    <text x="480" y="872">Knowledge · conversations · operations · runtime settings</text>
+    <text class="small" x="480" y="898">Storage survives runtime closure; volatile model configuration does not.</text>
+  </g>
+</svg>

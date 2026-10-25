@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="760" viewBox="0 0 960 760" role="img" aria-labelledby="title description">
+  <title id="title">Recovery records interruption; retry starts new work</title>
+  <desc id="description">A new Raven runtime inspects retained operation records. Unfinished tasks and their operation become failed with operation_interrupted. No worker resumes automatically. An explicit retry request checks policy, error, inputs, attempts and existing links. Permitted work starts a new linked operation, reconciling domain state before reusing a commit or executing again. Ineligible work is rejected and the old operation history stays unchanged.</desc>
+  <style>
+    svg { display: block; margin: 0 auto; color: #202020; background: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .box { fill: #fafafa; stroke: #aaa; stroke-width: 1.5; }
+    .strong { fill: #f0f0f0; stroke: #333; stroke-width: 1.5; }
+    .line { fill: none; stroke: #777; stroke-width: 1.5; }
+    .arrow { fill: #777; }
+    text { fill: currentColor; text-anchor: middle; font-size: 16px; }
+    .heading { font-size: 18px; font-weight: 600; }
+    .small { fill: #595959; font-size: 14px; }
+    @media (prefers-color-scheme: dark) {
+      svg { color: #eee; background: #111; }
+      .box { fill: #191919; stroke: #777; }
+      .strong { fill: #292929; stroke: #ccc; }
+      .line { stroke: #aaa; }
+      .arrow { fill: #aaa; }
+      .small { fill: #bbb; }
+    }
+  </style>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="arrow" d="M 0 0 L 10 5 L 0 10 Z"/></marker></defs>
+  <g class="step">
+    <rect class="box" x="180" y="20" width="600" height="80" rx="8"/>
+    <text class="heading" x="480" y="50">New runtime · Raven.start()</text>
+    <text class="small" x="480" y="78">Inspect retained queued/running operation records</text>
+  </g>
+  <path class="line" d="M 480 100 V 129" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="strong" x="180" y="132" width="600" height="106" rx="8"/>
+    <text class="heading" x="480" y="162">Finalize interrupted work</text>
+    <text x="480" y="190">Unfinished tasks fail; the operation receives a final event.</text>
+    <text class="small" x="480" y="216">operation_interrupted · no automatic worker resumption</text>
+  </g>
+  <path class="line" d="M 480 238 V 267" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="box" x="180" y="270" width="600" height="80" rx="8"/>
+    <text class="heading" x="480" y="300">Optional explicit retry request</text>
+    <text class="small" x="480" y="328">Raven.retry_task(operation_id, task_id)</text>
+  </g>
+  <path class="line" d="M 480 350 V 379" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="strong" x="180" y="382" width="600" height="106" rx="8"/>
+    <text class="heading" x="480" y="412">Validate retry eligibility</text>
+    <text x="480" y="440">Failed status · allowed type/error · recorded input</text>
+    <text class="small" x="480" y="466">Attempts remain · no existing direct retry link</text>
+  </g>
+  <path class="line" d="M 180 435 H 98 V 565 H 177" marker-end="url(#arrow)"/>
+  <text class="small" x="305" y="516">Not eligible</text>
+  <path class="line" d="M 650 488 V 529" marker-end="url(#arrow)"/>
+  <text class="small" x="712" y="514">Eligible</text>
+  <g class="step">
+    <rect class="box" x="180" y="532" width="250" height="94" rx="8"/>
+    <text class="heading" x="305" y="562">Reject retry</text>
+    <text class="small" x="305" y="590">Explain why; do not dispatch</text>
+  </g>
+  <g class="step">
+    <rect class="strong" x="470" y="532" width="360" height="94" rx="8"/>
+    <text class="heading" x="650" y="562">Create new operation + task</text>
+    <text class="small" x="650" y="590">Link old IDs · increment attempt</text>
+  </g>
+  <path class="line" d="M 650 626 V 655" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="box" x="470" y="658" width="360" height="80" rx="8"/>
+    <text class="heading" x="650" y="686">Reconcile, then reuse or run</text>
+    <text class="small" x="650" y="714">Stable file/turn IDs prevent duplicate commits.</text>
+  </g>
+  <text class="small" x="255" y="690">The old failure remains historical.</text>
+  <text class="small" x="255" y="716">Its events are not rewritten as success.</text>
+</svg>

@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="920" viewBox="0 0 960 920" role="img" aria-labelledby="title description">
+  <title id="title">Agent execution inside a session turn</title>
+  <desc id="description">Session delegates conversation, query, retrieval selection, and its operation to AgentHarness. The harness prepares policy, tool schemas, a cached system prompt, and conversation context. FunctionAgent chooses calls to permitted tools; their model-facing results feed subsequent decisions. The harness handles final evidence checks, optionally reconstructs sources, and emits chat.completed with a transcript available for Session to commit separately. Workflow events are translated to operation events throughout, not only at the end.</desc>
+  <style>
+    svg { display: block; margin: 0 auto; color: #202020; background: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .box { fill: #fafafa; stroke: #aaa; stroke-width: 1.5; }
+    .strong { fill: #f0f0f0; stroke: #333; stroke-width: 1.5; }
+    .line { fill: none; stroke: #777; stroke-width: 1.5; }
+    .arrow { fill: #777; }
+    text { fill: currentColor; text-anchor: middle; font-size: 16px; }
+    .heading { font-size: 18px; font-weight: 600; }
+    .small { fill: #595959; font-size: 14px; }
+    @media (prefers-color-scheme: dark) {
+      svg { color: #eee; background: #111; }
+      .box { fill: #191919; stroke: #777; }
+      .strong { fill: #292929; stroke: #ccc; }
+      .line { stroke: #aaa; }
+      .arrow { fill: #aaa; }
+      .small { fill: #bbb; }
+    }
+  </style>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="arrow" d="M 0 0 L 10 5 L 0 10 Z"/></marker></defs>
+  <g class="step">
+    <rect class="box" x="140" y="20" width="680" height="76" rx="8"/>
+    <text class="heading" x="480" y="49">Session delegates an agent run</text>
+    <text x="480" y="77">Conversation + query + retrieval selection + existing operation</text>
+  </g>
+  <path class="line" d="M 480 96 V 129" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="strong" x="140" y="132" width="680" height="126" rx="8"/>
+    <text class="heading" x="480" y="161">AgentHarness prepares the run</text>
+    <text x="480" y="188">AgentPolicy → actual tool schemas and bound wrappers</text>
+    <text x="480" y="215">System prompt + preferences → cached prompt bundle</text>
+    <text class="small" x="480" y="242">Conversation context task → history, compacted when needed</text>
+  </g>
+  <path class="line" d="M 480 258 V 280 H 224 V 315" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="strong" x="24" y="318" width="400" height="130" rx="8"/>
+    <text class="heading" x="224" y="347">FunctionAgent · model execution</text>
+    <text x="224" y="373">Choose a tool call or an answer.</text>
+    <text x="224" y="399">Use the result to decide what comes next.</text>
+    <text class="small" x="224" y="425">Tools run sequentially; the chain is not fixed.</text>
+  </g>
+  <path class="line" d="M 424 355 H 533" marker-end="url(#arrow)"/>
+  <text class="small" x="480" y="341">call</text>
+  <path class="line" d="M 536 409 H 427" marker-end="url(#arrow)"/>
+  <text class="small" x="480" y="395">result</text>
+  <g class="step">
+    <rect class="box" x="536" y="318" width="400" height="130" rx="8"/>
+    <text class="heading" x="736" y="347">Permitted tool wrappers</text>
+    <text x="736" y="373">Retrieval · navigation · memory · preferences</text>
+    <text class="small" x="736" y="399">Run the component; return model-facing data.</text>
+    <text class="small" x="736" y="425">Recoverable error → corrective next_action.</text>
+  </g>
+  <path class="line" d="M 224 448 V 473 H 480 V 495" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="strong" x="140" y="498" width="680" height="100" rx="8"/>
+    <text class="heading" x="480" y="527">Final response + accumulated evidence</text>
+    <text x="480" y="554">Knowledge-content tool attempted, but no evidence obtained?</text>
+    <text class="small" x="480" y="580">Substitute a safe insufficient-evidence response; otherwise keep the answer.</text>
+  </g>
+  <path class="line" d="M 480 598 V 635" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="box" x="140" y="638" width="680" height="76" rx="8"/>
+    <text class="heading" x="480" y="667">Optional source reconstruction</text>
+    <text class="small" x="480" y="695">With evidence: reconstruct files and publish them. Without it: skip this work.</text>
+  </g>
+  <path class="line" d="M 480 714 V 755" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="box" x="140" y="758" width="680" height="76" rx="8"/>
+    <text class="heading" x="480" y="787">chat.completed + completed transcript</text>
+    <text class="small" x="480" y="815">Session then commits the turn separately; agent completion is not that commit.</text>
+  </g>
+  <g class="step">
+    <rect class="strong" x="24" y="862" width="912" height="40" rx="8"/>
+    <text x="480" y="888">Throughout: workflow → event translator → thinking / response / tool activity in the operation stream</text>
+  </g>
+</svg>

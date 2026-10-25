@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="700" viewBox="0 0 960 700" role="img" aria-labelledby="title description">
+  <title id="title">Three views of one persistent conversation</title>
+  <desc id="description">Canonical SQLite messages remain complete for interface history. A separate context_messages table supplies summary plus recent messages through ChatSummaryMemoryBuffer. Vector memory indexes original user and final assistant text in a stable node per turn for optional semantic recall. Explicit preferences separately enter the harness system prompt. Compaction does not replace canonical history or embed its summary as vector memory.</desc>
+  <style>
+    svg { display: block; margin: 0 auto; color: #202020; background: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .box { fill: #fafafa; stroke: #aaa; stroke-width: 1.5; }
+    .strong { fill: #f0f0f0; stroke: #333; stroke-width: 1.5; }
+    .line { fill: none; stroke: #777; stroke-width: 1.5; }
+    .arrow { fill: #777; }
+    text { fill: currentColor; text-anchor: middle; font-size: 16px; }
+    .heading { font-size: 18px; font-weight: 600; }
+    .small { fill: #595959; font-size: 14px; }
+    @media (prefers-color-scheme: dark) {
+      svg { color: #eee; background: #111; }
+      .box { fill: #191919; stroke: #777; }
+      .strong { fill: #292929; stroke: #ccc; }
+      .line { stroke: #aaa; }
+      .arrow { fill: #aaa; }
+      .small { fill: #bbb; }
+    }
+  </style>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="arrow" d="M 0 0 L 10 5 L 0 10 Z"/></marker></defs>
+  <g class="step">
+    <rect class="strong" x="140" y="20" width="680" height="90" rx="8"/>
+  <text class="heading" x="480" y="48">A committed conversation turn</text>
+  <text x="480" y="72">Canonical messages + turn identity + saved run result</text>
+  <text class="small" x="480" y="96">messages.sqlite3 is the durable reference for the interaction.</text>
+  </g>
+  <path class="line" d="M 480 110 V 136 H 168 V 157" marker-end="url(#arrow)"/>
+  <path class="line" d="M 480 136 V 157" marker-end="url(#arrow)"/>
+  <path class="line" d="M 480 136 H 792 V 157" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="box" x="24" y="160" width="288" height="180" rx="8"/>
+  <text class="heading" x="168" y="188">Canonical history</text>
+  <text x="168" y="214">User + tool exchanges</text>
+  <text x="168" y="240">+ final assistant response</text>
+  <text class="small" x="168" y="266">Complete committed order</text>
+  <text class="small" x="168" y="292">Not replaced by compaction</text>
+  </g>
+  <g class="step">
+    <rect class="strong" x="336" y="160" width="288" height="180" rx="8"/>
+  <text class="heading" x="480" y="188">Working model context</text>
+  <text x="480" y="214">Separate context snapshot</text>
+  <text class="small" x="480" y="240">Older messages can be</text>
+  <text class="small" x="480" y="266">summarized; recent ones retained.</text>
+  <text class="small" x="480" y="292">context_messages in SQLite</text>
+  </g>
+  <g class="step">
+    <rect class="box" x="648" y="160" width="288" height="180" rx="8"/>
+  <text class="heading" x="792" y="188">Derived vector memory</text>
+  <text x="792" y="214">User + final assistant text</text>
+  <text class="small" x="792" y="240">One stable node per turn</text>
+  <text class="small" x="792" y="266">Original message payloads</text>
+  <text class="small" x="792" y="292">No summary or tool traces</text>
+  </g>
+  <path class="line" d="M 168 340 V 397" marker-end="url(#arrow)"/>
+  <path class="line" d="M 480 340 V 397" marker-end="url(#arrow)"/>
+  <path class="line" d="M 792 340 V 397" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="box" x="24" y="400" width="288" height="144" rx="8"/>
+  <text class="heading" x="168" y="428">Interface history</text>
+  <text x="168" y="454">Paged canonical messages</text>
+  <text class="small" x="168" y="480">Reopen exact saved exchanges.</text>
+  <text class="small" x="168" y="506">No summary-only UI history.</text>
+  </g>
+  <g class="step">
+    <rect class="box" x="336" y="400" width="288" height="144" rx="8"/>
+  <text class="heading" x="480" y="428">Next agent's history</text>
+  <text x="480" y="454">Summary + recent messages</text>
+  <text class="small" x="480" y="480">ChatSummaryMemoryBuffer</text>
+  <text class="small" x="480" y="506">Prompt tokens reserved first.</text>
+  </g>
+  <g class="step">
+    <rect class="box" x="648" y="400" width="288" height="144" rx="8"/>
+  <text class="heading" x="792" y="428">Optional search_memory</text>
+  <text x="792" y="454">Recall matching turns' messages</text>
+  <text class="small" x="792" y="480">memory_top_k limits nodes,</text>
+  <text class="small" x="792" y="506">not a fixed message count.</text>
+  </g>
+  <g class="step">
+    <rect class="strong" x="140" y="600" width="680" height="66" rx="8"/>
+  <text class="heading" x="480" y="628">Separately: preferences.json → harness system prompt</text>
+  <text class="small" x="480" y="652">Explicit conversation-local instructions, not a compacted history summary.</text>
+  </g>
+  <text class="small" x="480" y="691">Compaction changes only the working context. Canonical messages and the original indexed text remain.</text>
+</svg>

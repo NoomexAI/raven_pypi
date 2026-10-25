@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="820" viewBox="0 0 960 820" role="img" aria-labelledby="title description">
+  <title id="title">Source references expand into complete file views</title>
+  <desc id="description">Successful tool results supply knowledge, file and section references, including duplicates. Reconstruction deduplicates those triples, groups by knowledge and file, and reloads complete stored section sequences. The referenced second section in engineering/flight-notes.pdf and first section in narrative/short_story.txt are highlighted, with unselected context retained. File navigation type and available section ranges are preserved. Each file view is emitted and returned without model inference.</desc>
+  <style>
+    svg { display: block; margin: 0 auto; color: #202020; background: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .box { fill: #fafafa; stroke: #aaa; stroke-width: 1.5; }
+    .strong { fill: #f0f0f0; stroke: #333; stroke-width: 1.5; }
+    .hit { fill: #e8e8e8; stroke: #333; stroke-width: 2; }
+    .line { fill: none; stroke: #777; stroke-width: 1.5; }
+    .arrow { fill: #777; }
+    text { fill: currentColor; text-anchor: middle; font-size: 16px; }
+    .heading { font-size: 18px; font-weight: 600; }
+    .small { fill: #595959; font-size: 14px; }
+    @media (prefers-color-scheme: dark) {
+      svg { color: #eee; background: #111; }
+      .box { fill: #191919; stroke: #777; }
+      .strong { fill: #292929; stroke: #ccc; }
+      .hit { fill: #363636; stroke: #ddd; }
+      .line { stroke: #aaa; }
+      .arrow { fill: #aaa; }
+      .small { fill: #bbb; }
+    }
+  </style>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="arrow" d="M 0 0 L 10 5 L 0 10 Z"/></marker></defs>
+  <text class="heading" x="480" y="28">Source references supplied by tool results</text>
+  <g class="step">
+    <rect class="box" x="24" y="56" width="432" height="112" rx="8"/>
+    <text class="heading" x="240" y="86">engineering / flight-notes.pdf</text>
+    <text x="240" y="114">a83fd91c20b4-2</text>
+    <text class="small" x="240" y="142">Returned twice across the investigation</text>
+  </g>
+  <g class="step">
+    <rect class="box" x="504" y="56" width="432" height="112" rx="8"/>
+    <text class="heading" x="720" y="86">narrative / short_story.txt</text>
+    <text x="720" y="114">b27d8fa10c56-1</text>
+    <text class="small" x="720" y="142">Another file supplies a different section</text>
+  </g>
+  <path class="line" d="M 240 168 V 194 H 480 V 217" marker-end="url(#arrow)"/>
+  <path class="line" d="M 720 168 V 194 H 480"/>
+  <g class="step">
+    <rect class="strong" x="180" y="220" width="600" height="86" rx="8"/>
+    <text class="heading" x="480" y="250">Deduplicate references and group by knowledge + file</text>
+    <text class="small" x="480" y="278">Resolve every ID against the named file's complete stored sequence.</text>
+  </g>
+  <path class="line" d="M 480 306 V 332 H 240 V 363" marker-end="url(#arrow)"/>
+  <path class="line" d="M 480 332 H 720 V 363" marker-end="url(#arrow)"/>
+  <g class="step">
+    <rect class="box" x="24" y="366" width="432" height="290" rx="8"/>
+    <text class="heading" x="240" y="396">engineering / flight-notes.pdf</text>
+    <text class="small" x="240" y="422">navigation_type: page</text>
+    <rect class="box" x="48" y="440" width="384" height="52" rx="6"/>
+    <text x="240" y="462">a83fd91c20b4-1 · surrounding context</text>
+    <text class="small" x="240" y="482">source_range: [1, 1]</text>
+    <rect class="hit" x="48" y="506" width="384" height="62" rx="6"/>
+    <text x="240" y="532">a83fd91c20b4-2 · highlighted</text>
+    <text class="small" x="240" y="554">source_range: [2, 3]</text>
+    <rect class="box" x="48" y="582" width="384" height="52" rx="6"/>
+    <text x="240" y="604">a83fd91c20b4-3 · surrounding context</text>
+    <text class="small" x="240" y="624">source_range: [3, 3]</text>
+  </g>
+  <g class="step">
+    <rect class="box" x="504" y="366" width="432" height="290" rx="8"/>
+    <text class="heading" x="720" y="396">narrative / short_story.txt</text>
+    <text class="small" x="720" y="422">navigation_type: none</text>
+    <rect class="hit" x="528" y="440" width="384" height="62" rx="6"/>
+    <text x="720" y="466">b27d8fa10c56-1 · highlighted</text>
+    <text class="small" x="720" y="488">source_range: null</text>
+    <rect class="box" x="528" y="516" width="384" height="52" rx="6"/>
+    <text x="720" y="538">b27d8fa10c56-2 · surrounding context</text>
+    <text class="small" x="720" y="558">source_range: null</text>
+    <text class="small" x="720" y="606">Stored section order, not retrieval rank</text>
+    <text class="small" x="720" y="630">Full text retained in each section's raw_content</text>
+  </g>
+  <path class="line" d="M 240 656 V 682 H 480 V 709" marker-end="url(#arrow)"/>
+  <path class="line" d="M 720 656 V 682 H 480"/>
+  <g class="step">
+    <rect class="strong" x="180" y="712" width="600" height="86" rx="8"/>
+    <text class="heading" x="480" y="742">One reconstruction.file event per file + a task result list</text>
+    <text class="small" x="480" y="770">No model inference · supplied sections highlighted, not certified claims</text>
+  </g>
+</svg>
