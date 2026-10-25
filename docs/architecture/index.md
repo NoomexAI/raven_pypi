@@ -95,8 +95,9 @@ execution. Persistent resources outlive individual sessions and agent runs.*
 operation manager, and workflows are brought together. It provides convenient
 entry points and manages their lifecycle. It does not implement a second parser,
 retrieval engine, or conversation database alongside the underlying components.
-Model-dependent pipelines and the harness are configured when the model pair
-is prepared; constructing the facade does not itself start model inference.
+Model-dependent retrieval pipelines are configured when the model pair is
+prepared. `Raven.session()` later constructs the harness for a session;
+constructing the facade does not itself start model inference.
 
 The source packages reflect these boundaries:
 
@@ -342,7 +343,7 @@ raven-home/
 │   │   └── runtime_settings.json
 │   └── temp/
 │       └── uploads/
-│           ├── b6c3a970-84d2-4e15-9f68-31a0d247c5eb.pdf
+│           ├── b6c3a97084d2.pdf
 │           └── browser/
 │               └── f3d2108a-6e45-4927-bc19-05a8d7642ef0/
 │                   ├── manifest.json
@@ -393,8 +394,9 @@ contrast, `system_settings/` and the CLI's `temp/server_auth/` remain shared
 at home level. Selecting an external system-settings file replaces discovery
 of the illustrated default file; it does not create a copy in every user root.
 
-The first hosted user illustrates two temporary source forms. The UUID-named
-PDF directly inside `uploads/` is an ingestion working snapshot, removed when
+The first hosted user illustrates two temporary source forms. The file-ID-named
+PDF directly inside `uploads/` is an ingestion working snapshot: its name uses
+the ingestion's 12-character file ID and the source suffix. It is removed when
 that pipeline finishes its cleanup. The file inside `uploads/browser/<id>/`
 is a browser-upload source retained for the bounded retry window; its
 `manifest.json` records expiry and operation/task references once submitted.
@@ -861,7 +863,7 @@ metadata-based search, or a combination of the two without being ingested again.
 RAVEN implements four mechanisms rather than requiring every question to follow
 one fixed search path. A pipeline selects evidence; it does not generate the
 answer. Answer generation and the decision to call a retrieval tool belong to
-the agent harness, discussed in the next section.
+the agent harness, discussed in [Section 6](#6-the-agent-harness).
 
 ### 4.1 Retrieval contracts and local/global scope
 

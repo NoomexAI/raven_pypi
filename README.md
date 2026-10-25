@@ -426,7 +426,7 @@ The states mean:
 | --- | --- | --- | --- |
 | `queued` | The operation or task has been durably registered but its worker has not started. | The root task is being established. | Waits. |
 | `running` | The root worker is active and may create nested tasks. | Yes, while the operation remains running. | Waits. |
-| `completed` | The worker and all child tasks reached a successful terminal state. | No. | Returns the task's native result. |
+| `completed` | The root worker succeeded and its child tasks joined; explicitly handled child failures may remain in task history. | No. | Returns the task's native result. |
 | `failed` | A worker raised an error and the failure was persisted. | No. | Raises the original `RavenError` or a safe reconstructed error. |
 | `cancelled` | Cancellation was requested and terminal cancellation was persisted. | No. | Raises `RavenError` with `code="operation_cancelled"`. |
 
@@ -434,6 +434,11 @@ The states mean:
 also has a status because nested work can finish before the root operation.
 The operation cannot complete successfully until its active child tasks have
 joined.
+
+Awaiting a child's `result()` surfaces its error and marks that result as
+observed. A parent may catch and handle that error, then complete successfully;
+the child's own status remains failed. Unobserved child failures or
+cancellations prevent successful operation completion.
 
 ### Root, child, and sibling tasks
 
@@ -1034,13 +1039,14 @@ assigning two names. It performs this serialized sequence:
 1. Validate that the first spec has role `llm` and the second has role
    `embedding`.
 2. Build or reuse both LlamaIndex adapters through `Provider`.
-3. Verify that the LLM exposes asynchronous chat and that the embedding model
-   exposes asynchronous query embedding.
+3. Verify that the LLM exposes asynchronous chat, streaming chat, and structured
+   prediction, and that the embedding model exposes asynchronous query and
+   batch text embedding plus similarity calculation.
 4. If the pair changed, validate the embedding model against existing
    knowledge stores. Existing vector collections cannot silently switch to an
    incompatible embedding identity or dimension.
-5. Install the validated pair into RAVEN and rebuild model-dependent pipelines
-   and the harness.
+5. Install the validated pair into RAVEN and rebuild model-dependent retrieval
+   pipelines. A session's harness is created later by `Raven.session()`.
 6. Unload replaced Ollama models that are no longer part of the active pair.
 7. Preload the configured Ollama embedding model and LLM. Cloud adapters skip
    local residency actions.
@@ -1103,9 +1109,12 @@ the externally managed Ollama process.
 Configuration verifies both adapters and checks the embedding model against
 existing knowledge stores before installing the new pair. When no models are
 configured, RAVEN installs the pair and preloads its Ollama models. When a pair
-is already configured, RAVEN unloads replaced Ollama models, installs the new
-pair, and preloads its Ollama models. If pre-installation validation fails, the
-previous configured pair remains active.
+is already configured, RAVEN installs the new pair and wires its pipelines,
+unloads replaced Ollama models that are no longer selected, and preloads the
+configured embedding model followed by the LLM. If pre-installation validation
+fails, the previous configured pair remains active. Unload or preload failures
+can occur after the new pair is installed: configuration and external Ollama
+residency are not one atomic transaction.
 
 RAVEN also exposes operation-based Ollama administration for connection checks,
 listing, inspection, pulling, and deletion. These methods connect to the
@@ -1619,10 +1628,13 @@ RAVEN snapshots the submitted source before parsing so the file cannot silently
 change underneath a running ingestion. Concurrent ingestion of the same file
 is rejected, and an already committed file is not duplicated during a retry.
 
-Vector writes happen before the SQLite metadata commit. If the metadata commit
-fails or cancellation occurs at that boundary, RAVEN removes the uncommitted
-vectors. Startup and graceful-shutdown reconciliation also remove orphaned
-vectors left by a hard process termination.
+Vector writes happen before the SQLite metadata commit. On a normal error or
+cancellation, RAVEN settles the in-flight write and removes uncommitted vectors.
+Graceful shutdown also reconciles tracked pending writes. A hard process
+termination bypasses that cleanup: retry uses the ingestion's stable `file_id`
+to remove uncommitted vectors or reuse an already committed file. Startup marks
+abandoned operations as interrupted; it does not perform a knowledge-wide
+orphan-vector sweep.
 
 Ingestion tasks persist the information required for user-confirmed retry. A
 server upload remains in its private retry area only for the configured
@@ -1678,8 +1690,10 @@ The strategies perform different work:
   deduplicates chunk hits by section, and returns the highest-ranked complete
   sections.
 - **Hierarchical** asks the LLM to score knowledge summaries where needed,
-  then scores section metadata in bounded batches. Full section content is
-  loaded only for selected section IDs.
+  then scores section metadata in bounded batches. Candidate section records,
+  including their content, are loaded from storage in the selected scope, but
+  only metadata is sent to the scorer. The final result includes the full
+  content of selected sections.
 - **Vector-conditioned** first uses vector retrieval to select likely files or
   knowledges, then applies hierarchical section scoring only inside that
   narrowed scope.
@@ -1758,7 +1772,7 @@ strategies:
 
 ```json
 {
-  "agreement_type": "Weak Agreement",
+  "agreement_type": "Disagreement",
   "retrieved_content": {
     "embedded_retrieval": [
       {
@@ -2058,17 +2072,19 @@ for the conversation. Passing an exact mode restricts exposure as described in
 | `max_iterations` | Runtime setting, initially `10` | Positive and no greater than the system maximum, initially `50`. |
 | `top_k` | Runtime setting, initially `3` | Positive and no greater than the retrieval system maximum, initially `25`. |
 | `memory_token_limit` | Runtime setting, initially `4,000` | Positive model-context memory budget. Extremely small values can fail memory initialization. |
-| `memory_top_k` | Runtime setting, initially `5` | Positive number of semantic memory messages returned per search. |
+| `memory_top_k` | Runtime setting, initially `5` | Positive maximum number of matched memory nodes per search; currently one node represents one turn and may return both user and assistant messages. |
 
-Starting a session opens and initializes the conversation's compacted and
-vector memory using the currently configured model pair. Closing a session
-cancels only runs created through that session; it does not delete or close the
-shared persistent conversation owned by `ConversationManager`.
+Starting a session opens the conversation's storage. Memory initialization and
+reconciliation using the configured model pair happen when
+`generate_response()` submits a turn, before its session task is created.
+Closing a session cancels only runs created through that session; it does not
+delete or close the shared persistent conversation owned by
+`ConversationManager`.
 
 Each run also has a stable `turn_id`. A committed turn contains the user
 message, assistant tool-call messages, tool-result messages, and final
 assistant response. Internal thinking is streamed for the caller but is not
-stored as conversation history.
+inserted into the canonical model-compatible message sequence.
 
 The canonical message sequence for a tool-using turn is:
 
@@ -2081,20 +2097,22 @@ assistant final response
 ```
 
 Persisting tool calls and results lets later model context remember what was
-used and lets `reconstruct_from_turn()` recover evidence. Thinking deltas are
-excluded because they are transient model reasoning, not durable conversation
-content.
+used and lets `reconstruct_from_turn()` recover evidence. Thinking is excluded
+from those canonical messages, not from all persistent storage: it remains in
+operation events and may also be present in the turn's saved `AgentRunResult`
+snapshot in `messages.sqlite3`.
 
-The first completed user turn triggers a separate title completion when the
-conversation is still untitled. That title operation does not enter the chat
-history, and later turns do not regenerate it. Applications may update the
-title or pinned state explicitly.
+After a turn is committed, the session attempts a separate title completion if
+the conversation is still untitled. That completion does not enter the chat
+history. Once a title has been generated or set explicitly, later turns do not
+regenerate it. Applications may update the title or pinned state explicitly.
 
 Title generation is best-effort: a title failure does not discard an otherwise
 successful answer or turn commit. Until generation succeeds or the application
 sets a title, metadata remains `title="New Conversation"` and
-`is_titled=false`. A manual title update marks the conversation titled so
-automatic generation will not overwrite it.
+`is_titled=false`. A later completed turn can retry generation using that turn's
+query. A manual title update marks the conversation titled so automatic
+generation will not overwrite it.
 
 ### Turn serialization
 
@@ -3350,7 +3368,7 @@ The complete settings document contains these fields:
 | `retrieval_top_k` | `3` | Positive integer no greater than `SystemConfig.max_retrieval_top_k` (`25` by default) | Default number of results requested by retrieval pipelines and agent retrieval tools. |
 | `agent_max_iterations` | `10` | Positive integer no greater than `SystemConfig.max_agent_iterations` (`50` by default) | Maximum number of agent workflow iterations allowed for one turn. |
 | `memory_token_limit` | `4000` | Positive integer | Token budget for the model-facing compacted conversation context. |
-| `memory_top_k` | `5` | Positive integer | Number of semantically similar canonical messages returned by conversation-memory search. |
+| `memory_top_k` | `5` | Positive integer | Maximum matched memory nodes in conversation-memory search. Currently each node represents a turn and may return both user and assistant messages, so this is not a strict message-count limit. |
 
 Runtime settings are defaults, not global mutable variables inside running
 work. Each ingestion, retrieval, or session run captures its effective values
