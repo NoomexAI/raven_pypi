@@ -6,7 +6,9 @@
       :root { color: #f2f2f2; }
     }
   </style>
-  <path d="M0 0H22.5L37.7 28.3L30.3 42L15.7 14.3Z"/>
-  <path d="M128 0H105.5L90.3 28.3L97.7 42L112.3 14.3Z"/>
-  <path fill-rule="evenodd" d="M40 30H88L96 44.5L64 106L32 44.5ZM42.5 38.5L64 82.5L85.5 38.5Z"/>
+  <g id="raven-mark-shape">
+    <path d="M0 0H22.5L37.7 28.3L30.3 42L15.7 14.3Z"/>
+    <path d="M128 0H105.5L90.3 28.3L97.7 42L112.3 14.3Z"/>
+    <path fill-rule="evenodd" d="M40 30H88L96 44.5L64 106L32 44.5ZM42.5 38.5L64 82.5L85.5 38.5Z"/>
+  </g>
 </svg>

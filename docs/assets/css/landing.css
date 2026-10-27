@@ -64,6 +64,63 @@
   padding: 80px 0 56px;
 }
 
+.rv-hero-copy {
+  min-width: 0;
+}
+
+.rv-hero-art {
+  display: none;
+  min-width: 0;
+  pointer-events: none;
+}
+
+.rv-hero-sculpture {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+  transform: perspective(700px) rotateX(12deg) rotateY(-20deg) rotateZ(-10deg);
+}
+
+.rv-hero-depth {
+  fill: var(--site-background);
+  stroke: rgba(var(--site-accent-rgb), .35);
+  stroke-width: .65;
+  stroke-linejoin: round;
+}
+
+.rv-hero-face {
+  fill: var(--site-foreground);
+}
+
+.rv-hero-art .rv-hero-art-caption {
+  margin: 22px 0 0;
+  color: var(--site-foreground);
+  font-size: 1.2rem;
+  font-weight: 500;
+  line-height: 1.6;
+  text-align: center;
+}
+
+.rv-hero-art-caption span {
+  color: var(--site-muted);
+  font-size: 1rem;
+  font-weight: 400;
+}
+
+@media (min-width: 1100px) {
+  .rv-hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(240px, 300px);
+    align-items: center;
+    column-gap: clamp(28px, 4vw, 56px);
+  }
+
+  .rv-hero-art {
+    display: block;
+  }
+}
+
 .rv-hero h1 {
   font-size: clamp(2.1rem,5.4vw,3.4rem);
   max-width: 16em;
