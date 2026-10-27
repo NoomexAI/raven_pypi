@@ -74,10 +74,12 @@ dmypy.json
 # Project specific
 /RAVEN/
 /tui_example/
+/mcp_example/
 example_tests/
 *.log
 
 # Local config / secrets
+/.codex/
 .env
 *.env
 *.env.local

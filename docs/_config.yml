@@ -43,7 +43,7 @@ navigation:
   - title: Architecture
     url: "/architecture/"
   - title: Integration guides
-    url: "/guides/"
+    url: "/integration_guides/"
   - title: Development notes
     url: "/development/"
 

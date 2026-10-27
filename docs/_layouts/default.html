@@ -15,6 +15,7 @@
     {% for stylesheet in page.stylesheets %}
       <link rel="stylesheet" href="{{ stylesheet | relative_url }}">
     {% endfor %}
+    <script src="{{ '/assets/js/site-links.js' | relative_url }}" defer></script>
     {% for script in page.scripts %}
       <script src="{{ script | relative_url }}" defer></script>
     {% endfor %}
