@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 106" fill="currentColor">
+  <title>RAVEN mark</title>
+  <style>
+    :root { color: #202020; }
+    @media (prefers-color-scheme: dark) {
+      :root { color: #f2f2f2; }
+    }
+  </style>
+  <path d="M0 0H22.5L37.7 28.3L30.3 42L15.7 14.3Z"/>
+  <path d="M128 0H105.5L90.3 28.3L97.7 42L112.3 14.3Z"/>
+  <path fill-rule="evenodd" d="M40 30H88L96 44.5L64 106L32 44.5ZM42.5 38.5L64 82.5L85.5 38.5Z"/>
+</svg>

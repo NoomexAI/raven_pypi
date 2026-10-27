@@ -7,6 +7,7 @@
     <meta name="description" content="{{ page.description | default: site.description | escape }}">
     <title>{% if page.title and page.title != site.title %}{{ page.title | escape }} · {% endif %}{{ site.title | escape }}</title>
     <link rel="canonical" href="{{ page.url | absolute_url }}">
+    <link rel="icon" type="image/svg+xml" href="{{ '/assets/images/raven-mark.svg' | relative_url }}">
     {% unless page.layout == 'landing' %}
       <link rel="stylesheet" href="{{ '/assets/css/github-markdown.css' | relative_url }}">
       <link rel="stylesheet" href="{{ '/assets/css/syntax.css' | relative_url }}">
@@ -25,7 +26,13 @@
 
     <header class="site-header">
       <div class="site-shell">
-        <a class="site-brand" href="{{ '/' | relative_url }}">{{ site.title | escape }}</a>
+        <a class="site-brand" href="{{ '/' | relative_url }}" aria-label="{{ site.title | escape }}">
+          {% if site.title == 'RAVEN' %}
+            <span aria-hidden="true">RA</span><span class="site-brand-mark" aria-hidden="true"></span><span aria-hidden="true">EN</span>
+          {% else %}
+            {{ site.title | escape }}
+          {% endif %}
+        </a>
 
         <nav aria-label="Main navigation">
           <ul class="site-navigation">

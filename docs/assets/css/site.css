@@ -84,11 +84,26 @@ a:focus-visible {
 .site-header .site-brand {
   grid-area: brand;
   justify-self: start;
+  display: inline-flex;
+  align-items: baseline;
   padding-block: 8px;
   color: var(--site-foreground);
   font-size: 24px;
   font-weight: 600;
   letter-spacing: 0.04em;
+}
+
+.site-brand-mark {
+  display: block;
+  flex: none;
+  width: auto;
+  height: 0.73em;
+  height: 1cap;
+  aspect-ratio: 128 / 106;
+  margin-inline: -0.04em -0.02em;
+  background-color: currentColor;
+  -webkit-mask: url("../images/raven-mark.svg") center / contain no-repeat;
+  mask: url("../images/raven-mark.svg") center / contain no-repeat;
 }
 
 .site-header nav {
