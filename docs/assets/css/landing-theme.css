@@ -1075,7 +1075,7 @@
     content: "";
     position: absolute;
     width: 48px;
-    height: 44px;
+    height: 48px;
     background: currentColor;
     -webkit-mask: url("../illustrations/raven-design/question-bubble.svg") center / contain no-repeat;
     mask: url("../illustrations/raven-design/question-bubble.svg") center / contain no-repeat;
