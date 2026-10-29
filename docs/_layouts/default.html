@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="color-scheme" content="{% if page.layout == 'landing' %}dark{% else %}light dark{% endif %}">
+    <meta name="color-scheme" content="light dark">
     <meta name="description" content="{{ page.description | default: site.description | escape }}">
     <title>{% if page.title and page.title != site.title %}{{ page.title | escape }} · {% endif %}{{ site.title | escape }}</title>
     <link rel="canonical" href="{{ page.url | absolute_url }}">

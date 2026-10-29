@@ -10,7 +10,7 @@
   border: 1px solid var(--rv-line);
   border-radius: 12px;
   overflow: hidden;
-  background: var(--site-background);
+  background: transparent;
 }
 
 .rv-film-query {
@@ -277,7 +277,7 @@
 
 .rv-film-source-text {
   padding: 14px 22px;
-  border-bottom: 1px solid var(--rv-line);
+  border-top: 1px solid var(--rv-line);
   font-size: .9rem;
 }
 
