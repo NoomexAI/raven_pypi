@@ -5,6 +5,7 @@ stylesheets:
   - /assets/css/landing.css
   - /assets/css/retrieval-player.css
   - /assets/css/source-graph.css
+  - /assets/css/landing-theme.css
 scripts:
   - /assets/js/landing.js
   - /assets/js/retrieval-example.js
@@ -17,8 +18,12 @@ description: >-
 ---
 
 <section class="rv-hero">
+<div class="rv-hero-light" aria-hidden="true">
+<div class="rv-hero-light-bars"></div>
+<img src="{{ '/assets/illustrations/raven-design/fractal-ornament.svg' | relative_url }}" alt="">
+</div>
 <div class="rv-hero-copy">
-<h1>Build document assistants with answers you can inspect.</h1>
+<h1>Build document assistants<br>with answers you can inspect.</h1>
 <p class="rv-sub">RAVEN is an open-source RAG framework for developers building assistants around their own documents. Agent-directed retrieval, source reconstruction, and persistent conversations, in a backend you can use from Python or connect to your own interface.</p>
 <div class="rv-install">
 <code>pip install noomexai-raven</code>
@@ -28,7 +33,7 @@ description: >-
 </button>
 <span class="rv-copy-status" role="status"></span>
 </div>
-<div class="rv-actions"><a class="rv-btn rv-btn-primary" href="https://github.com/NoomexAI/raven_pypi/blob/main/README.md">Get started</a><a class="rv-btn" href="https://github.com/NoomexAI/raven_pypi">View on GitHub</a><a class="rv-btn" href="https://pypi.org/project/noomexai-raven/0.2.0/">RAVEN v0.2.0 on PyPI &rarr;</a></div>
+<div class="rv-actions"><a class="rv-btn rv-btn-primary" href="https://github.com/NoomexAI/raven_pypi">View on GitHub &nearr;</a><a class="rv-btn" href="https://pypi.org/project/noomexai-raven/0.2.0/">RAVEN v0.2.0 on PyPI &nearr;</a></div>
 </div>
 <div class="rv-hero-art">
 <svg class="rv-hero-sculpture" viewBox="-8 -8 160 140" aria-hidden="true" focusable="false">
@@ -43,53 +48,88 @@ description: >-
 </div>
 </section>
 
-<div class="rv-facts">
-<ul class="rv-facts-features"><li>Ollama or LiteLLM models</li><li>SQLite + local Qdrant</li><li>Optional FastAPI server</li></ul>
-<ul class="rv-facts-meta"><li>MIT licensed</li><li>Python 3.11+</li></ul>
-</div>
-
-<section class="rv-sec">
-<h2>From a question to something you can check</h2>
+<section class="rv-sec rv-workflow" id="workflow">
+<h2>From a question to<br>something you can verify</h2>
 <p class="rv-sub">An answer alone leaves the reader with another question: <em>where did that come from?</em> With RAVEN, your application can show the search the model performed and the document sections supplied to it, highlighted within their surrounding content.</p>
 <div class="rv-flow" data-rv-flow>
-<p class="rv-flow-hint">Select a step to explore the workflow.</p>
-<ol class="rv-flow-path" aria-label="From question to follow-up">
-<li><a class="rv-flow-node" href="#workflow-question" id="workflow-step-question" data-flow-step><span class="rv-flow-number" aria-hidden="true">01</span><span>A reader asks</span></a><span class="rv-flow-arrow" aria-hidden="true">&rarr;</span></li>
-<li><a class="rv-flow-node" href="#workflow-investigation" id="workflow-step-investigation" data-flow-step><span class="rv-flow-number" aria-hidden="true">02</span><span>The model investigates</span></a><span class="rv-flow-arrow" aria-hidden="true">&rarr;</span></li>
-<li><a class="rv-flow-node" href="#workflow-sources" id="workflow-step-sources" data-flow-step><span class="rv-flow-number" aria-hidden="true">03</span><span>The sources appear</span></a><span class="rv-flow-arrow" aria-hidden="true">&rarr;</span></li>
-<li><a class="rv-flow-node" href="#workflow-follow-up" id="workflow-step-follow-up" data-flow-step><span class="rv-flow-number" aria-hidden="true">04</span><span>The reader follows up</span></a></li>
-</ol>
+<p class="rv-flow-hint">Drag a card left or right to explore the workflow.</p>
 <div class="rv-flow-details">
-<section class="rv-flow-panel" id="workflow-question" data-flow-panel>
+<section class="rv-flow-panel" id="workflow-question" data-flow-panel aria-expanded="false">
+<div class="rv-flow-card-inner" data-flow-flip>
+<div class="rv-flow-face rv-flow-face-front" data-flow-front>
 <span class="rv-label">01 / Question</span>
-<h3>Start with the question you want to investigate.</h3>
+<h3>A reader asks</h3>
+<p>Start with a question worth investigating.</p>
+<div class="rv-flow-orb" aria-hidden="true"><svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="20" cy="17" r="6"/><path d="M9 35v-4a11 11 0 0 1 22 0v4M32 12a7 7 0 0 1 0 14m4 3 4 6"/></svg></div>
 <blockquote>&ldquo;How do the reaction-wheel anomaly, battery condition, and safe-hold response fit together?&rdquo;</blockquote>
+<span class="rv-flow-flip-hint">Click for details</span>
+</div>
+<div class="rv-flow-face rv-flow-face-back" data-flow-back aria-hidden="true" inert>
+<span class="rv-label">01 / More detail</span>
+<h3>Choose the conversation scope</h3>
 <p>In this example, the reader is working with engineering documents. A conversation can focus on one knowledge or explore the whole knowledge base.</p>
+<span class="rv-flow-flip-hint">Click to return</span>
+</div>
+</div>
 </section>
-<section class="rv-flow-panel" id="workflow-investigation" data-flow-panel>
+<section class="rv-flow-panel" id="workflow-investigation" data-flow-panel aria-expanded="false">
+<div class="rv-flow-card-inner" data-flow-flip>
+<div class="rv-flow-face rv-flow-face-front" data-flow-front>
 <span class="rv-label">02 / Investigation</span>
 <h3>The agent decides how to look.</h3>
-<p>It chooses from the tools available for this conversation and turn. It can retrieve information, chain additional tool calls when needed, or ask the reader for clarification.</p>
-<p class="rv-flow-example">Your interface can show which tool is running and when its result arrives. This diagram illustrates that process; it does not execute any tools.</p>
+<p>Retrieval tools are chosen and used in sequence.</p>
+<div class="rv-flow-orb" aria-hidden="true"><svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="15" cy="13" r="5"/><circle cx="34" cy="24" r="5"/><circle cx="15" cy="36" r="5"/><path d="m19 16 10 6m0 5-10 6M15 18v13"/></svg></div>
+<p class="rv-flow-example">Each tool call and result becomes an event your interface can show.</p>
+<span class="rv-flow-flip-hint">Click for details</span>
+</div>
+<div class="rv-flow-face rv-flow-face-back" data-flow-back aria-hidden="true" inert>
+<span class="rv-label">02 / More detail</span>
+<h3>Tool use follows the available scope</h3>
+<p>The agent chooses from the tools available for this conversation and turn. It can retrieve information, chain additional tool calls when needed, or ask the reader for clarification.</p>
+<p class="rv-flow-example">Your interface can show which tool is running and when its result arrives. This illustration describes the event flow; it does not execute tools.</p>
+<span class="rv-flow-flip-hint">Click to return</span>
+</div>
+</div>
 </section>
-<section class="rv-flow-panel" id="workflow-sources" data-flow-panel>
+<section class="rv-flow-panel" id="workflow-sources" data-flow-panel aria-expanded="false">
+<div class="rv-flow-card-inner" data-flow-flip>
+<div class="rv-flow-face rv-flow-face-front" data-flow-front>
 <span class="rv-label">03 / Source inspection</span>
 <h3>See the material supplied to the model.</h3>
-<p>Source reconstruction presents the retrieved sections inside a readable view of the file, preserving the surrounding content so the reader can check the passage in context.</p>
-<div class="rv-flow-example"><span class="rv-label">Illustrative source view</span><p>Surrounding document context</p><p><mark>Sections supplied to the model</mark></p><p>Nearby context remains available to inspect.</p></div>
+<p>Relevant sections appear within their surrounding context.</p>
+<div class="rv-flow-orb" aria-hidden="true"><svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="12" y="7" width="25" height="34" rx="3"/><path d="M18 15h13M18 21h13M18 27h13M18 33h8"/><path d="M7 12v25"/></svg></div>
+<p class="rv-flow-example">Sections supplied to the model<br>Nearby context remains available to inspect.</p>
+<span class="rv-flow-flip-hint">Click for details</span>
+</div>
+<div class="rv-flow-face rv-flow-face-back" data-flow-back aria-hidden="true" inert>
+<span class="rv-label">03 / More detail</span>
+<h3>Keep source passages in context</h3>
+<p>Source reconstruction presents retrieved sections inside a readable view of the file, preserving surrounding content so readers can check the passage in context.</p>
+<p class="rv-flow-example">The reconstruction identifies the sections supplied to the model and leaves nearby context visible for inspection.</p>
+<span class="rv-flow-flip-hint">Click to return</span>
+</div>
+</div>
 </section>
-<section class="rv-flow-panel" id="workflow-follow-up" data-flow-panel>
+<section class="rv-flow-panel" id="workflow-follow-up" data-flow-panel aria-expanded="false">
+<div class="rv-flow-card-inner" data-flow-flip>
+<div class="rv-flow-face rv-flow-face-front" data-flow-front>
 <span class="rv-label">04 / Follow-up</span>
 <h3>Check the context, then ask the next question.</h3>
+<p>The discussion continues in the same conversation.</p>
+<div class="rv-flow-orb" aria-hidden="true"><svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M10 26a15 15 0 1 1 6 10M10 16v10h10"/><path d="M25 14v11l7 4"/></svg></div>
 <blockquote>&ldquo;Which battery condition changes that response?&rdquo;</blockquote>
+<span class="rv-flow-flip-hint">Click for details</span>
+</div>
+<div class="rv-flow-face rv-flow-face-back" data-flow-back aria-hidden="true" inert>
+<span class="rv-label">04 / More detail</span>
+<h3>Continue the same conversation</h3>
 <p>The reader continues in the same conversation. RAVEN retains the discussion and tool interactions, and the agent can investigate the follow-up using the available tools.</p>
+<span class="rv-flow-flip-hint">Click to return</span>
+</div>
+</div>
 </section>
 </div>
-<div class="rv-flow-controls" hidden>
-<button type="button" data-flow-previous>&larr; Previous step</button>
-<span class="rv-flow-position" data-flow-position role="status"></span>
-<button type="button" data-flow-next>Next step &rarr;</button>
-</div>
+<p class="rv-flow-position" data-flow-position role="status" aria-live="polite">Step 1 of 4</p>
 </div>
 <p class="rv-note">An illustrative workflow, not a recorded model response or a built-in chat interface. RAVEN supplies the backend; you decide how to present it.</p>
 </section>
@@ -157,6 +197,7 @@ description: >-
 </section>
 
 <figure class="rv-source-trail" data-source-trail tabindex="0" aria-label="Explore the source trail. Scroll to unfold, or focus this diagram and tab through its nodes.">
+<div class="rv-source-trail-scene">
 <svg viewBox="0 0 1080 470" role="group" aria-labelledby="rv-trail-title rv-trail-description">
 <title id="rv-trail-title">From a query to reconstructed sources</title>
 <desc id="rv-trail-description">Retrieval returns three source records. Sections B and C belong to Reaction_wheel.txt in Engineering; Section D belongs to EPS.txt in Spacecraft. Reconstruction groups these records into two files and highlights the corresponding sections. Section letters and assignments are illustrative.</desc>
@@ -211,10 +252,11 @@ description: >-
 </g>
 </svg>
 <figcaption class="rv-trail-details" aria-live="polite" aria-atomic="true"><span data-trail-label>The source trail</span><p data-trail-detail>Scroll to unfold. Hover or select a node to inspect how three source records become two reconstructed files.</p></figcaption>
+</div>
 <noscript><p class="rv-note">Illustrative source trail: query → retrieval → three source records → reconstruction → two files with highlighted sections. Section letters are visual aliases.</p></noscript>
 </figure>
 
-<section class="rv-row rv-flip">
+<section class="rv-row rv-flip rv-reconstruction">
 <div class="rv-text">
 <h2>Let the reader check the source</h2>
 <p>A source reference tells someone where to look. RAVEN&rsquo;s <strong>source reconstruction</strong> helps them see what to look at: the sections supplied to the model, highlighted inside a readable reconstruction of the file.</p>
@@ -229,21 +271,57 @@ description: >-
 </div>
 </section>
 
-<section class="rv-row">
+<section class="rv-row rv-memory">
 <div class="rv-text">
 <h2>Keep the conversation going</h2>
 <p>Working with documents rarely ends at the first answer. People clarify a detail, connect it to another file, or return later with a new question.</p>
 <p>RAVEN keeps conversation history, including tool interactions, and gives the agent memory tools for recalling earlier discussions. Your interface can stream the response, show tool activity, and display sources as they become available.</p>
 </div>
 <ul class="rv-list">
-<li><b>History that includes tool use</b>Messages, tool calls, and results are persisted with each turn.</li>
-<li><b>Memory the agent can search</b>Earlier discussion stays recallable as conversations grow.</li>
-<li><b>Context compaction</b>Longer conversations fit the model&rsquo;s context without losing the full transcript.</li>
-<li><b>Saved preferences</b>Each conversation can be tuned to the person using it.</li>
+<li>
+<button class="rv-memory-flip" type="button" data-memory-flip aria-expanded="false" aria-controls="memory-detail-history" aria-label="Show details for History">
+<span class="rv-memory-face rv-memory-front" data-memory-front>
+<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M5 14a11 11 0 1 1 3 10M5 5v9h9M16 8v9l5 3"/></svg><b>History</b><span>Messages, tool calls, and results persist with each turn.</span><span class="rv-memory-hint">Click to see more</span>
+</span>
+<span class="rv-memory-face rv-memory-back" data-memory-back id="memory-detail-history" aria-hidden="true" inert>
+<b>History that includes tool use</b><span>Messages, tool calls, and results are persisted with each turn.</span><span class="rv-memory-hint">Click to return</span>
+</span>
+</button>
+</li>
+<li>
+<button class="rv-memory-flip" type="button" data-memory-flip aria-expanded="false" aria-controls="memory-detail-vector" aria-label="Show details for Vector memory">
+<span class="rv-memory-face rv-memory-front" data-memory-front>
+<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="5" y="5" width="22" height="22" rx="4"/><circle cx="12" cy="12" r="2"/><circle cx="21" cy="17" r="2"/><circle cx="12" cy="23" r="2"/><path d="m14 13 5 3m0 2-5 4"/></svg><b>Vector memory</b><span>Earlier discussion stays searchable as conversations grow.</span><span class="rv-memory-hint">Click to see more</span>
+</span>
+<span class="rv-memory-face rv-memory-back" data-memory-back id="memory-detail-vector" aria-hidden="true" inert>
+<b>Memory the agent can search</b><span>Earlier discussion stays recallable as conversations grow.</span><span class="rv-memory-hint">Click to return</span>
+</span>
+</button>
+</li>
+<li>
+<button class="rv-memory-flip" type="button" data-memory-flip aria-expanded="false" aria-controls="memory-detail-compaction" aria-label="Show details for Compaction">
+<span class="rv-memory-face rv-memory-front" data-memory-front>
+<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M6 7h20M6 13h20M6 19h11M6 25h8m8-7 4 4-4 4m-4-4h8"/></svg><b>Compaction</b><span>A compacted context preserves space for the next turn.</span><span class="rv-memory-hint">Click to see more</span>
+</span>
+<span class="rv-memory-face rv-memory-back" data-memory-back id="memory-detail-compaction" aria-hidden="true" inert>
+<b>Context compaction</b><span>Longer conversations fit the model&rsquo;s context without losing the full transcript.</span><span class="rv-memory-hint">Click to return</span>
+</span>
+</button>
+</li>
+<li>
+<button class="rv-memory-flip" type="button" data-memory-flip aria-expanded="false" aria-controls="memory-detail-preferences" aria-label="Show details for Preferences">
+<span class="rv-memory-face rv-memory-front" data-memory-front>
+<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M5 8h8m6 0h8M5 16h15m6 0h1M5 24h3m6 0h13"/><circle cx="16" cy="8" r="3"/><circle cx="23" cy="16" r="3"/><circle cx="11" cy="24" r="3"/></svg><b>Preferences</b><span>Conversation-specific preferences guide the agent.</span><span class="rv-memory-hint">Click to see more</span>
+</span>
+<span class="rv-memory-face rv-memory-back" data-memory-back id="memory-detail-preferences" aria-hidden="true" inert>
+<b>Saved preferences</b><span>Each conversation can be tuned to the person using it.</span><span class="rv-memory-hint">Click to return</span>
+</span>
+</button>
+</li>
 </ul>
 </section>
 
-<section class="rv-sec">
+<section class="rv-sec rv-get-started" id="get-started">
 <h2>From documents to a checkable answer</h2>
 <p class="rv-sub">Four steps, all through one Python API.</p>
 <ol class="rv-steps">
@@ -267,7 +345,7 @@ description: >-
 </div>
 </section>
 
-<section class="rv-sec">
+<section class="rv-sec rv-further">
 <h2>Go further</h2>
 <p class="rv-sub">See RAVEN in action, explore its architecture, and learn how to build with it.</p>
 <div class="rv-grid">
@@ -292,4 +370,8 @@ description: >-
 <div class="rv-actions"><a class="rv-btn rv-btn-primary" href="https://github.com/NoomexAI/raven_pypi/blob/main/README.md">Read the README</a><a class="rv-btn" href="https://github.com/NoomexAI/raven_pypi">Explore the source</a></div>
 </section>
 
-<p class="rv-foot"><a href="https://github.com/NoomexAI/raven_pypi">Source code</a> &middot; <a href="https://github.com/NoomexAI/raven_pypi/blob/v0.2.0/LICENSE.txt">MIT License</a> &middot; <a href="https://github.com/NoomexAI/raven_pypi/issues">Issues and feedback</a></p>
+<nav class="rv-footer-links" aria-label="RAVEN resources">
+<div><h3>Explore</h3><a href="{{ '/demo/' | relative_url }}">RAVEN in action</a><a href="{{ '/architecture/' | relative_url }}">Architecture and design</a><a href="{{ '/integration_guides/' | relative_url }}">Integration guides</a><a href="{{ '/development/' | relative_url }}">Development notes</a></div>
+<div><h3>Build</h3><a href="https://github.com/NoomexAI/raven_pypi/blob/main/README.md">Documentation</a><a href="https://pypi.org/project/noomexai-raven/">Python package</a><a href="https://github.com/NoomexAI/raven_pypi/releases">Releases</a></div>
+<div><h3>Project</h3><a href="https://github.com/NoomexAI/raven_pypi">Source code</a><a href="https://github.com/NoomexAI/raven_pypi/issues">Issues and feedback</a><a href="https://github.com/NoomexAI/raven_pypi/blob/v0.2.0/LICENSE.txt">MIT License</a></div>
+</nav>

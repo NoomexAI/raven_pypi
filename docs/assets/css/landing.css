@@ -234,41 +234,6 @@
   color: var(--site-accent-contrast);
 }
 
-.rv-facts {
-  margin: 24px 0 0;
-  padding: 18px 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px 26px;
-  justify-content: flex-start;
-  border-top: 1px solid var(--rv-line);
-  border-bottom: 1px solid var(--rv-line);
-  font-size: .9rem;
-  opacity: .85;
-}
-
-.rv-facts ul {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px 26px;
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.rv-facts-features {
-  flex: 1 1 480px;
-}
-
-.rv-facts .rv-facts-meta {
-  margin-inline-start: auto;
-}
-
-.rv-facts li {
-  margin: 0;
-  padding: 0;
-}
-
 .rv-sec {
   padding: 96px 0 48px;
 }
@@ -1213,7 +1178,7 @@
   outline-offset: 3px;
 }
 
-.landing-body .rv-facts, .landing-body .rv-list {
+.landing-body .rv-list {
   padding-left: 0;
 }
 

@@ -30,6 +30,7 @@ src/*.egg-info/
 /docs/.sass-cache/
 /docs/.bundle/
 /docs/vendor/
+/doc_zip/
 
 # Distribution / packaging
 *.tar.gz

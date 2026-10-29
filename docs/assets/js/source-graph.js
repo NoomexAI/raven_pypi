@@ -2,6 +2,7 @@
 
 document.querySelectorAll("[data-source-trail]").forEach((figure) => {
   const svg = figure.querySelector("svg");
+  const scene = figure.querySelector(".rv-source-trail-scene");
   const nodes = [...svg.querySelectorAll("[data-node]")];
   const edges = [...svg.querySelectorAll("[data-from]")];
   const label = figure.querySelector("[data-trail-label]");
@@ -17,6 +18,10 @@ document.querySelectorAll("[data-source-trail]").forEach((figure) => {
   const content = nodes.map((node) => node.querySelector(".rv-trail-content"));
   const clamp = (value) => Math.max(0, Math.min(1, value));
   const mix = (from, to, amount) => from + (to - from) * amount;
+  const smootherstep = (value) => {
+    const amount = clamp(value);
+    return amount * amount * amount * (amount * (amount * 6 - 15) + 10);
+  };
   const stackYaw = -Math.PI / 3;
   const stackPitch = Math.PI / 6;
   let frame;
@@ -47,25 +52,24 @@ document.querySelectorAll("[data-source-trail]").forEach((figure) => {
     frame = undefined;
     const mobile = narrow.matches;
     svg.setAttribute("viewBox", mobile ? "0 0 420 730" : "0 0 1080 470");
-    const bounds = svg.getBoundingClientRect();
-    const center = (bounds.top + bounds.height / 2) / innerHeight;
-    const pixelsPerUnit = bounds.width / (mobile ? 420 : 1080);
+    const sceneBounds = svg.getBoundingClientRect();
+    const trackBounds = figure.getBoundingClientRect();
+    const stickyBounds = scene.getBoundingClientRect();
+    const pixelsPerUnit = sceneBounds.width / (mobile ? 420 : 1080);
     const stackHeight = 200 * Math.abs(Math.sin(stackPitch) * Math.sin(stackYaw))
       + 110 * Math.cos(stackPitch)
       + (nodes.length - 1) * 20 * Math.abs(Math.sin(stackPitch) * Math.cos(stackYaw));
     const stackZoom = Math.min(mobile ? 1.45 : 1.8, innerHeight * .58 / (stackHeight * pixelsPerUnit));
-    const stackRadius = stackHeight * stackZoom * pixelsPerUnit / (2 * innerHeight);
-    // Leave the complete stack visible at both ends, with a viewport margin.
-    const arrival = Math.min(.8, 1 - .06 - stackRadius);
-    const departure = Math.max(.2, .06 + stackRadius);
-    const unfolding = reduced.matches || keyboardFocus ? 1 : clamp(Math.min(
-      (arrival - center) / (arrival - .56),
-      (center - departure) / (.44 - departure),
-    ));
-    progress = unfolding * unfolding * (3 - 2 * unfolding);
+    const stickyTop = 64;
+    const scrollRange = Math.max(1, trackBounds.height - stickyBounds.height);
+    const trackProgress = clamp((stickyTop - trackBounds.top) / scrollRange);
+    const unfolding = reduced.matches || keyboardFocus
+      ? 1
+      : 1 - Math.abs(2 * trackProgress - 1);
+    progress = smootherstep(unfolding);
     figure.dataset.progress = progress.toFixed(3);
     figure.dataset.unfolded = String(progress > .85);
-    const fade = clamp((progress - .35) / .6);
+    const fade = smootherstep((progress - .25) / .7);
     const positions = mobile ? tallPositions : widePositions;
     const matrices = new Map();
     const zoom = mix(stackZoom, 1, progress);
@@ -105,7 +109,7 @@ document.querySelectorAll("[data-source-trail]").forEach((figure) => {
         ? `M${x1} ${y1}C${x1} ${y1 + bend} ${x2} ${y2 - bend} ${x2} ${y2}`
         : `M${x1} ${y1}C${x1 + bend} ${y1} ${x2 - bend} ${y2} ${x2} ${y2}`);
     });
-    figure.querySelector(".rv-trail-edges").style.opacity = String(clamp((progress - .6) / .4));
+    figure.querySelector(".rv-trail-edges").style.opacity = String(smootherstep((progress - .5) / .5));
   }
 
   function schedule() {
