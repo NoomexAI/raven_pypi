@@ -1,0 +1,48 @@
+/* Compact reconstruction flow, contained within the existing illustration column. */
+.landing-body .rv-recon-graph {
+  --recon-text: #eeedf2;
+  --recon-muted: #b8afc5;
+  --recon-border: #777991;
+  --recon-highlight: #383349;
+  width: 100%;
+  max-width: 600px;
+  min-width: 0;
+  margin: 0 auto;
+}
+
+.rv-recon-graph > svg { display: block; width: 100%; height: auto; overflow: visible; }
+.rv-recon-graph text { font-family: Manrope, sans-serif; font-size: 12px; }
+.rv-recon-heading { fill: var(--site-muted); }
+.rv-recon-gradient-start { stop-color: #1b1d29; }
+.rv-recon-gradient-middle { stop-color: #111116; }
+.rv-recon-gradient-end { stop-color: #070709; }
+.rv-recon-card { fill: url(#rv-recon-fill); stroke: var(--recon-border); stroke-width: 1; }
+.rv-recon-record { fill: var(--recon-text); }
+.rv-recon-graph .rv-recon-kicker { fill: var(--recon-muted); font-size: 9px; letter-spacing: 1px; }
+.rv-recon-meta { fill: var(--recon-muted); }
+.rv-recon-graph .rv-recon-filename { font-size: 13px; font-weight: 600; }
+.rv-recon-section { font-weight: 600; }
+.rv-recon-edges { fill: none; stroke: var(--site-muted); stroke-width: 1.6; }
+#rv-recon-arrow path { fill: none; stroke: var(--site-muted); stroke-width: 1.2; }
+.rv-recon-process rect { fill: var(--site-background); stroke: var(--site-muted); }
+.rv-recon-process text { fill: var(--site-foreground); font-weight: 600; }
+.rv-recon-graph .rv-recon-process-note { fill: var(--site-muted); font-size: 10px; font-weight: 400; }
+.rv-recon-rule { stroke: var(--recon-muted); stroke-opacity: .3; }
+.rv-recon-context { fill: #000; fill-opacity: .12; }
+.rv-recon-graph .rv-recon-context-label { fill: var(--recon-muted); font-size: 11px; }
+.rv-recon-highlight { fill: var(--recon-highlight); stroke: var(--recon-muted); stroke-width: .6; }
+.rv-recon-content { stroke: var(--recon-text); stroke-opacity: .5; stroke-width: 3; stroke-linecap: round; }
+.rv-recon-legend rect { fill: var(--recon-highlight); stroke: var(--site-muted); stroke-width: .6; }
+.rv-recon-legend text { fill: var(--site-muted); font-size: 11px; }
+
+@media (prefers-color-scheme: light) {
+  .landing-body .rv-recon-graph {
+    --recon-text: #ffffff;
+    --recon-muted: #ede9fe;
+    --recon-border: #321949;
+    --recon-highlight: #8a65a7;
+  }
+  .rv-recon-gradient-start { stop-color: #80579f; }
+  .rv-recon-gradient-middle { stop-color: #4b286d; }
+  .rv-recon-gradient-end { stop-color: #321949; }
+}

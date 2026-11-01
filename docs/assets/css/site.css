@@ -1,5 +1,13 @@
 /* Shared site shell. Content styles are selected by the page's layout. */
 
+.site-content code .command-pip { color: #bf5700; }
+.site-content code .command-install { color: #8a6a00; }
+
+@media (prefers-color-scheme: dark) {
+  .site-content code .command-pip { color: #ffad66; }
+  .site-content code .command-install { color: #f6d365; }
+}
+
 :root {
   --site-page-gutter: clamp(12px, 2.5vw, 40px);
   color-scheme: light;

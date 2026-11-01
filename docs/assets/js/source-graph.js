@@ -1,6 +1,6 @@
 "use strict";
 
-document.querySelectorAll("[data-source-trail]").forEach((figure) => {
+document.querySelectorAll("[data-source-trail]").forEach((figure, figureIndex) => {
   const svg = figure.querySelector("svg");
   const scene = figure.querySelector(".rv-source-trail-scene");
   const nodes = [...svg.querySelectorAll("[data-node]")];
@@ -9,6 +9,36 @@ document.querySelectorAll("[data-source-trail]").forEach((figure) => {
   const detail = figure.querySelector("[data-trail-detail]");
   const reduced = matchMedia("(prefers-reduced-motion: reduce)");
   const narrow = matchMedia("(max-width: 700px)");
+  const namespace = "http://www.w3.org/2000/svg";
+  const defs = document.createElementNS(namespace, "defs");
+  const gradient = document.createElementNS(namespace, "linearGradient");
+  const fillId = `rv-trail-card-fill-${figureIndex}`;
+  gradient.id = fillId;
+  gradient.setAttribute("x2", "1");
+  gradient.setAttribute("y2", "1");
+  ["start", "middle", "end"].forEach((name, index) => {
+    const stop = document.createElementNS(namespace, "stop");
+    stop.setAttribute("offset", String(index / 2));
+    stop.setAttribute("class", `rv-trail-gradient-${name}`);
+    gradient.append(stop);
+  });
+  defs.append(gradient);
+  svg.prepend(defs);
+  figure.style.setProperty("--trail-card-fill", `url("#${fillId}")`);
+  nodes.forEach((node) => {
+    const plane = node.querySelector(".rv-trail-plane");
+    const x = Number(plane.getAttribute("x"));
+    const y = Number(plane.getAttribute("y"));
+    const width = Number(plane.getAttribute("width"));
+    const height = Number(plane.getAttribute("height"));
+    const radius = Number(plane.getAttribute("rx"));
+    const outline = document.createElementNS(namespace, "path");
+    outline.setAttribute("class", "rv-trail-outline");
+    outline.setAttribute("aria-hidden", "true");
+    outline.setAttribute("transform", `translate(${x - 1} ${y - 1})`);
+    outline.setAttribute("d", ravenCardOutlinePath(width + 2, height + 2, radius + 1, 2));
+    node.append(outline);
+  });
   const widePositions = [[90, 235], [280, 235], [485, 100], [485, 235], [485, 370], [715, 235], [965, 140], [965, 335]];
   const tallPositions = [[210, 45], [210, 155], [70, 310], [210, 310], [350, 310], [210, 440], [110, 605], [310, 605]];
   const sizes = nodes.map((node) => {
@@ -69,7 +99,9 @@ document.querySelectorAll("[data-source-trail]").forEach((figure) => {
     progress = smootherstep(unfolding);
     figure.dataset.progress = progress.toFixed(3);
     figure.dataset.unfolded = String(progress > .85);
+    figure.style.setProperty("--trail-card-color-progress", `${progress * 100}%`);
     const fade = smootherstep((progress - .25) / .7);
+    figure.style.setProperty("--trail-card-reveal", String(fade));
     const positions = mobile ? tallPositions : widePositions;
     const matrices = new Map();
     const zoom = mix(stackZoom, 1, progress);

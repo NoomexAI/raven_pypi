@@ -117,7 +117,43 @@ document.querySelectorAll("[data-rv-copy]").forEach((button) => {
   });
 });
 
-// Scroll over the workflow cards to inspect each step.
+// Used by both HTML cards and SVG source-trail cards.
+function ravenCardOutlinePath(width, height, radius, thickness) {
+  const inner = Math.max(0, radius - thickness);
+  return `M ${radius} 0 L ${width * .55} ${thickness}
+    H ${radius} A ${inner} ${inner} 0 0 0 ${thickness} ${radius}
+    V ${height * .55} L 0 ${radius}
+    A ${radius} ${radius} 0 0 1 ${radius} 0 Z`;
+}
+
+// Share the continuous outline shape across content cards, excluding tool selectors.
+const outlinedCards = document.querySelectorAll(
+  ".landing-body :is(.rv-card:not(.rv-retrieval-choice), .rv-flow-panel, .rv-doc, .rv-list li, .rv-steps li, .rv-cta)"
+);
+const outlineObserver = new ResizeObserver((entries) => {
+  for (const entry of entries) {
+    const panel = entry.target;
+    if (!entry.contentRect.width || !entry.contentRect.height) continue;
+    const styles = getComputedStyle(panel);
+    const outset = parseFloat(styles.getPropertyValue("--card-outline-outset")) || 2;
+    const box = entry.borderBoxSize[0];
+    const width = (box?.inlineSize ?? panel.offsetWidth) + outset * 2;
+    const height = (box?.blockSize ?? panel.offsetHeight) + outset * 2;
+    const radius = parseFloat(styles.borderTopLeftRadius) + outset;
+    const thickness = parseFloat(styles.getPropertyValue("--card-outline-width")) || 3;
+    // Keep the inner edges fixed, overlapping the card by 1px to prevent gaps.
+    const path = ravenCardOutlinePath(width, height, radius, thickness);
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none"><path fill="white" d="${path}"/></svg>`;
+    panel.style.setProperty("--card-outline-radius", `${radius}px`);
+    panel.style.setProperty("--card-outline-shape", `url("data:image/svg+xml,${encodeURIComponent(svg)}")`);
+  }
+});
+outlinedCards.forEach((card) => {
+  card.setAttribute("data-tapered-card", "");
+  outlineObserver.observe(card);
+});
+
+// Drag the workflow cards to inspect each step.
 document.querySelectorAll("[data-rv-flow]").forEach((flow) => {
   const panels = [...flow.querySelectorAll("[data-flow-panel]")];
   const details = flow.querySelector(".rv-flow-details");

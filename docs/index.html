@@ -5,6 +5,7 @@ stylesheets:
   - /assets/css/landing.css
   - /assets/css/retrieval-player.css
   - /assets/css/source-graph.css
+  - /assets/css/reconstruction-graph.css
   - /assets/css/landing-theme.css
 scripts:
   - /assets/js/landing.js
@@ -263,12 +264,67 @@ description: >-
 <p>Your application can put the answer and its supporting material side by side, without asking the reader to hunt through an entire document. For documents with preserved page ranges, your interface can link back to the original pages.</p>
 <p class="rv-note">The highlights show what the model received, not a guarantee that every claim in its answer is correct. They make checking possible rather than replacing it.</p>
 </div>
-<div class="rv-doc" role="img" aria-label="Schematic of a reconstructed file with one highlighted section">
-<div class="rv-doc-head"><span>Reconstructed file</span><span>Schematic</span></div>
-<div class="rv-sect"><span class="rv-tag">Surrounding context</span><i></i><i></i></div>
-<div class="rv-sect rv-hit"><span class="rv-tag">Supplied to the model</span><i></i><i></i><i></i><small>Page range preserved for linking back</small></div>
-<div class="rv-sect"><span class="rv-tag">Surrounding context</span><i></i><i></i></div>
-</div>
+<figure class="rv-recon-graph" id="reconstruction-flow">
+<svg viewBox="0 0 600 380" role="img" aria-labelledby="rv-recon-title rv-recon-desc">
+<title id="rv-recon-title">From retrieved sections to a reconstructed file</title>
+<desc id="rv-recon-desc">Two retrieved records identify Engineering, Reaction_wheel.txt, and Sections B and C. Reconstruction groups them by knowledge and file, and displays the full file with B and C highlighted and A and D as surrounding context. Section letters are illustrative.</desc>
+<defs>
+<linearGradient id="rv-recon-fill" x1="0" y1="0" x2="1" y2="1">
+<stop class="rv-recon-gradient-start" offset="0"/>
+<stop class="rv-recon-gradient-middle" offset=".5"/>
+<stop class="rv-recon-gradient-end" offset="1"/>
+</linearGradient>
+<marker id="rv-recon-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M1 1 7 4 1 7"/></marker>
+</defs>
+<g class="rv-recon-edges" marker-end="url(#rv-recon-arrow)">
+<path d="M200 114 C225 114 219 176 244 176"/>
+<path d="M200 266 C225 266 219 204 244 204"/>
+<path d="M356 190 H410"/>
+</g>
+<text class="rv-recon-heading" x="10" y="28">Retrieved sections</text>
+<g class="rv-recon-record">
+<rect class="rv-recon-card" x="10" y="58" width="190" height="112" rx="13"/>
+<text class="rv-recon-kicker" x="25" y="82">SOURCE RECORD</text>
+<text class="rv-recon-meta" x="25" y="105">Engineering</text>
+<text class="rv-recon-filename" x="25" y="126">Reaction_wheel.txt</text>
+<text class="rv-recon-section" x="25" y="152">Section B</text>
+</g>
+<g class="rv-recon-record">
+<rect class="rv-recon-card" x="10" y="210" width="190" height="112" rx="13"/>
+<text class="rv-recon-kicker" x="25" y="234">SOURCE RECORD</text>
+<text class="rv-recon-meta" x="25" y="257">Engineering</text>
+<text class="rv-recon-filename" x="25" y="278">Reaction_wheel.txt</text>
+<text class="rv-recon-section" x="25" y="304">Section C</text>
+</g>
+<g class="rv-recon-process">
+<rect x="244" y="152" width="112" height="76" rx="13"/>
+<text x="300" y="185" text-anchor="middle">Reconstruction</text>
+<text class="rv-recon-process-note" x="300" y="205" text-anchor="middle">Group by file</text>
+</g>
+<text class="rv-recon-heading" x="410" y="28">Reconstructed file</text>
+<g class="rv-recon-record">
+<rect class="rv-recon-card" x="410" y="38" width="180" height="300" rx="13"/>
+<text class="rv-recon-kicker" x="424" y="63">FULL FILE</text>
+<text class="rv-recon-meta" x="424" y="85">Engineering</text>
+<text class="rv-recon-filename" x="424" y="106">Reaction_wheel.txt</text>
+<path class="rv-recon-rule" d="M424 120 H576"/>
+<rect class="rv-recon-context" x="424" y="135" width="152" height="35" rx="5"/>
+<text class="rv-recon-context-label" x="434" y="157">Section A · context</text>
+<rect class="rv-recon-highlight" x="424" y="180" width="152" height="46" rx="5"/>
+<text class="rv-recon-section" x="434" y="199">Section B · retrieved</text>
+<path class="rv-recon-content" d="M434 213 H563"/>
+<rect class="rv-recon-highlight" x="424" y="236" width="152" height="46" rx="5"/>
+<text class="rv-recon-section" x="434" y="255">Section C · retrieved</text>
+<path class="rv-recon-content" d="M434 269 H550"/>
+<rect class="rv-recon-context" x="424" y="292" width="152" height="30" rx="5"/>
+<text class="rv-recon-context-label" x="434" y="312">Section D · context</text>
+</g>
+<g class="rv-recon-legend">
+<rect x="202" y="358" width="9" height="9" rx="2"/>
+<text x="218" y="367">Retrieved sections highlighted in context</text>
+</g>
+</svg>
+</figure>
 </section>
 
 <section class="rv-row rv-memory">
