@@ -356,7 +356,7 @@
 .landing-body .rv-scope { justify-content: center; margin-top: 12px; }
 .landing-body .rv-scope button { min-height: 38px; font-size: 13px; padding: 8px 14px; border-color: #24222d; color: #a9a3b6; }
 .landing-body .rv-scope button[aria-pressed="true"] { background: #23212d; color: #e9e4f4; }
-.landing-body .rv-film { border: 2px solid #3b3c49; border-radius: 18px; }
+.landing-body .rv-film { border: 1px solid #3b3c49; border-radius: 18px; }
 .landing-body .rv-film-query { font-size: 15px; padding: 19px 24px; border-color: #25242c; }
 .landing-body .rv-film-stage { grid-template-columns: minmax(0, 1.7fr) minmax(240px, 1fr); border: 0; }
 .landing-body .rv-film-viewport { height: 410px; background: none; }
@@ -395,7 +395,7 @@
 .landing-body .rv-get-started { margin-top: 20px; }
 .landing-body .rv-get-started > .rv-sub { font-size: 16px; }
 .landing-body .rv-steps { gap: 14px; }
-.landing-body .rv-steps li { background: #080809; border-color: #302d36; border-radius: 14px; padding: 25px; }
+.landing-body .rv-steps li { background: transparent; border-color: #302d36; border-radius: 14px; padding: 25px; }
 .landing-body .rv-steps li::before { width: 30px; height: 30px; margin-bottom: 16px; font-size: 13px; }
 .landing-body .rv-steps h3 { font-size: 18px; }
 .landing-body .rv-steps p { color: #9b95a7; font-size: 15px; }
@@ -410,6 +410,10 @@
 .landing-body .rv-layer-content p { font-family: Poppins, Manrope, sans-serif; font-size: 15px; color: #a29aaa; }
 .landing-body .rv-further { padding-top: 42px; }
 .landing-body .rv-further > .rv-sub { font-size: 16px; }
+.landing-body .rv-further .rv-card {
+  background: transparent;
+  transition: border-color 160ms ease;
+}
 .landing-body .rv-grid { gap: 18px; }
 .landing-body .rv-link { padding: 25px 22px; border-radius: 13px; }
 .landing-body .rv-link h3 { font-size: 17px; font-weight: 300; }
@@ -646,8 +650,8 @@
 .landing-body .rv-trail-plane {
   fill: var(--trail-card-fill, #09090c);
   stroke: #777991;
-  stroke-width: 1.7;
-  stroke-opacity: .82;
+  stroke-width: 1;
+  stroke-opacity: 1;
 }
 .landing-body .rv-trail-node[aria-pressed="true"] .rv-trail-plane { stroke: #d4d5e5; }
 
@@ -674,7 +678,7 @@
 }
 
 .landing-body .rv-steps li {
-  background: linear-gradient(150deg, #111116 0%, #050506 90%);
+  background: transparent;
   border-color: #292a34;
 }
 
@@ -760,15 +764,22 @@
   .raven-landing .site-header .site-shell { border-radius: 0 0 14px 14px; padding-inline: 14px; }
 }
 
-/* Card outlines begin at the upper-left corner and fade along the top and left edges. */
+/* Content cards have uniform borders unless their section opts into the taper. */
 .landing-body :is(.rv-card, .rv-flow-panel, .rv-doc, .rv-list li, .rv-steps li, .rv-cta) {
   position: relative;
   isolation: isolate;
-  border-color: transparent !important;
+  border-width: 1px;
+  border-style: solid;
+  border-color: var(--card-outline-color) !important;
   --card-outline-color: rgba(178, 175, 202, .62);
 }
 
-.landing-body :is(.rv-card, .rv-flow-panel, .rv-doc, .rv-list li, .rv-steps li, .rv-cta)::after {
+/* Only the workflow carousel and application stack keep fading outlines. */
+.landing-body :is(.rv-flow-panel, .rv-application-layers .rv-card) {
+  border-color: transparent !important;
+}
+
+.landing-body :is(.rv-flow-panel, .rv-application-layers .rv-card)::after {
   content: "";
   position: absolute;
   z-index: 3;
@@ -790,21 +801,21 @@
   content: none;
 }
 
-/* Shared continuous, tapered outset frame for content cards. */
+/* Continuous, tapered outset frame for the two selected sections. */
 .landing-body .rv-flow[data-enhanced] .rv-flow-panel,
-.landing-body :is(.rv-card, .rv-flow-panel, .rv-doc, .rv-list li, .rv-steps li, .rv-cta)[data-tapered-card] {
+.landing-body :is(.rv-flow-panel, .rv-application-layers .rv-card)[data-tapered-card] {
   --card-outline-width: 3px;
   --card-outline-outset: 2px;
   border-width: 0;
   overflow: visible;
 }
 
-.landing-body :is(.rv-list li, .rv-steps li, .rv-application-layers .rv-card, .rv-further .rv-card)[data-tapered-card] {
+.landing-body .rv-application-layers .rv-card[data-tapered-card] {
   --card-outline-width: 2px;
   --card-outline-outset: 1px;
 }
 
-.landing-body :is(.rv-card, .rv-flow-panel, .rv-doc, .rv-list li, .rv-steps li, .rv-cta)[data-tapered-card]::after {
+.landing-body :is(.rv-flow-panel, .rv-application-layers .rv-card)[data-tapered-card]::after {
   /* One continuous SVG mask avoids seams between the corner and tapered edges. */
   inset: calc(-1 * var(--card-outline-outset));
   border: 0;
@@ -822,8 +833,7 @@
   mask-composite: add;
 }
 
-.landing-body .rv-link:hover {
-  border-color: transparent !important;
+.landing-body .rv-further .rv-link:is(:hover, :focus-visible) {
   box-shadow: none;
   --card-outline-color: rgba(218, 214, 235, .84);
 }
@@ -996,31 +1006,31 @@
     --site-accent: #292534;
     --site-accent-rgb: 41, 37, 52;
     --site-accent-contrast: #ffffff;
-    --site-hover: #eee8f5;
+    --site-hover: #e4e6ff;
     --rv-accent: var(--site-accent);
     --rv-line: #ddd5e8;
-    --rv-soft: #eee8f5;
+    --rv-soft: #edefff;
     --rv-glow: 117, 111, 166;
-    --rv-card-fill: rgb(250.936255 247.888446 255);
-    --rv-card-background: linear-gradient(135deg, #80579f 0%, #4b286d 50%, #321949 100%);
-    --rv-card-outline: #321949;
+    --rv-card-fill: #f4f6ff;
+    --rv-card-background: var(--rv-card-fill);
+    --rv-card-outline: #aaa3bf;
     background: var(--site-background);
     color: var(--site-foreground);
   }
 
   .raven-landing .site-header .site-shell {
-    background: rgba(75, 40, 109, .94);
+    background: rgba(234, 238, 255, .94);
     box-shadow: none;
   }
 
   .raven-landing .site-header .site-brand,
   .raven-landing .site-links a,
-  .raven-landing .site-links a:last-child { color: #ffffff; }
-  .raven-landing .site-navigation a { color: #ddd6fe; }
+  .raven-landing .site-links a:last-child { color: #292534; }
+  .raven-landing .site-navigation a { color: #625b70; }
   .raven-landing .site-navigation a[aria-current],
-  .raven-landing .site-navigation a:hover { color: #ffffff; }
-  .raven-landing .site-navigation a[aria-current] { border-bottom-color: #ffffff; }
-  .raven-landing .site-header a:focus-visible { outline-color: #ffffff; }
+  .raven-landing .site-navigation a:hover { color: #292534; }
+  .raven-landing .site-navigation a[aria-current] { border-bottom-color: #292534; }
+  .raven-landing .site-header a:focus-visible { outline-color: #292534; }
 
   /* Light mode keeps structured bands without decorative glows. */
   .landing-body .rv-hero::before { content: none; }
@@ -1029,7 +1039,7 @@
     background: linear-gradient(180deg, transparent 0%, var(--site-background) 100%);
   }
   .landing-body .rv-hero-light-bars {
-    background-image: linear-gradient(90deg, transparent 0 13%, #8253b808 13% 26%, #8253b812 26% 39%, #8253b821 39% 52%, #8253b834 52% 65%, #8253b84a 65% 78%, #8253b863 78% 91%, #8253b87a 91%);
+    background-image: linear-gradient(90deg, transparent 0 13%, #c8cdff26 13% 26%, #c8cdff45 26% 39%, #c8cdff65 39% 52%, #c8cdff8a 52% 65%, #c8cdffb0 65% 78%, #c8cdffd9 78% 91%, #c8cdff 91%);
     background-size: 100% 100%;
     background-repeat: no-repeat;
     filter: none;
@@ -1038,10 +1048,10 @@
   .landing-body .rv-hero-light > img { display: none; }
   .landing-body .rv-hero-art-caption { text-shadow: none; }
   .landing-body .rv-hero-art-caption span { color: #7d748d; }
-  .landing-body .rv-hero-depth { stroke: #7d748d; fill: #e8e1f1; }
+  .landing-body .rv-hero-depth { stroke: #7d748d; fill: var(--rv-card-fill); }
   .landing-body .rv-hero-face { fill: #292534; }
   .rv-memory::before {
-    background: linear-gradient(90deg, transparent 0 16%, #8d78ad08 16% 32%, #8d78ad10 32% 48%, #8d78ad18 48% 64%, #8d78ad20 64% 80%, #8d78ad28 80%);
+    background: linear-gradient(90deg, transparent 0 16%, #dee2ff33 16% 32%, #dee2ff66 32% 48%, #dee2ff99 48% 64%, #dee2ffcc 64% 80%, #dee2ff 80%);
     opacity: 1;
   }
 
@@ -1052,7 +1062,7 @@
   .landing-body .rv-card {
     background: var(--rv-card-background);
     border-color: #ddd5e8;
-    color: #ffffff;
+    color: #292534;
   }
 
   .landing-body .rv-install {
@@ -1063,35 +1073,35 @@
   }
   .landing-body .rv-copy { color: #625b70; }
   .landing-body .rv-btn { color: #292534; border-color: #ddd5e8; }
-  .landing-body .rv-btn:hover { background: #eee8f5; }
-  .landing-body a.rv-btn-primary { background: #292534; color: #fff; border-color: #292534; }
-  .landing-body a.rv-btn-primary:hover { background: #443c54; color: #fff; }
+  .landing-body .rv-btn:hover { background: var(--site-hover); }
+  .landing-body a.rv-btn-primary { background: var(--rv-card-fill); color: #292534; border-color: var(--rv-card-outline); }
+  .landing-body a.rv-btn-primary:hover { background: var(--site-hover); color: #292534; }
 
   .landing-body .rv-flow-hint,
   .landing-body .rv-flow-position { color: #7d748d; }
   .landing-body .rv-flow[data-enhanced] .rv-flow-panel {
-    --card-outline-color: #321949;
+    --card-outline-color: var(--rv-card-outline);
     border-color: #c4b5fd;
     background: var(--rv-card-background);
-    color: #ffffff;
+    color: #292534;
   }
   .rv-flow[data-enhanced] .rv-flow-panel[data-position="0"] {
     border-color: #b0a6c1;
     box-shadow: none;
   }
   .landing-body .rv-flow-panel > p,
-  .rv-flow[data-enhanced] .rv-flow-panel p { color: #ede9fe; }
-  .landing-body .rv-flow-panel .rv-label { color: #ddd6fe; }
+  .rv-flow[data-enhanced] .rv-flow-panel p { color: #625b70; }
+  .landing-body .rv-flow-panel .rv-label { color: #7d748d; }
   .landing-body .rv-flow-panel blockquote,
-  .landing-body .rv-flow-panel .rv-flow-example { color: #ffffff; }
+  .landing-body .rv-flow-panel .rv-flow-example { color: #292534; }
   .landing-body .rv-flow-orb {
     --rv-orbit-rings: radial-gradient(circle closest-side,
-      rgba(139, 91, 184, .30) 0 43%,
-      rgba(139, 91, 184, .15) 43% 61%,
-      rgba(139, 91, 184, .07) 61% 80%,
-      rgba(139, 91, 184, .025) 80% 100%);
+      #c8cdff 0 43%,
+      #e4e6ff 43% 61%,
+      #e8eaff 61% 80%,
+      #edefff 80% 100%);
     background: var(--rv-orbit-rings);
-    color: #ffffff;
+    color: #292534;
   }
   .landing-body #workflow-question .rv-flow-orb {
     position: relative;
@@ -1111,7 +1121,7 @@
   .rv-flow[data-enhanced] .rv-flow-node .rv-flow-number { border-color: #ddd5e8; }
   .rv-flow[data-enhanced] .rv-flow-node[aria-selected="true"] .rv-flow-number {
     border-color: #b0a6c1;
-    background: #e8e1f1;
+    background: var(--site-hover);
     color: #292534;
   }
   .landing-body .rv-flow-controls button { color: #625b70; }
@@ -1122,14 +1132,14 @@
   .landing-body .rv-retrieval .rv-text p { color: #625b70; }
   .landing-body .rv-retrieval-choice { background: transparent; border-color: #ddd5e8; color: #625b70; }
   .landing-body .rv-retrieval-choice[aria-pressed="true"] {
-    background: #292534;
-    color: #fff;
-    border-color: #292534;
+    background: var(--site-hover);
+    color: #292534;
+    border-color: var(--rv-card-outline);
   }
   .landing-body .rv-scope button { border-color: #ddd5e8; color: #625b70; }
   .landing-body .rv-scope button[aria-pressed="true"] {
     border-color: #b0a6c1;
-    background: #e8e1f1;
+    background: var(--site-hover);
     color: #292534;
   }
   .landing-body .rv-film {
@@ -1144,83 +1154,95 @@
   .landing-body .rv-film-viewport,
   .landing-body .rv-film-caption,
   .landing-body .rv-film-source-text { background: transparent; }
+  .landing-body .rv-film-viewport {
+    --site-foreground: #292929;
+    --site-muted: #737373;
+    --site-accent: #333333;
+    --site-accent-rgb: 51, 51, 51;
+    --site-hover: #eeeeee;
+    --rv-line: #707070;
+  }
   .landing-body .rv-film .rv-world-frame,
-  .landing-body .rv-film .film-surface { fill: #f8f6fb; }
-  .landing-body .rv-film .film-soft { fill: var(--site-hover); }
+  .landing-body .rv-film .film-surface,
+  .landing-body .rv-film .film-soft { fill: transparent; }
   .landing-body .rv-retrieval-note { color: #7d748d; }
 
   .landing-body .rv-source-trail {
-    --trail-gradient-start: #80579f;
-    --trail-gradient-middle: #4b286d;
-    --trail-gradient-end: #321949;
-    --trail-outline-color: #321949;
-    --trail-outline-active: #4b286d;
+    --trail-stack-fill: #ffffff;
+    --trail-gradient-start: var(--rv-card-fill);
+    --trail-gradient-middle: var(--rv-card-fill);
+    --trail-gradient-end: var(--rv-card-fill);
+    --trail-outline-active: #88809f;
   }
   .landing-body .rv-trail-plane {
-    fill: var(--trail-card-fill, #4b286d);
-    stroke: #321949;
-    stroke-width: 1.7;
-    stroke-opacity: .82;
+    fill: var(--trail-card-fill, var(--rv-card-fill));
+    stroke: var(--rv-card-outline);
+    stroke-width: 1;
+    stroke-opacity: 1;
   }
   .landing-body .rv-trail-details > span { color: #625b70; }
-  .landing-body .rv-trail-node { color: #ffffff; }
-  .landing-body .rv-trail-context { fill: rgba(29, 12, 44, .15); }
+  .landing-body .rv-trail-node { color: #292534; }
+  .landing-body .rv-trail-context { fill: #edefff; }
   .landing-body .rv-trail-hit {
-    fill: rgba(221, 214, 254, .18);
+    fill: #e4e6ff;
     stroke: #b0a6c1;
   }
-  .landing-body .rv-trail-hit[data-active="true"] { fill: rgba(221, 214, 254, .3); }
+  .landing-body .rv-trail-hit[data-active="true"] { fill: #c8cdff; }
   .landing-body .rv-doc {
     background: var(--rv-card-background);
     border-color: #ddd5e8;
     box-shadow: none;
-    color: #ffffff;
+    color: #292534;
   }
   .landing-body .rv-sect { border-color: rgba(221, 214, 254, .3); }
   .landing-body .rv-doc-head,
-  .landing-body .rv-tag { color: #ddd6fe; }
+  .landing-body .rv-tag { color: #625b70; }
   .landing-body .rv-hit { border-color: #b0a6c1; }
   .landing-body .rv-hit i { background: #7d748d; }
 
   .landing-body .rv-list li {
     background: var(--rv-card-background);
     border-color: #ddd5e8;
-    color: #ffffff;
+    color: #292534;
   }
-  .landing-body .rv-list svg { color: #ddd6fe; }
-  .landing-body .rv-list span { color: #ede9fe; }
+  .landing-body .rv-memory .rv-list > li:nth-child(2),
+  .landing-body .rv-memory .rv-list > li:nth-child(3) {
+    background: #ffffff;
+  }
+  .landing-body .rv-list svg { color: #625b70; }
+  .landing-body .rv-list span { color: #625b70; }
   .landing-body .rv-steps li {
-    background: var(--rv-card-background);
+    background: transparent;
     border-color: #ddd5e8;
-    color: #ffffff;
+    color: #292534;
   }
-  .landing-body .rv-steps p { color: #ede9fe; }
-  .landing-body .rv-steps li::before { background: #ede9fe; color: #4b286d; }
+  .landing-body .rv-steps p { color: #625b70; }
+  .landing-body .rv-steps li::before { background: var(--site-hover); color: #292534; }
   .landing-body .rv-application-layers .rv-card {
     background: var(--rv-card-background);
     border-color: #ddd5e8;
   }
   .landing-body .rv-layer-content p,
-  .landing-body .rv-link p { color: #ede9fe; }
+  .landing-body .rv-link p { color: #625b70; }
   .landing-body a.rv-link,
-  .landing-body a.rv-link:hover { color: #ffffff; }
+  .landing-body a.rv-link:hover { color: #292534; }
   .landing-body :is(.rv-card, .rv-steps li) code {
-    background: rgba(221, 214, 254, .15);
-    color: #ffffff;
+    background: #e4e6ff;
+    color: #292534;
   }
-  .landing-body .rv-layer-handle { color: #ddd6fe; }
-  .landing-body .rv-link:hover { --card-outline-color: #4b286d; }
-  .landing-body .rv-application-layers .rv-card[data-pinned="true"] { --card-outline-color: #4b286d; }
+  .landing-body .rv-layer-handle { color: #625b70; }
+  .landing-body .rv-further .rv-link:is(:hover, :focus-visible) { --card-outline-color: #625b70; }
+  .landing-body .rv-application-layers .rv-card[data-pinned="true"] { --card-outline-color: #88809f; }
   .landing-body .rv-cta {
     border-color: #ddd5e8;
     background: var(--rv-card-background);
-    color: #ffffff;
+    color: #292534;
   }
-  .landing-body .rv-cta .rv-sub { color: #ede9fe; }
-  .landing-body .rv-cta .rv-btn { color: #ffffff; border-color: #b0a6c1; }
-  .landing-body .rv-cta .rv-btn:hover { background: rgba(221, 214, 254, .15); }
-  .landing-body .rv-cta a.rv-btn-primary { background: #ede9fe; color: #4b286d; }
-  .landing-body .rv-cta .rv-install { background: #faf8fd; }
+  .landing-body .rv-cta .rv-sub { color: #625b70; }
+  .landing-body .rv-cta .rv-btn { color: #292534; border-color: #b0a6c1; }
+  .landing-body .rv-cta .rv-btn:hover { background: var(--site-hover); }
+  .landing-body .rv-cta a.rv-btn-primary { background: var(--site-hover); color: #292534; }
+  .landing-body .rv-cta .rv-install { background: #ffffff; }
   .landing-body .rv-footer-links { border-top-color: #ddd5e8; }
   .landing-body .rv-footer-links a { color: #625b70; }
   .raven-landing .site-footer { border-top-color: #ddd5e8; color: #7d748d; }
@@ -1228,24 +1250,24 @@
   .landing-body :is(.rv-card, .rv-flow-panel, .rv-doc, .rv-list li, .rv-steps li, .rv-cta) {
     --card-outline-color: var(--rv-card-outline);
   }
-  .landing-body .rv-memory-face .rv-memory-hint { color: #ddd6fe; }
-  .rv-flow[data-enhanced] .rv-flow-flip-hint { color: #ddd6fe; }
+  .landing-body .rv-memory-face .rv-memory-hint { color: #7d748d; }
+  .rv-flow[data-enhanced] .rv-flow-flip-hint { color: #7d748d; }
   .rv-memory-flip:focus-visible { outline-color: #ddd6fe; }
-  .rv-flow[data-enhanced] .rv-flow-panel p { color: #ede9fe; }
+  .rv-flow[data-enhanced] .rv-flow-panel p { color: #625b70; }
 
-  .landing-body .rv-trail-node[aria-pressed="true"] .rv-trail-plane { stroke: #292534; }
+  .landing-body .rv-trail-node[aria-pressed="true"] .rv-trail-plane { stroke: #88809f; }
   .landing-body .rv-flow[data-enhanced] .rv-flow-details::before { content: none; }
   /* The animation also applies glow styles inline while matching chunks. */
   .landing-body .rv-film-query { box-shadow: none !important; }
   .landing-body [data-film-query] { text-shadow: none !important; }
   .landing-body .rv-world-chunk [data-chunk-border] { filter: none !important; }
-  .landing-body .rv-flow-orb svg { color: #ffffff; }
+  .landing-body .rv-flow-orb svg { color: #292534; }
   .landing-body .rv-install code { background: transparent; color: #292534; }
-  .landing-body .rv-sect { background: rgba(29, 12, 44, .15); }
-  .landing-body .rv-hit { background: rgba(221, 214, 254, .18); }
+  .landing-body .rv-sect { background: var(--rv-card-fill); }
+  .landing-body .rv-hit { background: var(--site-hover); }
   .landing-body .rv-sect i { background: #b0a6c1; }
   .landing-body .rv-hit i { background: #7d748d; }
-  .landing-body .rv-hit small { color: #ede9fe; }
+  .landing-body .rv-hit small { color: #625b70; }
   .landing-body .rv-btn:focus-visible,
   .landing-body button:focus-visible { outline-color: #292534; }
 }

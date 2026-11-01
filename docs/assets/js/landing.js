@@ -117,7 +117,7 @@ document.querySelectorAll("[data-rv-copy]").forEach((button) => {
   });
 });
 
-// Used by both HTML cards and SVG source-trail cards.
+// Continuous tapered outline for the workflow and application-stack cards.
 function ravenCardOutlinePath(width, height, radius, thickness) {
   const inner = Math.max(0, radius - thickness);
   return `M ${radius} 0 L ${width * .55} ${thickness}
@@ -126,9 +126,9 @@ function ravenCardOutlinePath(width, height, radius, thickness) {
     A ${radius} ${radius} 0 0 1 ${radius} 0 Z`;
 }
 
-// Share the continuous outline shape across content cards, excluding tool selectors.
+// Only these two sections use the tapered outline.
 const outlinedCards = document.querySelectorAll(
-  ".landing-body :is(.rv-card:not(.rv-retrieval-choice), .rv-flow-panel, .rv-doc, .rv-list li, .rv-steps li, .rv-cta)"
+  ".landing-body :is(.rv-flow-panel, .rv-application-layers .rv-card)"
 );
 const outlineObserver = new ResizeObserver((entries) => {
   for (const entry of entries) {

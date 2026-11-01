@@ -16,7 +16,7 @@
 .rv-recon-gradient-start { stop-color: #1b1d29; }
 .rv-recon-gradient-middle { stop-color: #111116; }
 .rv-recon-gradient-end { stop-color: #070709; }
-.rv-recon-card { fill: url(#rv-recon-fill); stroke: var(--recon-border); stroke-width: 1; }
+.rv-recon-card { fill: url(#rv-recon-fill); stroke: var(--recon-border); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .rv-recon-record { fill: var(--recon-text); }
 .rv-recon-graph .rv-recon-kicker { fill: var(--recon-muted); font-size: 9px; letter-spacing: 1px; }
 .rv-recon-meta { fill: var(--recon-muted); }
@@ -37,12 +37,16 @@
 
 @media (prefers-color-scheme: light) {
   .landing-body .rv-recon-graph {
-    --recon-text: #ffffff;
+    --recon-text: #292534;
     --recon-muted: #ede9fe;
-    --recon-border: #321949;
-    --recon-highlight: #8a65a7;
+    --recon-border: var(--rv-card-outline);
+    --recon-highlight: #c8cdff;
   }
-  .rv-recon-gradient-start { stop-color: #80579f; }
-  .rv-recon-gradient-middle { stop-color: #4b286d; }
-  .rv-recon-gradient-end { stop-color: #321949; }
+  .rv-recon-gradient-start,
+  .rv-recon-gradient-middle,
+  .rv-recon-gradient-end { stop-color: var(--rv-card-fill); }
+  .rv-recon-graph :is(.rv-recon-kicker, .rv-recon-meta, .rv-recon-context-label) {
+    fill: #625b70;
+  }
+  .rv-recon-highlight + text { fill: #292534; }
 }

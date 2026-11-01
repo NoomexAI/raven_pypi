@@ -1,5 +1,6 @@
 /* A scroll-linked, geometric view of source provenance. */
 .landing-body .rv-source-trail {
+  --trail-stack-fill: #000000;
   width: min(100%, 1080px);
   min-height: 280vh;
   min-height: 280svh;
@@ -30,37 +31,19 @@
 .rv-trail-plane {
   fill: var(--site-background);
   stroke: currentColor;
-  stroke-opacity: .4;
+  stroke-opacity: 1;
   stroke-width: 1;
   vector-effect: non-scaling-stroke;
 }
 
-.rv-trail-output > .rv-trail-plane {
-  stroke-opacity: .8;
-}
-
 .rv-trail-gradient-start {
-  stop-color: color-mix(in srgb, #ffffff, var(--trail-gradient-start, #09090c) var(--trail-card-color-progress, 100%));
+  stop-color: color-mix(in srgb, var(--trail-stack-fill), var(--trail-gradient-start, #09090c) var(--trail-card-color-progress, 100%));
 }
 .rv-trail-gradient-middle {
-  stop-color: color-mix(in srgb, #ffffff, var(--trail-gradient-middle, #09090c) var(--trail-card-color-progress, 100%));
+  stop-color: color-mix(in srgb, var(--trail-stack-fill), var(--trail-gradient-middle, #09090c) var(--trail-card-color-progress, 100%));
 }
 .rv-trail-gradient-end {
-  stop-color: color-mix(in srgb, #ffffff, var(--trail-gradient-end, #09090c) var(--trail-card-color-progress, 100%));
-}
-
-/* Opaque white planes gain their final colors and tapered outlines as they unfold. */
-.landing-body .rv-source-trail[data-enhanced="true"] .rv-trail-plane {
-  stroke-opacity: calc(.82 * (1 - var(--trail-card-reveal, 0)));
-}
-.rv-trail-outline {
-  fill: var(--trail-outline-color, #777991);
-  opacity: var(--trail-card-reveal, 0);
-  pointer-events: none;
-}
-.rv-trail-node[data-active="true"] > .rv-trail-outline,
-.rv-trail-node:focus-visible > .rv-trail-outline {
-  fill: var(--trail-outline-active, #d4d5e5);
+  stop-color: color-mix(in srgb, var(--trail-stack-fill), var(--trail-gradient-end, #09090c) var(--trail-card-color-progress, 100%));
 }
 
 .rv-trail-content text {
@@ -107,8 +90,7 @@
 
 .rv-trail-node[data-active="true"] > .rv-trail-plane,
 .rv-trail-node:focus-visible > .rv-trail-plane {
-  stroke-opacity: 1;
-  stroke-width: 2;
+  stroke: var(--trail-outline-active, #d4d5e5);
 }
 
 .rv-trail-edges path[data-active="true"] {
