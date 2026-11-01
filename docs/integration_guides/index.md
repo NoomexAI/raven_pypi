@@ -8,6 +8,49 @@ scripts:
 
 # Integrating RAVEN into other systems
 
+<nav class="page-links" aria-label="On this page" markdown="1">
+
+## On this page
+
+Use the finished MCP bridge with an external client, or follow the separate
+guide to rebuilding it. The rebuilding guide is optional, not another setup step.
+
+<details class="page-links-group" markdown="1">
+<summary>Running the example</summary>
+
+- [Choose an integration approach](#choose-an-integration-approach) — Compare
+  Python and HTTP connections and identify the surrounding application's
+  responsibilities. Section 1.
+- [Prepare and launch the MCP example](#prepare-and-launch-the-mcp-example) —
+  Download RavenMCP, install dependencies, and launch the Windows example with
+  RAVEN and Inspector. Section 2.
+- [Try the workflow in Inspector](#try-the-workflow-in-inspector) — Configure
+  models, create a knowledge, ingest a file, and continue a conversation through
+  explicit tool calls. Section 3.
+- [Connect an AI client](#connect-an-ai-client) — Set up the project-local Codex
+  connection and use the same bridge through agent-selected tools. Section 4.
+
+</details>
+
+<details class="page-links-group" markdown="1">
+<summary>Rebuilding the example</summary>
+
+- [Build the HTTP-to-tool bridge](#build-the-http-to-tool-bridge) — Follow shared
+  connection ownership, credentials, tool registration, and translation into
+  RAVEN requests. Sections 5–6.
+- [Handle completion and conversation continuity](#handle-completion-and-conversation-continuity)
+  — Observe accepted work, handle cancellation and errors, and return saved
+  answers with reusable conversation and turn IDs. Sections 7–8.
+- [Adapt the pattern and understand its limits](#adapt-the-pattern-and-understand-its-limits)
+  — Review trust boundaries, model and upload constraints, lifecycle ownership,
+  retention, and answer-quality limits. Section 9 and the conclusion.
+
+</details>
+
+</nav>
+
+<div class="page-jump-target" id="choose-an-integration-approach" aria-hidden="true"></div>
+
 ## 1. RAVEN as part of a larger system
 
 RAVEN can provide the document and conversation backend of an application
@@ -73,6 +116,8 @@ to tracing its requests through the implementation. It illustrates how an
 external tool can use RAVEN's HTTP interface; it is not the only way to integrate
 RAVEN. The [architecture page]({{ '/architecture/' | relative_url }}) provides
 the deeper explanation of the backend behind those calls.
+
+<div class="page-jump-target" id="prepare-and-launch-the-mcp-example" aria-hidden="true"></div>
 
 ## 2. An MCP bridge: prepare and launch the example
 
@@ -272,6 +317,8 @@ ingestion or chat turn. Ollama remains running independently.
 At this point, the connection is ready for tool calls. The next section
 configures RAVEN's model pair and follows a document through ingestion, a
 conversation, and a follow-up question.
+
+<div class="page-jump-target" id="try-the-workflow-in-inspector" aria-hidden="true"></div>
 
 ## 3. Complete the workflow in Inspector
 
@@ -609,6 +656,8 @@ and discover resources, a file reaches RAVEN through an upload, and a saved
 conversation supports more than one question. The next section uses the same
 tools from Codex instead of invoking them manually in Inspector.
 
+<div class="page-jump-target" id="connect-an-ai-client" aria-hidden="true"></div>
+
 ## 4. Connect the bridge to Codex
 
 Inspector makes each tool call explicit: select a tool, fill its arguments,
@@ -807,6 +856,8 @@ The same bridge now serves two kinds of client: a manual interface for
 inspecting individual calls and an agent that can invoke those calls as part
 of a broader task. The next section turns to the implementation, starting with
 the authenticated HTTP connection shared by the tools.
+
+<div class="page-jump-target" id="build-the-http-to-tool-bridge" aria-hidden="true"></div>
 
 ## 5. Building the authenticated HTTP connection
 
@@ -1312,6 +1363,8 @@ The complete HTTP client ties these request mappings to their shared helpers:
 
 {% include source_file.html name="client.py" source="mcp_example/client.py" language="python" id="complete-mcp-client-py" %}
 
+<div class="page-jump-target" id="handle-completion-and-conversation-continuity" aria-hidden="true"></div>
+
 ## 7. Waiting for operations and handling interruption
 
 An HTTP response can confirm that work was accepted without confirming that
@@ -1688,6 +1741,8 @@ describes the backend's persistence and derived context in more detail. At the
 integration boundary, the reusable rule is smaller: preserve resource identity,
 submit one new turn, and return the saved result without creating a second
 source of conversation truth.
+
+<div class="page-jump-target" id="adapt-the-pattern-and-understand-its-limits" aria-hidden="true"></div>
 
 ## 9. Limits and adapting the pattern
 

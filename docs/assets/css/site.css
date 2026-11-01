@@ -284,8 +284,38 @@ a:focus-visible {
 .markdown-body h1,
 .markdown-body h2,
 .markdown-body h3,
-.markdown-body h4 {
+.markdown-body h4,
+.markdown-body .page-jump-target {
   scroll-margin-top: 24px;
+}
+
+.markdown-body .page-links {
+  margin-block: 24px 32px;
+}
+
+.markdown-body .page-links > h2 {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.markdown-body .page-links-group {
+  margin-block: 12px;
+}
+
+.markdown-body .page-links-group > summary {
+  width: fit-content;
+  cursor: pointer;
+  font-weight: 600;
+  padding-block: 6px;
+}
+
+.markdown-body .page-links-group > summary:focus-visible {
+  outline: 2px solid var(--site-accent);
+  outline-offset: 3px;
+}
+
+.markdown-body .page-links-group > ul {
+  margin-block: 8px 16px;
 }
 
 .markdown-body img,

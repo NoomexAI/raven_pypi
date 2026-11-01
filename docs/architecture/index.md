@@ -16,6 +16,34 @@ how work moves between them, and why those boundaries exist. The
 with RAVEN. Here, the subject is the backend itself, rather than the terminal
 interface or its setup instructions.
 
+<nav class="page-links" aria-label="On this page" markdown="1">
+
+## On this page
+
+- [Understand the component model](#understand-the-component-model) — Vocabulary,
+  component ownership, and the dependency map. Section 1.
+- [Configure runtimes and models](#configure-runtimes-and-models) — Settings
+  scopes, per-user storage, specifications, adapters, and model residency. Section 2.
+- [Prepare and store documents](#prepare-and-store-documents) — Parsing,
+  provenance, sections, embedding chunks, and knowledge persistence. Section 3.
+- [Find information and expose tools](#find-information-and-expose-tools) — The
+  four retrieval mechanisms and their relationship to navigation, memory, and
+  preference tools. Sections 4–5.
+- [Run an agent over a conversation](#run-an-agent-over-a-conversation) — Tool
+  policy, agent execution, persistent turns, temporary sessions, and memory.
+  Sections 6–7.
+- [Observe work and recover from failure](#observe-work-and-recover) — Tasks,
+  event streams, durability, interruption, retry, and retention policy. Section 8.
+- [Reconstruct inspectable sources](#reconstruct-inspectable-sources) — Evidence,
+  highlighted file views, navigation ranges, and reconstruction's limits. Section 9.
+- [Connect the backend to applications](#connect-the-backend-to-applications) —
+  Python and HTTP entry points, application responsibilities, and host policy.
+  Section 10 and the conclusion.
+
+</nav>
+
+<div class="page-jump-target" id="understand-the-component-model" aria-hidden="true"></div>
+
 ## 1. Architectural overview
 
 ### 1.1 What the architecture is designed to solve
@@ -143,6 +171,8 @@ This is the organizing principle for the rest of the architecture: **persistent
 resources own state, workflows perform work against that state, and application
 boundaries expose the work without absorbing its implementation**. The following
 sections examine those decisions, including their limits, in detail.
+
+<div class="page-jump-target" id="configure-runtimes-and-models" aria-hidden="true"></div>
 
 ## 2. Configuration and model providers
 
@@ -635,6 +665,8 @@ concern with a clear owner: specifications describe the choice, Provider and
 its managers prepare model access, pipelines consume the adapters, and the
 external services execute inference and manage their weights.
 
+<div class="page-jump-target" id="prepare-and-store-documents" aria-hidden="true"></div>
+
 ## 3. Knowledge and ingestion
 
 Ingestion prepares a document for several different uses: searching its text,
@@ -852,6 +884,8 @@ Finally, a storage commit, an operation's terminal state, and a refreshed UI are
 three different things. The backend owns the first two. The application uses
 the events and task result to refresh its file list or display a failure; the
 knowledge does not reach into the interface to update it.
+
+<div class="page-jump-target" id="find-information-and-expose-tools" aria-hidden="true"></div>
 
 ## 4. Retrieval pipelines
 
@@ -1303,6 +1337,8 @@ information—not the full model-facing `result`. Corrective `next_action` text
 is part of the tool response seen by the model; the current event translator
 does not forward it as a separate event field. This avoids treating the tool's
 model response and the UI activity event as interchangeable objects.
+
+<div class="page-jump-target" id="run-an-agent-over-a-conversation" aria-hidden="true"></div>
 
 ## 6. The agent harness
 
@@ -1784,6 +1820,8 @@ These boundaries explain why a turn UUID, a conversation ID, and an operation
 ID are all needed. The next section examines the execution records, event
 streams, durability policy, and retry machinery that coordinate this work.
 
+<div class="page-jump-target" id="observe-work-and-recover" aria-hidden="true"></div>
+
 ## 8. Operations, events, and recovery
 
 Ingestion, a model download, and a conversation turn perform different work,
@@ -2111,6 +2149,8 @@ alone repairs every side effect. Operations establish what ran and how it
 ended; domain stores establish what committed; explicit reconciliation and
 eligible retries connect the two after interruption.
 
+<div class="page-jump-target" id="reconstruct-inspectable-sources" aria-hidden="true"></div>
+
 ## 9. Source reconstruction
 
 A source reference identifies where an answer's supporting material can be
@@ -2328,6 +2368,8 @@ source identity, knowledge stores preserve the parsed content, reconstruction
 assembles an inspectable view, and the application decides how to present it.
 The final section follows that application boundary across the Python facade,
 HTTP server, and the host around RAVEN.
+
+<div class="page-jump-target" id="connect-the-backend-to-applications" aria-hidden="true"></div>
 
 ## 10. Application boundaries
 

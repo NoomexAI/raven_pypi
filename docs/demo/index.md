@@ -8,6 +8,43 @@ scripts:
 
 # Building a document assistant with RAVEN
 
+<nav class="page-links" aria-label="On this page" markdown="1">
+
+## On this page
+
+Run the downloaded example, or follow the separate guide to rebuilding its
+connection to RAVEN. The rebuilding guide is optional, not another setup step.
+
+<details class="page-links-group" markdown="1">
+<summary>Running the example</summary>
+
+- [Run the example](#run-the-example) — Understand the demo's scope, download
+  the project, install dependencies, configure models, and try chat and source
+  inspection. Sections 1–2.
+
+</details>
+
+<details class="page-links-group" markdown="1">
+<summary>Rebuilding the example</summary>
+
+- [Rebuild the RAVEN connection](#rebuild-the-raven-connection) — Trace requests,
+  results, and progress events, then connect startup, shutdown, and model
+  configuration. Sections 3–5.
+- [Add documents to a knowledge](#add-documents-to-a-knowledge) — Connect file
+  inputs to ingestion, show progress, and refresh confirmed state. Section 6.
+- [Connect chat and its sources](#connect-chat-and-sources) — Open saved
+  conversations, stream a session turn, and attach reconstructed sources to the
+  correct answer. Sections 7–8.
+- [Reopen and check the workflow](#reopen-and-check-the-workflow) — Check what
+  survives a restart and review the boundary between the interface and RAVEN.
+  Sections 9–10.
+
+</details>
+
+</nav>
+
+<div class="page-jump-target" id="run-the-example" aria-hidden="true"></div>
+
 ## 1. What we're building
 
 This walkthrough examines how to build a small document assistant using RAVEN
@@ -468,6 +505,8 @@ saved conversation and its source-backed answers.
 
 This completes the application workflow. The following sections examine the
 source files and explain how each interaction is connected to RAVEN.
+
+<div class="page-jump-target" id="rebuild-the-raven-connection" aria-hidden="true"></div>
 
 ## 3. Rebuilding the TUI
 
@@ -1548,6 +1587,8 @@ We have connected model selection without putting model management into the
 TUI. Next, we will use the configured pair to process a document and connect
 ingestion progress to the transcript.
 
+<div class="page-jump-target" id="add-documents-to-a-knowledge" aria-hidden="true"></div>
+
 ## 6. Creating a knowledge and ingesting a document
 
 With the model pair configured, we can connect a document to a persistent
@@ -2012,6 +2053,8 @@ ingestion task → stage updates → confirmed result → refreshed persisted st
 We have connected document management without reproducing RAVEN's ingestion
 pipeline in the application. Next, we will connect a conversation to the
 configured backend and stream an answer based on the ingested material.
+
+<div class="page-jump-target" id="connect-chat-and-sources" aria-hidden="true"></div>
 
 ## 7. Connecting conversations to streamed chat
 
@@ -3012,6 +3055,8 @@ The full implementations remain available in the expandable
 [`source_widgets.py`](#complete-source-widgets-py "source_widgets.py"),
 [`raven_client.py`](#complete-raven-client-py "raven_client.py"), and
 [`app.py`](#complete-app-py "app.py") references above.
+
+<div class="page-jump-target" id="reopen-and-check-the-workflow" aria-hidden="true"></div>
 
 ## 9. Reopening and checking the complete workflow
 
