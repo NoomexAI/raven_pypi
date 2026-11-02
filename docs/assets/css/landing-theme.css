@@ -757,7 +757,7 @@
 }
 
 @media (max-width: 600px) {
-  .landing-body .rv-hero { min-height: auto; padding-top: 66px; }
+  .landing-body .rv-hero { min-height: auto; padding-top: 160px; }
   .rv-hero-light { top: 330px; right: -390px; width: 560px; height: 470px; opacity: .4; }
   .landing-body .rv-hero-art { min-height: 295px; }
   .raven-landing .site-header { width: calc(100% - 20px); padding-inline: 0; }
