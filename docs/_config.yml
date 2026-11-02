@@ -42,6 +42,8 @@ navigation:
     url: "/demo/"
   - title: Architecture
     url: "/architecture/"
+  - title: API guide
+    url: "/api_guide/"
   - title: Integration guides
     url: "/integration_guides/"
   - title: Development notes
