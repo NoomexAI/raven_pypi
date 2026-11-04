@@ -630,7 +630,7 @@ storage work.
 The persisted `retry_policy` field is exactly `"never"` or
 `"user_confirmed"`; it is not an instruction to auto-retry on startup.
 
-| Retryable root task | Maximum attempts | What is reused |
+| Retryable task type | Maximum attempts | What is reused |
 | --- | --- | --- |
 | `ingestion.run` | 3 | Knowledge name, retained source/snapshot information, and ingestion parameters. |
 | `reconstruction.reconstruct` | 3 | The normalized evidence/retrieval input. |
@@ -819,7 +819,7 @@ structured context. Do not parse human-readable messages to determine logic.
 Expected failures use `RavenError`. Its stable fields are:
 
 ```python
-from nraven import RavenError
+from nraven.core.errors import RavenError
 
 
 try:
@@ -1951,9 +1951,10 @@ A paged canonical message record is:
 ```
 
 `message_id` is a durable numeric pagination cursor. `message_order` is the
-position inside that turn. `message` is the serialized LlamaIndex
-`ChatMessage`; assistant tool-call messages may use structured blocks rather
-than plain `content`.
+position inside that turn. In the Python API, `message` is a LlamaIndex
+`ChatMessage` object; the JSON above illustrates its serialized representation.
+Use `message.model_dump(mode="json")` before encoding it as JSON. Assistant
+tool-call messages may use structured blocks rather than plain `content`.
 
 A turn record is:
 
@@ -2017,7 +2018,7 @@ finally:
 | `turn_id` | Stable UUID used to persist or idempotently reuse the conversation turn. |
 | `status` | Current `OperationStatus` of the session task. |
 | `stream` / `events(after_event_id=0)` | Fresh replayable iterator over this run and its nested tasks. |
-| `collect()` | Waits for completion and builds `AgentRunResult` from events. |
+| `collect()` | Waits for the session task and returns its `AgentRunResult`, after turn persistence. The agent assembles that result from events; collecting does not start another inference. |
 | `wait()` | Waits and returns terminal status without returning/raising the run result. |
 | `cancel()` | Cancels the turn, waits for terminal cancellation, and releases the conversation claim. |
 

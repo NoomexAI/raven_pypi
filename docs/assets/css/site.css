@@ -224,9 +224,96 @@ a:focus-visible {
   pointer-events: auto;
 }
 
+.markdown-body .has-code-copy .code-snippet-filename {
+  right: 46px;
+}
+
+.markdown-body .api-example.has-code-copy pre {
+  padding-top: 44px;
+}
+
+.markdown-body .code-copy {
+  position: absolute;
+  top: 4px;
+  right: 10px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--site-muted);
+  cursor: pointer;
+}
+
+.markdown-body .code-copy svg {
+  display: block;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.markdown-body .code-copy:hover {
+  background: var(--site-background);
+  color: var(--site-foreground);
+}
+
+.markdown-body .code-copy:focus-visible {
+  outline: 2px solid var(--site-link);
+  outline-offset: -2px;
+}
+
+.markdown-body .code-copy-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .markdown-body .code-snippet pre,
 .markdown-body .source-file-content pre {
   padding-top: 32px;
+}
+
+.markdown-body .code-disclosure pre {
+  margin-bottom: 0;
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.markdown-body .code-disclosure [hidden] {
+  display: none;
+}
+
+.markdown-body .code-disclosure-toggle {
+  display: block;
+  width: 100%;
+  padding: 10px 16px;
+  border: 0;
+  border-radius: 0 0 6px 6px;
+  background: var(--site-hover);
+  color: var(--site-link);
+  font: inherit;
+  font-size: 13px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.markdown-body .code-disclosure-toggle:hover {
+  color: var(--site-foreground);
+  text-decoration: underline;
+}
+
+.markdown-body .code-disclosure-toggle:focus-visible {
+  outline: 2px solid var(--site-link);
+  outline-offset: -3px;
 }
 
 .markdown-body .source-file-code {
