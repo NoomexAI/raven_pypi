@@ -61,6 +61,16 @@ These are two ways of using RAVEN, not successive setup stages.
 <details class="page-links-group" markdown="1">
 <summary>Component API</summary>
 
+- [Overview of the component API](#component-api-overview) — What direct
+  composition adds, when it is useful, and which responsibilities move to
+  the application. Section 11.
+- [Constructing and closing a workspace](#component-workspace) — Share
+  managers, recover interrupted work, and close owned resources. Section 12.
+- [Model adapters for components](#component-adapters) — Obtain adapters,
+  configure provider clients, and supply models to individual stages. Section 13.
+- [Working directly with knowledge](#component-knowledge) — Read stored
+  records, inspect chunk matches, and manage open storage. Section 14.
+
 </details>
 
 </nav>
@@ -3788,7 +3798,8 @@ offering Retry. A retry of `session.generate_response` returns its
 Operation history takes disk space and may contain queries, source references,
 and saved retry inputs. `OperationCleanupService` deletes a bounded batch of
 terminal operations older than a chosen retention period. Construct it with
-the started facade's `operation_manager`; the manager owns that user's store.
+the started facade's `operation_manager`; that operation manager owns the
+user's store.
 
 <figure class="code-snippet api-signature" markdown="1">
 <figcaption class="code-snippet-filename">OperationCleanupService.__init__()</figcaption>
@@ -3896,7 +3907,7 @@ the next explicitly scheduled pass, and a bounded pass may leave more expired
 records for later passes. Use `operation_retention_seconds` for the retention
 duration, `operation_cleanup_batch_size` for each pass, and
 `operation_cleanup_interval_seconds` if arranging a periodic schedule. Run
-cleanup for each user's own manager and avoid deleting live database files
+cleanup for each user's own operation manager and avoid deleting live database files
 manually.
 
 Browser-upload retention is a separate server mechanism. Successful staged
@@ -3905,3 +3916,1435 @@ uploads are removed after ingestion; failed uploads can be retained for the
 server. Once that retry copy expires, the client must upload the source again,
 even if the old task record remains in operation history. Operation-history
 cleanup does not extend that upload window.
+
+<div class="page-jump-target" id="component-api-overview" aria-hidden="true"></div>
+
+## 11. Overview of the component API
+
+The component API exposes the classes that `Raven` connects internally.
+Instead of asking `Raven` to create and connect them, the application creates
+the components it needs. It chooses their models, passes shared managers into
+them, and calls each processing stage directly. For example, it can parse a
+document for inspection without creating a knowledge, or search stored vectors
+without constructing a chat agent.
+
+The operations, stored resources, and result formats described earlier still
+apply. A retrieval pipeline returns the same section records whether called
+directly or through `Raven.retrieve()`. A `Conversation` still owns its saved
+messages when obtained through `ConversationManager` rather than the facade.
+Direct component use changes who connects and manages these objects.
+
+This part of the guide therefore concentrates on **what direct composition
+adds**. The earlier sections remain the reference for familiar behavior such
+as creating a knowledge, reading messages, interpreting retrieval results,
+and replaying events. Those method families do not need to be learned again.
+
+### 11.1 Why expose components when Raven already exposes their methods?
+
+The `Raven` class creates a user workspace, an operation manager, a provider,
+and knowledge and conversation managers. It constructs retrieval pipelines
+when models are configured and creates sessions when requested. It starts
+the managers, applies system limits and runtime defaults, supplies the
+configured models to pipelines, and selects the appropriate pipeline or
+session when retrying a failed task.
+
+A **model adapter** is the Python object through which a component sends model
+requests. Components receive these objects as `llm` or `embed_model` arguments.
+
+A particular application may need a different arrangement. For example:
+
+- A source-inspection service may need only `KnowledgeBase`, `Reconstructor`,
+  and an `OperationManager`. Reconstructing stored sections requires neither
+  a chat agent nor configured models.
+- A vector-search service can construct `EmbeddedRetrievalPipeline` with a
+  knowledge base, an embedding adapter, and an operation manager. It can then
+  search existing vectors without configuring an LLM. `Raven.retrieve()`
+  requires the facade's configured model pair; this pipeline uses only the
+  embedding adapter for inference.
+- An ingestion worker may use one LLM for metadata extraction while the chat
+  application uses another for conversation. Components accept the models
+  needed for their own work, so they need not all share the facade's single
+  configured LLM.
+- A document-review interface may need to inspect parser output before
+  deciding whether to ingest a file. Direct parsing exposes that intermediate
+  representation without committing the document to a knowledge.
+
+These examples change which components are used or how they are configured.
+Ordinary resource-management calls still perform the work described earlier:
+for example, `Raven.create_knowledge()` delegates to `KnowledgeBase.create()`.
+
+### 11.2 What more can an application control?
+
+Direct composition provides several concrete controls beyond the facade's
+main method arguments:
+
+| Control | What the component API makes available |
+| --- | --- |
+| Which components are constructed | Build a focused parsing, ingestion, search, reconstruction, or chat service without constructing the rest of the facade. |
+| Which model serves each stage | Supply an LLM or embedding adapter directly where required. For example, ingestion metadata extraction, hierarchical scoring, and the chat agent can use different LLM instances. |
+| Preliminary search and scoring batches | Set how many embedded results are considered, how many candidates are scored in each batch, and how previously scored candidates are supplied to later batches. |
+| A search restricted to selected files | `HierarchicalRetrievalPipeline.retrieve_by_file()` accepts explicit filenames. This supports an application that has already selected documents rather than asking the pipeline to choose them through a local/global facade mode. |
+| Document-processing setup | Supply a configured Docling converter to `DocumentParser` for supported formats, inspect its elements, or supply a sentence-splitting function to `ProvenanceAwareSemanticSplitter`. `IngestionPipeline` also accepts a parser instance. |
+| Whether a completed turn is saved | `AgentHarness.start()` runs the agent and exposes its output. `Session.generate_response()` also saves the user message, tool interactions, final response, and collected result as a conversation turn. |
+
+The retrieval pipelines expose these controls as named arguments:
+
+- `embedded_top_k` limits the preliminary embedded search used by
+  vector-conditioned retrieval. The pipeline selects files from those
+  results before scoring their sections.
+- `max_per_read` limits the number of candidates in one scoring batch.
+- `anchor_count` controls how many previously scored, highly ranked candidates
+  are included with their scores as references for later scoring batches.
+
+`top_k` still limits the final section results. An application can therefore
+increase the preliminary search limit without increasing the number of
+sections returned. The later retrieval section shows which methods accept
+these arguments.
+
+Direct access also has defined limits. The current agent exposes its built-in
+retrieval, navigation, memory, and preference tools according to its policy;
+constructing a harness does not provide an arbitrary tool-registration API.
+Likewise, using a custom parser configuration does not remove the parser's
+supported-format checks. The sentence-splitting hook belongs to direct splitter
+construction; the current ingestion constructor accepts a parser instance,
+but does not accept a replacement splitter instance.
+
+### 11.3 The components and their boundaries
+
+The following map identifies the objects an application connects. Resources
+and their managers are separate entries because they serve different purposes.
+
+| Component | Responsibility in a composed application |
+| --- | --- |
+| `PathConfig` | Defines one user's fixed paths beneath the chosen home. Components operating on that workspace should use the same path configuration. |
+| `OperationManager` | Owns operation storage, discovery/recovery, event streams, and operation handles. The operation/task/event contracts from Section 9 remain the same. |
+| `Knowledge` | Represents one knowledge and manages its file/section storage and vectors. |
+| `KnowledgeBase` | Creates, discovers, finds, and deletes knowledges; manages their open resources. |
+| `Conversation` | Owns one conversation's metadata, canonical messages, turns, model context, vector memory, and preferences. |
+| `ConversationManager` | Creates, discovers, finds, updates, and deletes conversations; manages their open resources. |
+| `Provider`, `OllamaManager`, `LiteLLMManager` | `Provider` reads a `ModelSpec` and selects a manager. `OllamaManager` connects to Ollama; `LiteLLMManager` creates adapters through LiteLLM. Their loading tasks return adapters for pipelines or the harness to use. |
+| `DocumentParser` | Reads a supported file into ordered elements with source information, before semantic sectioning or storage. |
+| `ProvenanceAwareSemanticSplitter` | Uses embeddings to group parsed content into sections while preserving element references and source ranges. |
+| `IngestionPipeline` | Connects parsing, sectioning, metadata extraction, chunk embedding, and the knowledge's persistence workflow. |
+| Retrieval pipelines | Search prepared knowledges using the selected mechanism and return source records. Each pipeline exposes its own dependencies and tuning arguments. |
+| `Reconstructor` | Uses source references to read complete stored file views and identify highlighted sections. It does not need a model. |
+| `AgentHarness` | Runs the model/tool loop, publishes events, collects evidence, and reconstructs sources. It produces an agent run and its model-compatible messages. |
+| `Session` | Connects a conversation to a harness, coordinates a turn, and saves its completed messages and result. |
+
+For example, a `ConversationManager` can find a conversation without running
+an agent. A `Reconstructor` can produce source views without creating a
+session. Neither action requires the application to start a chat turn.
+
+### 11.4 Following the dependencies through a workflow
+
+For a manually composed **ingestion service**, the application first creates
+a `PathConfig` and an `OperationManager`, then a `KnowledgeBase` using those
+dependencies. An `IngestionPipeline` receives that knowledge base and operation
+manager. Its `run()` call receives the source, destination knowledge, LLM,
+and embedding adapter.
+
+Set the semantic-splitting and metadata-extraction retry options when
+constructing `IngestionPipeline`. A configured `DocumentParser` can also be
+passed into that constructor. Supply `llm` and `embed_model` when calling
+`run()`. The pipeline then performs the ingestion flow described in Section 5.
+
+Continue to use `IngestionPipeline.run()` when ingesting source files.
+`Knowledge.ingest()` receives already prepared section data; calling it
+directly does not perform the pipeline's file parsing or LLM metadata
+extraction.
+
+For a manually composed **chat service**, the application creates the
+knowledge and conversation managers, constructs the retrieval pipelines,
+and supplies those pipelines to `AgentHarness`. It then creates a `Session`
+with a conversation, that harness, and the shared operation manager. The
+session's `llm` supports memory summarization and title generation; its
+`embed_model` supports vector memory. The harness already holds the LLM used
+for the agent's own inference calls.
+
+During a turn, the harness uses `ToolBuilder` to expose the permitted retrieval
+tools to the model. When the model selects one, its tool wrapper calls the
+pipeline's `retrieve_local_context()` or `retrieve_global_context()` directly.
+It does not call `Raven.retrieve()`. For sessions created through `Raven`,
+the tools and that facade method use the same pipeline instances.
+
+`Session.generate_response()` streams the turn and saves its completed
+messages and result, as described in Section 8. `AgentHarness.start()` returns
+an `AgentRun` with events, a collected result, and model-compatible messages,
+but does not save a complete conversation turn. An application calling the
+harness directly must save those messages itself if it needs persistent
+conversation history.
+
+In both services, passing the same active `Operation` into nested calls
+keeps the work in one operation and event history. Omitting it lets each
+operation-aware method create an operation using its supplied operation manager.
+Direct composition does not require replacing the operation-first design.
+
+The application can obtain adapters from `Provider` or construct suitable
+LlamaIndex adapters itself. A provider loading task returns its adapter
+through `.result()`. The application then passes it into the relevant
+constructor or method:
+
+- The splitter needs an embedding adapter supporting asynchronous batch
+  embedding.
+- Embedded retrieval needs an embedding adapter for query embeddings.
+- Ingestion metadata extraction and hierarchical retrieval need an LLM
+  supporting structured prediction.
+- The chat agent needs a function-calling-capable LLM.
+
+**Separate model choices do not make embedding identities interchangeable.**
+Use an embedding model compatible with the vectors already stored in each
+knowledge or conversation. Supplying models directly does not make old
+vectors searchable with an unrelated embedding model.
+
+### 11.5 A focused example: inspect a document before ingestion
+
+`DocumentParser` is useful on its own when the application needs to inspect
+what a file reader produced. The following program parses a file and prints
+its element types, source ranges, and short text previews. It creates no
+knowledge or conversation and makes no LLM or embedding requests.
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">DocumentParser.parse()</figcaption>
+
+```python
+async def parse(
+    self,
+    source_path: str | Path,
+    *,
+    file_id: str,
+    max_file_size_bytes: int = DEFAULT_MAX_SOURCE_FILE_BYTES,
+    max_pages: int = DEFAULT_MAX_DOCUMENT_PAGES,
+) -> ParsedDocument
+```
+
+</figure>
+
+Save the following as `preview_document.py` and run
+`python preview_document.py Reaction_wheel.txt`, using the
+[sample file]({{ '/assets/downloads/test_files/Reaction_wheel.txt' | relative_url }})
+from Section 5. The package installation is sufficient for this text-file
+example; no `Raven.start()`, Ollama server, or model configuration is needed.
+
+<figure class="code-snippet api-example" markdown="1">
+<figcaption class="code-snippet-filename">preview_document.py</figcaption>
+
+```python
+import argparse
+import asyncio
+import json
+from pathlib import Path
+from uuid import uuid4
+
+from nraven import DocumentParser
+
+
+async def main(arguments: argparse.Namespace) -> None:
+    document_parser = DocumentParser()
+    file_id = uuid4().hex
+    parsed_document = await document_parser.parse(arguments.source, file_id=file_id)
+    print("File:", parsed_document.file_name)
+    print("Preview file ID:", file_id)
+    print("Navigation:", parsed_document.navigation_type.value)
+    print("Conversion status:", parsed_document.conversion_status)
+    print("Warnings:", parsed_document.warnings)
+    print("Elements:", len(parsed_document.elements))
+    for element in parsed_document.elements:
+        print(json.dumps({
+            "element_id": element.element_id,
+            "element_type": element.element_type.value,
+            "source_range": element.source_range,
+            "text_preview": element.text[:180],
+        }, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    argument_parser = argparse.ArgumentParser()
+    argument_parser.add_argument("source", type=Path)
+    asyncio.run(main(argument_parser.parse_args()))
+```
+
+</figure>
+
+The parser uses `file_id` as the prefix of each element ID. This script
+generates a fresh UUID for its preview and creates no knowledge file record.
+A later ingestion generates its own file ID. In a custom processing flow,
+use the same file ID for the parser's element IDs and the section IDs derived
+from those elements, so they continue to identify the same file.
+
+Parser elements are not semantic sections yet. Text/Markdown reading and
+PDF/DOCX conversion can produce different element structures; the splitter
+is the separate component that groups them into sections. The program only
+shows the parser boundary, so it neither creates embeddings nor saves a file
+record. This is one capability the facade's complete ingestion method does
+not expose as an intermediate result.
+
+`parse()` returns its `ParsedDocument` directly, without allocating an
+`OperationTask`. If a preview needs operation status and event history in the
+application, run the parsing call inside an application worker as in Section 9.
+
+### 11.6 What the application takes responsibility for
+
+Without the facade, the application must perform these steps itself:
+
+- **Dependencies and user scope.** Share the appropriate `PathConfig` and
+  `OperationManager` across components in one user's workspace. Keep another
+  user's components and stores separate.
+- **Startup and crash recovery.** Call `OperationManager.recover()` before
+  accepting new work. It starts the operation manager if needed and marks
+  interrupted operations failed. Then start the knowledge and conversation
+  managers the application will use. Calling `OperationManager.start()`
+  separately is valid, but it does not perform recovery on its own.
+- **Configuration and policy.** Pass the desired settings into each component.
+  Components validate their own arguments, but do not automatically read the
+  facade's runtime-settings file or apply its system-wide ceilings. For
+  example, an application calling a retrieval pipeline directly must check
+  its requested result limit against `SystemConfig.max_retrieval_top_k` if
+  it wants to enforce that policy.
+- **Models and compatibility.** Load suitable adapters and pass them to the
+  components that use them. Loading a second adapter does not replace the
+  model already held by an existing pipeline. Keep embedding choices
+  compatible with the vectors in the relevant knowledge or conversation.
+- **Task results and retry handling.** Await task results and decide whether
+  to retry failures. `OperationManager` stores task records and runs workers;
+  it does not choose an ingestion pipeline, reconstructor, or session for a
+  retry. Without `Raven.retry_task()`, the application must select that
+  component and supply the saved retry inputs and required models.
+- **Shutdown.** Finish or cancel active work before closing the resource
+  managers and provider clients it uses, then close the shared operation
+  manager. For example, `KnowledgeBase.close()` closes its managed knowledge
+  databases but does not close the shared `OperationManager`.
+- **History retention.** Arrange operation-history cleanup when desired,
+  following Section 10. Direct composition does not add automatic scheduling.
+
+An application can also use a component already owned by a started `Raven`,
+such as `raven.knowledge_base` or `raven.operation_manager`. For example, a
+direct pipeline can reuse those objects to access the same knowledges and
+operation history. Leave their shutdown to `Raven.close()` while they are
+shared with facade calls. Reuse `raven.operation_manager` rather than opening
+another `OperationManager` against the same user's operation database.
+
+### 11.7 Using the rest of this part of the guide
+
+The following sections concentrate on construction, dependencies, additional
+parameters, intermediate results, and responsibilities that change when
+components are used directly. Familiar CRUD calls, retrieval result shapes,
+message formats, and event cursors refer back to Sections 1–10.
+
+Continue using `Raven` for workflows its methods already support. Use
+components directly when the application needs intermediate parser output,
+different models for different stages, additional retrieval parameters, or
+explicit control over turn persistence.
+
+<div class="page-jump-target" id="component-workspace" aria-hidden="true"></div>
+
+## 12. Constructing and closing a component workspace
+
+Without `Raven`, the application creates the managers that its components
+will use. This section builds a small workspace with a knowledge base,
+conversation manager, and operation manager. It needs no models because it
+only creates knowledge and conversation metadata.
+
+Creating and updating resources still returns an `OperationTask`. Await
+`.result()` to obtain its result; read its events to observe progress, as
+explained in Sections 5, 7, and 9. This section explains which objects to pass
+into each manager, how to start them, and how to stop active tasks before
+closing the databases they use.
+
+### 12.1 Constructing the shared dependencies
+
+Create one `PathConfig` for the chosen home and user. Pass it to the
+`OperationManager` and `KnowledgeBase`. The `ConversationManager` receives
+that same path configuration, knowledge base, and operation manager:
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">OperationManager.__init__()</figcaption>
+
+```python
+def __init__(
+    self,
+    paths: PathConfig,
+    *,
+    sync_interval: float = OPERATION_SYNC_INTERVAL_SECONDS,
+    max_cached_finished_operations: int = (
+        DEFAULT_FINISHED_OPERATION_CACHE_SIZE
+    ),
+    event_replay_page_size: int = DEFAULT_EVENT_REPLAY_PAGE_SIZE,
+) -> None
+```
+
+</figure>
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">KnowledgeBase.__init__()</figcaption>
+
+```python
+def __init__(
+    self,
+    paths: PathConfig,
+    operation_manager: OperationManager,
+    *,
+    max_open_knowledges: int = DEFAULT_OPEN_KNOWLEDGE_LIMIT,
+) -> None
+```
+
+</figure>
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">ConversationManager.__init__()</figcaption>
+
+```python
+def __init__(
+    self,
+    paths: PathConfig,
+    knowledge_base: KnowledgeBase,
+    operation_manager: OperationManager,
+    *,
+    max_open_conversations: int = DEFAULT_OPEN_CONVERSATION_LIMIT,
+) -> None
+```
+
+</figure>
+
+Each constructor argument has a specific purpose:
+
+- `paths` selects the user's directories and operation database. Reuse the
+  same `PathConfig` object for these managers so they refer to the same user.
+  The example names that object `path_config`; `paths` is the constructor's
+  parameter name.
+- `operation_manager` is the shared manager that `KnowledgeBase` and
+  `ConversationManager` use to create an operation when a method is called
+  without an `operation` argument. Passing this existing instance keeps their
+  operations, task records, and events in the same user's operation store.
+- `knowledge_base` lets the conversation manager check that a requested
+  knowledge exists before creating a conversation bound to it.
+- `sync_interval` sets the number of seconds between periodic checks that
+  checkpoint pending operation-storage changes to durable storage.
+- `max_cached_finished_operations` limits how many finished `Operation`
+  objects remain cached in memory. Removing an object from this cache does
+  not delete its stored history.
+- `event_replay_page_size` sets how many stored events are read in each replay
+  batch. It does not limit the total number of events that can be replayed.
+- `max_open_knowledges` and `max_open_conversations` limit how many managed
+  resources can keep their storage connections open. Evicting a connection
+  from these caches does not delete the saved knowledge or conversation.
+
+These constructors accept their individual settings, not a `SystemConfig`
+object. The example creates `SystemConfig()` and passes the relevant field
+values explicitly. It does not load a system-settings file or create/load a
+runtime-settings file. If an application needs saved configuration, it must
+load the values and pass them into the components it constructs.
+
+### 12.2 Recovering history and starting the managers
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">OperationManager.recover()</figcaption>
+
+```python
+async def recover(self) -> list[Operation]
+```
+
+</figure>
+
+Call `operation_manager.recover()` before submitting new work. It calls
+`operation_manager.start()` if needed, opens its store, starts periodic storage
+synchronization, and marks unfinished operations from a previous process
+failed with `operation_interrupted`. Its result is the list of recovered
+`Operation` objects, which is empty when there is no interrupted work. These
+objects represent interrupted operations now marked failed; their workers
+are not restarted.
+
+Then await `knowledge_base.start()` and `conversation_manager.start()`. Each
+manager scans its user directory, reads saved metadata, and records the
+knowledges or conversations it can successfully load. Their storage
+connections are opened when needed; startup does not require every knowledge
+or conversation database to remain open at once. These two lifecycle calls
+return `None`, not an `OperationTask`.
+
+Start the knowledge base before the conversation manager, and create a local
+conversation only after its knowledge exists. Keep the same home and user ID
+on later runs to discover the previously saved resources.
+
+### 12.3 One runnable workspace example
+
+Save the following as `component_workspace.py` and run
+`python component_workspace.py`. It uses `raven-component-workspace-home`
+beneath the working directory and the default user ID. It creates or reuses
+`engineering`, then creates a new local conversation on each run. Existing
+knowledges and conversations are retained.
+
+The variable `conversation_manager` refers to the `ConversationManager`
+instance; `conversation` refers to one `Conversation` returned by a creation
+task. Similarly, `knowledge_base` is the `KnowledgeBase` instance, and
+`operation_manager` is the shared `OperationManager`. These names distinguish
+the managers from the resources and tasks they manage.
+
+`operation.run(operation.name, prepare_workspace)` runs `prepare_workspace()`
+and supplies its `operation` argument. That function passes the same object
+into the knowledge and conversation calls, so their tasks share one operation
+history while retaining separate task IDs. The read-only
+`knowledge_base.list()` call returns its list directly, without creating a
+task. The operation name is also used for its root task, as required by
+`Operation.run()`.
+
+<figure class="code-snippet api-example" markdown="1">
+<figcaption class="code-snippet-filename">component_workspace.py</figcaption>
+
+```python
+import asyncio
+from contextlib import AsyncExitStack
+import json
+from pathlib import Path
+
+from nraven import (
+    ConversationManager, Event, EventType, KnowledgeBase,
+    Operation, OperationManager, PathConfig, SystemConfig,
+)
+
+
+async def main() -> None:
+    path_config = PathConfig(Path.cwd() / "raven-component-workspace-home")
+    system_config = SystemConfig()
+    operation_manager = OperationManager(
+        path_config,
+        sync_interval=system_config.operation_sync_interval_seconds,
+        max_cached_finished_operations=system_config.finished_operation_cache_size,
+        event_replay_page_size=system_config.event_replay_page_size,
+    )
+    knowledge_base = KnowledgeBase(
+        path_config,
+        operation_manager,
+        max_open_knowledges=system_config.open_knowledge_limit,
+    )
+    conversation_manager = ConversationManager(
+        path_config,
+        knowledge_base,
+        operation_manager,
+        max_open_conversations=system_config.open_conversation_limit,
+    )
+
+    async def prepare_workspace(operation: Operation) -> dict[str, str]:
+        existing_knowledge_names = {
+            knowledge_metadata["name"]
+            for knowledge_metadata in await knowledge_base.list()
+        }
+        if "engineering" not in existing_knowledge_names:
+            create_knowledge_task = await knowledge_base.create(
+                "engineering", "Engineering reference documents.", operation=operation
+            )
+            await create_knowledge_task.result()
+        create_conversation_task = await conversation_manager.create(
+            "engineering", operation=operation
+        )
+        conversation = await create_conversation_task.result()
+        update_conversation_task = await conversation_manager.update(
+            conversation.conversation_id,
+            title="Component workspace discussion", operation=operation,
+        )
+        await update_conversation_task.result()
+        workspace_result = {
+            "knowledge_name": "engineering",
+            "conversation_id": conversation.conversation_id,
+        }
+        await operation.publish(Event(
+            type=EventType.WORK_PROGRESS, data={"stage": "ready", **workspace_result}
+        ))
+        return workspace_result
+
+    async with AsyncExitStack() as exit_stack:
+        exit_stack.push_async_callback(operation_manager.close)
+        exit_stack.push_async_callback(knowledge_base.close)
+        exit_stack.push_async_callback(conversation_manager.close)
+        exit_stack.push_async_callback(operation_manager.cancel_active)
+
+        recovered_operations = await operation_manager.recover()
+        print("Recovered operations:", [
+            str(recovered_operation.operation_id)
+            for recovered_operation in recovered_operations
+        ])
+        await knowledge_base.start()
+        await conversation_manager.start()
+        operation = await operation_manager.create("example.component_workspace")
+        root_task = await operation.run(operation.name, prepare_workspace)
+        print("Operation:", operation.operation_id, "Task:", root_task.task_id, flush=True)
+        async for event in root_task.events():
+            print(event.event_id, event.type.value, event.task_name, flush=True)
+        workspace_result = await root_task.result()
+        print("Result:", json.dumps(workspace_result, indent=2))
+        conversation = conversation_manager.get(workspace_result["conversation_id"])
+        print("Conversation:", json.dumps(conversation.to_dict(), indent=2))
+
+    print("Workspace closed; saved resources remain on disk.")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+</figure>
+
+`exit_stack` is an `AsyncExitStack` from Python's standard library. Its
+registered async callbacks run in reverse registration order when its block exits,
+including when a startup call or the worker raises an exception. This keeps
+the cleanup steps together instead of requiring several nested `finally`
+blocks. Section 12.4 explains their order.
+
+The successful result contains the knowledge name and new conversation ID.
+On a repeat run, the knowledge listing prevents another creation of
+`engineering`; a different conversation ID is expected. No messages are added
+because the example does not run a chat turn.
+
+The shared operation groups the work and its events; it does not make all
+three component calls one database transaction. If a later step fails, an
+earlier saved knowledge or conversation can remain. Inspect the resources
+and task records before deciding how to retry, as in Section 10.
+
+### 12.4 Stopping tasks before closing their dependencies
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">OperationManager.cancel_active()</figcaption>
+
+```python
+async def cancel_active(self) -> None
+```
+
+</figure>
+
+For an application that accepts requests, first stop accepting new ones.
+Then shut down the objects in this order:
+
+1. **Cancel or finish active operations.** `operation_manager.cancel_active()`
+   requests cancellation and waits for active operations before returning.
+   The example's root task has already finished, so there is normally nothing
+   left to cancel.
+2. **Close the conversation manager.** It closes the conversations it manages,
+   including their open message and vector-memory stores.
+3. **Close the knowledge base.** It closes the knowledge databases it manages.
+4. **Close the operation manager.** It stops its synchronization service,
+   flushes pending storage work, and closes operation/event storage.
+
+The example registers these callbacks in the opposite order because
+`AsyncExitStack` runs them last-in, first-out. They are registered before
+startup, so the exit stack attempts their cleanup even if startup fails. If a
+cleanup callback raises, the remaining callbacks are still attempted, and the
+error propagates to the caller.
+
+`OperationManager.close()` also cancels active work. Closing the resource
+managers first, however, could close databases that active tasks still need.
+Call `operation_manager.cancel_active()` and await it before closing those
+databases, so their tasks can stop while the stores are still available.
+
+The resource managers use the operation manager passed to their constructors;
+they do not close it themselves. Closing the whole workspace leaves its
+metadata, messages, knowledge files, and operation history on disk. It does
+not perform retention cleanup. Reopen the same home and user to use that data
+again, or apply the explicit deletion/cleanup methods from earlier sections.
+
+If a started `Raven` owns these managers, use its existing instances and let
+`Raven.close()` handle their shutdown. The manual shutdown sequence above is
+for an application that constructed and owns them itself.
+
+<div class="page-jump-target" id="component-adapters" aria-hidden="true"></div>
+
+## 13. Loading model adapters for individual components
+
+`Raven.configure_models()` installs a model pair into the facade and rebuilds
+its retrieval pipelines. With the component API, an application instead
+obtains model adapters and passes them to the components that need them.
+Loading an adapter does not assign it to every existing pipeline or session.
+
+The `ModelSpec` fields, provider identifiers, credentials, and embedding
+compatibility rules remain those in [Section 4](#raven-models). This section
+focuses on the adapter objects returned by loading tasks, configurable manager
+clients, and who closes them.
+
+### 13.1 Receiving an adapter rather than a configuration summary
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">Provider.load()</figcaption>
+
+```python
+async def load(
+    self,
+    spec: ModelSpec,
+    *,
+    operation: Operation | None = None,
+) -> OperationTask
+```
+
+</figure>
+
+`Provider.load(spec)` chooses `load_llm()` or `load_embedding()` from the
+specification's role. Both role-specific methods are also available; they
+reject a spec whose role does not match the method. All three return an
+`OperationTask`.
+
+Await that task's `.result()` to get the actual LlamaIndex adapter:
+
+- For an Ollama LLM, the result is an `Ollama` adapter.
+- For Ollama embeddings, the result is an `OllamaEmbedding` adapter.
+- For LiteLLM, the result is the corresponding LlamaIndex LiteLLM adapter.
+  RAVEN's embedding adapter also supplies asynchronous calls without running
+  the underlying synchronous embedding work on the event-loop thread.
+
+These results are Python objects with inference methods, not the JSON model
+summary returned by the facade's configuration task. Keep the object and pass
+it as a component's `llm` or `embed_model` argument. It is not necessary to
+serialize the adapter, and its representation may contain configuration that
+does not belong in an application log.
+
+Loading and inference are separate steps. `OllamaManager` checks availability
+and can pull a missing model while creating its adapter. It does not preload
+the model into VRAM merely by returning that adapter. An inference request,
+or an explicit preload call, makes Ollama load it for execution. LiteLLM adapter
+construction likewise does not establish that a later cloud request will
+succeed; that request still depends on valid credentials and service access.
+
+### 13.2 Configuring the provider's clients
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">Provider.__init__()</figcaption>
+
+```python
+def __init__(
+    self,
+    *,
+    operation_manager: OperationManager,
+    ollama_manager: OllamaManager | None = None,
+    litellm_manager: LiteLLMManager | None = None,
+    max_cached_llms: int = DEFAULT_LLM_ADAPTER_CACHE_SIZE,
+    max_cached_embeddings: int = DEFAULT_EMBEDDING_ADAPTER_CACHE_SIZE,
+) -> None
+```
+
+</figure>
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">OllamaManager.__init__()</figcaption>
+
+```python
+def __init__(
+    self,
+    host: str | None = None,
+    request_timeout: float = 300.0,
+    embedding_batch_size: int = 10,
+    *,
+    operation_manager: OperationManager,
+    max_cached_llms: int = DEFAULT_LLM_ADAPTER_CACHE_SIZE,
+    max_cached_embeddings: int = DEFAULT_EMBEDDING_ADAPTER_CACHE_SIZE,
+) -> None
+```
+
+</figure>
+
+`Provider` creates its own Ollama and LiteLLM managers unless instances are
+supplied. To change the Ollama connection, construct an `OllamaManager` and
+pass it as `ollama_manager`:
+
+- `host` selects the Ollama endpoint. If omitted, the manager reads
+  `OLLAMA_HOST`, falling back to `http://127.0.0.1:11434`.
+- `request_timeout` configures the timeout used by its Ollama requests and
+  LLM adapters.
+- `embedding_batch_size` configures batching on its embedding adapters.
+- `max_cached_llms` and `max_cached_embeddings` bound the adapter references
+  retained in that manager's caches.
+
+The injected manager should share the `operation_manager` used by the provider
+and its consumers. `Provider` uses a supplied manager as configured; its own
+cache-size arguments apply to managers it constructs, not to an injected
+manager's existing cache configuration.
+
+These are client and batching settings. They do not enable Ollama model-level
+`ModelSpec.options` in v0.2.0. Nonempty Ollama options are still rejected, as
+explained in Section 4. RAVEN connects to an externally managed Ollama service;
+it does not start that service or choose its CPU/GPU backend.
+
+### 13.3 Calling a provider-specific manager directly
+
+The provider-specific managers can also be used without `Provider`. Their
+loading methods take the individual arguments shown below, not a `ModelSpec`.
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">OllamaManager.load_llm()</figcaption>
+
+```python
+async def load_llm(self, model: str, *, operation: Operation | None = None) -> OperationTask
+```
+
+</figure>
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">OllamaManager.load_embedding()</figcaption>
+
+```python
+async def load_embedding(
+    self,
+    model: str,
+    *,
+    operation: Operation | None = None,
+) -> OperationTask
+```
+
+</figure>
+
+For Ollama, supply its model name and tag. The manager already holds the
+endpoint, timeout, batching, and shared operation manager. The returned task
+still provides the adapter through `.result()`.
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">LiteLLMManager.__init__()</figcaption>
+
+```python
+def __init__(
+    self,
+    *,
+    operation_manager: OperationManager,
+    max_cached_llms: int = DEFAULT_LLM_ADAPTER_CACHE_SIZE,
+    max_cached_embeddings: int = DEFAULT_EMBEDDING_ADAPTER_CACHE_SIZE,
+) -> None
+```
+
+</figure>
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">LiteLLMManager.load_llm()</figcaption>
+
+```python
+async def load_llm(
+    self,
+    model: str,
+    *,
+    provider: str | None = None,
+    api_key: str | None = None,
+    options: dict[str, Any] | None = None,
+    operation: Operation | None = None,
+) -> OperationTask
+```
+
+</figure>
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">LiteLLMManager.load_embedding()</figcaption>
+
+```python
+async def load_embedding(
+    self,
+    model: str,
+    *,
+    provider: str | None = None,
+    api_key: str | None = None,
+    options: dict[str, Any] | None = None,
+    operation: Operation | None = None,
+) -> OperationTask
+```
+
+</figure>
+
+For LiteLLM, `model` identifies the model, `provider` can select the service,
+and `options` contains supported adapter settings. `api_key` accepts the
+credential value when needed. It is different from `ModelSpec.api_key_ref`,
+which names an environment variable: `Provider` resolves that reference before
+calling this manager. A direct caller must obtain the credential through the
+application's environment or secret handling and pass it itself, or use
+provider-supported ambient credentials. Do not pass an environment-variable
+name as though it were the key value.
+
+The low-level loading methods also accept an active `operation` so that their
+model events can belong to a larger workflow. They return adapters rather
+than installing a facade-wide model pair. Use the provider-specific managers
+for their extra connection/loading controls; use `Provider` when routing by
+`ModelSpec` is sufficient.
+
+### 13.4 A runnable example with real adapters
+
+Save this program as `component_adapters.py`. Run
+`python component_adapters.py Reaction_wheel.txt`, using the sample from
+Section 5. Ollama must be running with `gemma4:e2b` and `bge-m3:latest`
+installed. The `--llm`, `--embedding`, and `--ollama-host` options can select
+different installed models or an endpoint.
+
+The program uses its own `raven-adapters-home` for operation history. It loads
+one LLM and one embedding adapter, passes the embedding adapter into the
+semantic splitter, and makes a small direct chat request through the LLM.
+It stores no knowledge or conversation. The second embedding-load call checks
+whether the same manager reuses its cached adapter; it is not a second
+embedding inference request.
+
+<figure class="code-snippet api-example" markdown="1">
+<figcaption class="code-snippet-filename">component_adapters.py</figcaption>
+
+```python
+import argparse
+import asyncio
+from contextlib import AsyncExitStack
+import json
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+from llama_index.core.llms import ChatMessage
+from nraven import (
+    DocumentParser, Event, EventType, ModelRole, ModelSpec, OllamaManager,
+    Operation, OperationManager, PathConfig, Provider,
+    ProvenanceAwareSemanticSplitter,
+)
+
+
+async def main(arguments: argparse.Namespace) -> None:
+    path_config = PathConfig(Path.cwd() / "raven-adapters-home")
+    operation_manager = OperationManager(path_config)
+    ollama_manager = OllamaManager(
+        host=arguments.ollama_host,
+        request_timeout=300.0,
+        embedding_batch_size=10,
+        operation_manager=operation_manager,
+    )
+    provider = Provider(
+        operation_manager=operation_manager, ollama_manager=ollama_manager
+    )
+    llm_spec = ModelSpec(provider="ollama", model=arguments.llm, role=ModelRole.LLM)
+    embedding_spec = ModelSpec(
+        provider="ollama", model=arguments.embedding, role=ModelRole.EMBEDDING
+    )
+
+    async def run_adapter_example(operation: Operation) -> dict[str, Any]:
+        load_llm_task = await provider.load(llm_spec, operation=operation)
+        llm = await load_llm_task.result()
+        load_embedding_task = await provider.load(embedding_spec, operation=operation)
+        embed_model = await load_embedding_task.result()
+        cached_embedding_task = await provider.load_embedding(
+            embedding_spec, operation=operation
+        )
+        cached_embed_model = await cached_embedding_task.result()
+
+        document_parser = DocumentParser()
+        parsed_document = await document_parser.parse(arguments.source, file_id=uuid4().hex)
+        semantic_splitter = ProvenanceAwareSemanticSplitter(embed_model)
+        semantic_sections = await semantic_splitter.split(parsed_document)
+        chat_response = await llm.achat([
+            ChatMessage(role="user", content="Reply with only the word RAVEN.")
+        ])
+        adapter_result = {
+            "llm_adapter_type": type(llm).__name__,
+            "embedding_adapter_type": type(embed_model).__name__,
+            "embedding_cache_reused": cached_embed_model is embed_model,
+            "file_name": parsed_document.file_name,
+            "section_count": len(semantic_sections),
+            "llm_reply": chat_response.message.content,
+        }
+        await operation.publish(Event(
+            type=EventType.WORK_PROGRESS,
+            data={"stage": "adapters_used", **adapter_result},
+        ))
+        return adapter_result
+
+    async with AsyncExitStack() as exit_stack:
+        exit_stack.push_async_callback(operation_manager.close)
+        exit_stack.push_async_callback(provider.close)
+        exit_stack.push_async_callback(operation_manager.cancel_active)
+        await operation_manager.recover()
+        operation = await operation_manager.create("example.component_adapters")
+        root_task = await operation.run(operation.name, run_adapter_example)
+        print("Operation:", operation.operation_id, flush=True)
+        async for event in root_task.events():
+            print(event.event_id, event.type.value, event.task_name, flush=True)
+        print("Adapter result:", json.dumps(await root_task.result(), indent=2))
+
+
+if __name__ == "__main__":
+    argument_parser = argparse.ArgumentParser()
+    argument_parser.add_argument("source", type=Path)
+    argument_parser.add_argument("--llm", default="gemma4:e2b")
+    argument_parser.add_argument("--embedding", default="bge-m3:latest")
+    argument_parser.add_argument("--ollama-host")
+    asyncio.run(main(argument_parser.parse_args()))
+```
+
+</figure>
+
+The model-loading tasks return adapter objects inside the worker. The outer
+worker returns a JSON-compatible summary because that is the result chosen
+by this example, not because the adapters were converted into configuration
+records. The section count comes from actual semantic splitting with the
+loaded embedding model.
+
+The model-loading calls publish RAVEN model events. Direct calls to
+`llm.achat()` and the splitter return their own results; they do not
+automatically produce chat-response or ingestion-progress events. The example
+keeps them within its root operation and publishes `work.progress` explicitly.
+Its chat request is not a harness run or a saved conversation turn.
+
+### 13.5 Choosing models separately for different consumers
+
+The same adapter object can be passed to more than one component that accepts
+it. It is also possible to supply different LLM objects to different stages.
+For example, pass one LLM to `IngestionPipeline.run()` for metadata extraction
+and another to `HierarchicalRetrievalPipeline` for scoring. A manually
+constructed `AgentHarness` can use a separate chat LLM. The `Session` receives
+its own `llm` for memory summarization/title generation and `embed_model` for
+vector memory, as described in Section 11.4.
+
+Each model must support its consumer's methods: hierarchical scoring needs
+structured prediction, the splitter needs asynchronous batch embeddings,
+and the chat agent needs function calling. A provider loading task does not
+perform the facade's complete capability and existing-knowledge validation
+sequence. Creating an adapter alone does not prove it supports all these uses.
+
+Keep the embedding identity compatible with previously stored vectors. Loading
+another model does not rebuild existing vectors or replace adapter references
+already held by a pipeline. Reconfigure the relevant consumers explicitly
+when the application changes models.
+
+### 13.6 Adapter caches, shutdown, and model residency
+
+The manager caches hold adapter objects, not generated answers:
+
+- `OllamaManager` maintains separate LLM and embedding caches keyed by the
+  supplied model name.
+- `LiteLLMManager` includes the model, provider, options, and credential
+  fingerprint in its cache identity, so materially different configurations
+  can produce different adapters.
+- `max_cached_llms` and `max_cached_embeddings` limit the references retained
+  by a manager. Removing an adapter from that cache does not unload an Ollama
+  model or remove another component's reference to the adapter.
+
+`Provider.close()` calls `close()` on both of its managers, including injected
+ones. That is why the example registers `provider.close()` once rather than
+also registering `ollama_manager.close()`. Stop or finish their active work
+first and close the shared operation manager last, following Section 12.
+If `Raven` owns the provider, leave this shutdown to `Raven.close()`.
+
+The Ollama manager clears its adapter caches and closes its client. The
+LiteLLM manager clears its caches, including their retained credential
+references. Neither action stops an external model service. In particular,
+**closing the provider does not unload Ollama models from VRAM**. Ollama can
+retain them according to its keep-alive behavior. An application that needs
+explicit residency control can use `OllamaManager.preload_llm()`,
+`preload_embedding()`, `unload_llm()`, and `unload_embedding()` with model names.
+The distinction between adapters and residency, and preload/unload behavior,
+is covered in Section 4.5.
+
+<div class="page-jump-target" id="component-knowledge" aria-hidden="true"></div>
+
+## 14. Working directly with stored knowledge
+
+`KnowledgeBase` finds and manages knowledges for one user. A `Knowledge`
+represents one of those stores: its metadata, saved file and section records,
+and chunk vectors. The first example shows how to create, obtain, list,
+update, and delete a knowledge through these components. The following
+subsections then explain the additional control available over stored data,
+vector search, and open storage connections.
+
+Direct access is useful when an application needs the stored section metadata
+or wants to supply its own query vector and inspect individual chunk matches.
+The application can then decide which sections to read, how to rank or combine
+matches, and what to pass to a later processing stage.
+
+`Raven.get_knowledge()` also returns a `Knowledge` from its owned knowledge
+base. These methods are therefore usable through that handle as well; using
+them does not require constructing a second manager or copying the data.
+The examples below construct the managers themselves and make their calls
+without a `Raven` instance.
+
+### 14.1 A compact knowledge-management example
+
+The component calls use two different objects:
+
+- `knowledge_base.create()` creates a knowledge and returns a task whose
+  result is a `Knowledge`. `knowledge_base.get()` returns the registered
+  object directly; it does not create another copy.
+- `await knowledge_base.list()` returns the current knowledge records
+  directly, without an operation task.
+- `knowledge.set_summary()` updates that individual knowledge's user summary.
+  The method belongs to `Knowledge`, rather than `KnowledgeBase`; await its
+  task's `.result()` to wait for the saved change. The result is `None`.
+- `knowledge_base.delete()` returns a task that closes the knowledge, removes
+  its directory and contents, and unregisters it. Its completed result is
+  `None`. Closing a knowledge alone does not delete it.
+
+Save this program as `manage_component_knowledge.py` and run
+`python manage_component_knowledge.py`. It uses its own
+`raven-component-knowledge-home` beneath the working directory. No model or
+Ollama service is needed. The startup and shutdown order follows
+[Section 12](#component-workspace).
+
+<figure class="code-snippet api-example" markdown="1">
+<figcaption class="code-snippet-filename">manage_component_knowledge.py</figcaption>
+
+```python
+import asyncio
+from contextlib import AsyncExitStack
+import json
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+from nraven import KnowledgeBase, Operation, OperationManager, PathConfig
+
+
+async def main() -> None:
+    path_config = PathConfig(Path.cwd() / "raven-component-knowledge-home")
+    operation_manager = OperationManager(path_config)
+    knowledge_base = KnowledgeBase(path_config, operation_manager)
+
+    async def manage_knowledge(operation: Operation) -> dict[str, Any]:
+        knowledge_name = f"example_{uuid4().hex[:8]}"
+        create_knowledge_task = await knowledge_base.create(
+            knowledge_name, "Initial document summary.", operation=operation
+        )
+        knowledge = await create_knowledge_task.result()
+        created_metadata = knowledge.meta
+        registered_knowledge = knowledge_base.get(knowledge_name)
+        listed_knowledges = await knowledge_base.list()
+
+        update_summary_task = await knowledge.set_summary(
+            "Updated document summary.", operation=operation
+        )
+        await update_summary_task.result()
+        updated_metadata = knowledge.meta
+
+        delete_knowledge_task = await knowledge_base.delete(
+            knowledge_name, operation=operation
+        )
+        await delete_knowledge_task.result()
+        remaining_knowledges = await knowledge_base.list()
+        return {
+            "knowledge_name": knowledge_name,
+            "created": created_metadata,
+            "registered_handle_is_same": registered_knowledge is knowledge,
+            "listed_before_deletion": listed_knowledges,
+            "updated": updated_metadata,
+            "listed_after_deletion": remaining_knowledges,
+        }
+
+    async with AsyncExitStack() as exit_stack:
+        exit_stack.push_async_callback(operation_manager.close)
+        exit_stack.push_async_callback(knowledge_base.close)
+        exit_stack.push_async_callback(operation_manager.cancel_active)
+        await operation_manager.recover()
+        await knowledge_base.start()
+        operation = await operation_manager.create("example.manage_knowledge")
+        root_task = await operation.run(operation.name, manage_knowledge)
+        print("Operation:", operation.operation_id, flush=True)
+        async for event in root_task.events():
+            print(event.event_id, event.type.value, event.task_name, flush=True)
+        print("Result:", json.dumps(await root_task.result(), indent=2))
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+</figure>
+
+The worker passes the same `operation` to creation, summary update, and
+deletion, so their tasks and events share one operation history. Each run
+uses a fresh example name and deletes only the knowledge it created. The
+printed result includes the original metadata, the listing before deletion,
+the updated metadata, and the listing after deletion. The two metadata values
+remain distinct because `knowledge.meta` returns a copy.
+
+After a successful run, the example knowledge's directory is gone; its
+operation history remains in the example home. This demonstrates the
+component management calls without leaving a disposable knowledge behind.
+For stored-document inspection, the later example uses a separate, existing
+ingestion home instead of this empty knowledge.
+
+### 14.2 Obtaining a handle and opening its storage
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">KnowledgeBase.get()</figcaption>
+
+```python
+def get(self, name: str) -> Knowledge
+```
+
+</figure>
+
+After `knowledge_base.start()`, `knowledge_base.get(name)` returns the
+registered `Knowledge` object synchronously. It raises an error if that
+knowledge was not found or its directory could not be loaded. It does not
+create a missing knowledge, and returning the object does not necessarily
+open its Qdrant database.
+
+There are three different kinds of access:
+
+- `knowledge.meta` and `knowledge.get_summary()` read metadata already loaded
+  into the object. They need no model inference.
+- File and section methods such as `list_files_page()` and `get_section()`
+  synchronously read `file.sqlite3`. If the knowledge's storage is not already
+  open, these methods use a temporary file-store connection. In async code,
+  call these synchronous database methods through `asyncio.to_thread()` so
+  they do not block the event loop.
+- Async methods such as `search()`, `retrieve_context()`, and `count()` open
+  the knowledge's storage when needed and keep it in use while performing
+  their database work. Call them with `await`.
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">Knowledge.start()</figcaption>
+
+```python
+async def start(self) -> None
+```
+
+</figure>
+
+`await knowledge.start()` explicitly opens its file store and local Qdrant
+client. It returns `None`, not an operation task. It is valid to call before
+several vector operations, but the async methods above already arrange
+opening when needed. Merely reading a section does not require loading an
+LLM or an embedding model.
+
+### 14.3 Searching with a vector supplied by the application
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">Knowledge.search()</figcaption>
+
+```python
+async def search(self, query_vector: list[float], top_k: int = 5) -> list[dict[str, Any]]
+```
+
+</figure>
+
+`search()` accepts an embedding vector, not query text. It does not generate
+an embedding, select a retrieval strategy, or ask an LLM to score anything.
+Its result is a list of chunk matches with these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `file_id` | Identity of the stored file containing the matched chunk. |
+| `section_id` | Identity of the section containing that chunk. |
+| `chunk_index` | The matched chunk's index within its section. |
+| `score` | The vector store's similarity score for that match; it is not a probability. |
+
+`top_k` limits chunk matches. Several matches can belong to the same section,
+so five matches do not necessarily identify five different sections. Matches
+do not include raw text; read a selected section separately:
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">Knowledge.get_section()</figcaption>
+
+```python
+def get_section(self, section_id: str) -> dict[str, Any] | None
+```
+
+</figure>
+
+`get_section()` returns that section's stored record, including its
+`raw_content` and metadata, or `None` if it cannot be found. The example
+deduplicates section IDs before reading them and prints only short previews.
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">Knowledge.retrieve_context()</figcaption>
+
+```python
+async def retrieve_context(
+    self,
+    query_vector: list[float],
+    top_k: int = 5,
+) -> list[dict[str, Any]]
+```
+
+</figure>
+
+`retrieve_context()` is a convenience when the application already has a
+query vector and wants section text. It searches chunks, removes repeated
+section IDs, and returns records containing `knowledge_name`, `file_name`,
+`section_id`, `raw_content`, and the first matching chunk's `score` for that
+section. Its `top_k` still limits the initial chunk search, so its result can
+contain fewer than `top_k` sections.
+
+This lower-level result includes a score. It differs from the four-field
+records returned by the retrieval pipelines and `Raven.retrieve()` in
+[Section 6](#raven-retrieval). Use a retrieval pipeline when its strategy,
+section selection, events, and standard output already fit the application.
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">Knowledge.validate_embedding_model()</figcaption>
+
+```python
+async def validate_embedding_model(self, embed_model: Any) -> None
+```
+
+</figure>
+
+When generating the query vector with a model adapter, first await
+`knowledge.validate_embedding_model(embed_model)`. It checks the adapter's
+identity against the identity saved for that knowledge. If no identity has
+been saved yet, validation records the supplied identity. This call does not
+re-embed any stored content.
+
+**`search()` receives only numbers and cannot identify the model that produced
+them. A vector with the right dimensions can still come from an incompatible
+model.** Use the same embedding identity as ingestion; the example validates
+the adapter before making its query embedding.
+
+These methods return their values directly rather than an `OperationTask`.
+For observable custom search work, run them inside an operation worker and
+publish the application-specific progress it needs, as in the example.
+
+### 14.4 A runnable stored-data and vector-search example
+
+Save the following as `inspect_knowledge.py`. It opens an **existing** home and
+knowledge using the default user ID. It does not create a knowledge or ingest
+a file. Use the home prepared by Section 5's ingestion example:
+
+```text
+python inspect_knowledge.py raven-ingestion-home engineering
+```
+
+That command prints knowledge metadata and up to three file records without
+loading a model or contacting Ollama. To also search the indexed chunks, add
+a query:
+
+```text
+python inspect_knowledge.py raven-ingestion-home engineering --query "When must the reaction wheel enter safe-hold?"
+```
+
+The query command needs Ollama and the embedding model used during ingestion.
+The default is `bge-m3:latest`; `--embedding` and `--ollama-host` select another
+compatible adapter or server. No LLM is needed in either mode. Close another
+application using this same knowledge before running the standalone script,
+so two separate processes do not try to open its local Qdrant storage.
+
+<figure class="code-snippet api-example" markdown="1">
+<figcaption class="code-snippet-filename">inspect_knowledge.py</figcaption>
+
+```python
+import argparse
+import asyncio
+from contextlib import AsyncExitStack
+import json
+from pathlib import Path
+from typing import Any
+
+from nraven import (
+    Event, EventType, KnowledgeBase, OllamaManager,
+    Operation, OperationManager, PathConfig,
+)
+
+
+async def main(arguments: argparse.Namespace) -> None:
+    if not arguments.home.is_dir():
+        raise ValueError("Choose an existing Raven home containing ingested documents.")
+    path_config = PathConfig(arguments.home)
+    operation_manager = OperationManager(path_config)
+    knowledge_base = KnowledgeBase(path_config, operation_manager)
+    ollama_manager = None
+
+    async with AsyncExitStack() as exit_stack:
+        exit_stack.push_async_callback(operation_manager.close)
+        exit_stack.push_async_callback(knowledge_base.close)
+        if arguments.query:
+            ollama_manager = OllamaManager(
+                host=arguments.ollama_host, operation_manager=operation_manager
+            )
+            exit_stack.push_async_callback(ollama_manager.close)
+        exit_stack.push_async_callback(operation_manager.cancel_active)
+
+        await operation_manager.recover()
+        await knowledge_base.start()
+        knowledge = knowledge_base.get(arguments.knowledge)
+        print("Knowledge:", json.dumps(knowledge.meta, indent=2))
+        files = await asyncio.to_thread(knowledge.list_files_page, limit=3)
+        print("First files:", json.dumps(files, indent=2))
+        if not arguments.query or ollama_manager is None:
+            return
+
+        async def inspect_matches(operation: Operation) -> dict[str, Any]:
+            load_embedding_task = await ollama_manager.load_embedding(
+                arguments.embedding, operation=operation
+            )
+            embed_model = await load_embedding_task.result()
+            await knowledge.validate_embedding_model(embed_model)
+            query_vector = await embed_model.aget_query_embedding(arguments.query)
+            hits = await knowledge.search(query_vector, top_k=arguments.top_k)
+            seen_section_ids: set[str] = set()
+            section_previews = []
+            for hit in hits:
+                section_id = hit["section_id"]
+                if section_id in seen_section_ids:
+                    continue
+                seen_section_ids.add(section_id)
+                section = await asyncio.to_thread(knowledge.get_section, section_id)
+                if section is None:
+                    continue
+                section_previews.append({
+                    "knowledge_name": knowledge.name,
+                    "file_name": section["file_name"],
+                    "section_id": section_id,
+                    "summary": section["summary"],
+                    "raw_content_preview": section["raw_content"][:300],
+                })
+            await operation.publish(Event(
+                type=EventType.WORK_PROGRESS,
+                data={"chunk_matches": len(hits), "sections": len(section_previews)},
+            ))
+            return {
+                "query": arguments.query,
+                "query_dimensions": len(query_vector),
+                "hits": hits,
+                "section_previews": section_previews,
+            }
+
+        operation = await operation_manager.create("example.knowledge_vector_search")
+        root_task = await operation.run(operation.name, inspect_matches)
+        print("Operation:", operation.operation_id, flush=True)
+        async for event in root_task.events():
+            print(event.event_id, event.type.value, event.task_name, flush=True)
+        print("Search result:", json.dumps(await root_task.result(), indent=2))
+
+
+if __name__ == "__main__":
+    argument_parser = argparse.ArgumentParser()
+    argument_parser.add_argument("home", type=Path)
+    argument_parser.add_argument("knowledge")
+    argument_parser.add_argument("--query")
+    argument_parser.add_argument("--top-k", type=int, default=5)
+    argument_parser.add_argument("--embedding", default="bge-m3:latest")
+    argument_parser.add_argument("--ollama-host")
+    asyncio.run(main(argument_parser.parse_args()))
+```
+
+</figure>
+
+Without `--query`, the program ends after its stored-data inspection. With a
+query, `inspect_matches()` runs under a root operation, loads one embedding
+adapter, validates it, embeds the query, and searches chunk vectors. It reads
+each matching section at most once. The final JSON contains the chunk hits
+and section previews for inspection; it is this example's chosen result,
+not a replacement for the retrieval pipelines' output format.
+
+`work.progress` reports how many chunks and distinct sections were found.
+The direct knowledge reads do not automatically emit retrieval-pipeline
+events. The operation history is saved under the supplied home's user
+directory. The script does not add or replace documents; its validation can
+record an embedding identity if the knowledge does not already have one.
+
+### 14.5 Releasing storage and keeping ingestion in the pipeline
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">Knowledge.release_resources()</figcaption>
+
+```python
+async def release_resources(self) -> bool
+```
+
+</figure>
+
+`release_resources()` closes idle storage connections while leaving the
+`Knowledge` object usable. It returns `False` if an active use prevents
+release, and `True` when storage is released or already unopened. A later
+async database operation can reopen it. `KnowledgeBase` uses this mechanism
+to release idle stores as other knowledges are opened; active work can keep
+stores open temporarily beyond `max_open_knowledges`.
+
+`knowledge.close()` instead ends that object's lifecycle: it cannot be
+restarted, and `get_section()` raises `knowledge_closed`. Leave final closure
+of a manager-owned knowledge to `knowledge_base.close()`. If `Raven` owns the manager, leave its
+shutdown to `Raven.close()`, following [Section 12](#component-workspace).
+
+Keep source-file ingestion in `IngestionPipeline.run()`. `Knowledge.ingest()`
+is the persistence stage used after parsing, semantic splitting, and metadata
+extraction; it does not replace those stages. The next section explains which
+document-processing dependencies and intermediate results can be customized.
+
+Finally, backend section methods are not agent navigation tools.
+`Knowledge.list_sections()` reads complete stored section records; it does
+not acquire the agent tool's content flags or output-size safeguards. A custom
+application must choose how much of that data to display or send to a model.
+Calling a backend method directly does not automatically apply the harness's
+tool-selection policy.
