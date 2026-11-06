@@ -70,8 +70,20 @@ These are two ways of using RAVEN, not successive setup stages.
   configure provider clients, and supply models to individual stages. Section 13.
 - [Working directly with knowledge](#component-knowledge) — Read stored
   records, inspect chunk matches, and manage open storage. Section 14.
+- [Composing ingestion](#component-ingestion) — Inspect parser and splitter
+  output and supply the ingestion pipeline's dependencies. Section 15.
+- [Composing retrieval and reconstruction](#component-retrieval) — Choose
+  candidates, tune scoring, and build source views. Section 16.
+- [Conversation and memory](#component-conversation) — Commit turns and
+  inspect saved history, compacted context, and recall. Section 17.
+- [Harness and session](#component-session) — Assemble the agent and
+  choose how to save a turn. Section 18.
+- [Public types and reference index](#api-reference-index) — Find import
+  paths and examples by task. Section 19.
 
 </details>
+
+- [Conclusion](#api-guide-conclusion)
 
 </nav>
 
@@ -750,8 +762,8 @@ constants to their current values. They fall into three groups:
 | `operation_sync_interval_seconds` | How often pending operation-history writes are synchronized to durable storage. Operation queued, started, completed, failed, and cancelled events trigger immediate synchronization instead of waiting for that interval. |
 | `event_replay_page_size` | Maximum number of saved events loaded in each replay page. |
 | `finished_operation_cache_size` | Maximum finished operation objects kept in memory for reuse. Zero disables this cache; saved operation records remain on disk. |
-| `open_knowledge_limit` | Limit for keeping knowledge database connections open. Connections not in use can be closed to make room; this does not delete the knowledges. |
-| `open_conversation_limit` | Corresponding limit for open conversation database connections. Connections in use are kept open; closing an unused connection does not delete its conversation. |
+| `open_knowledge_limit` | Target number of open knowledge stores. The manager releases idle stores when opening more. The count can temporarily exceed the target while stores are in use. |
+| `open_conversation_limit` | Target number of open conversation stores. The manager releases idle stores when opening more. Active turns and other work can temporarily keep more stores open. |
 | `llm_adapter_cache_size`, `embedding_adapter_cache_size` | Numbers of language-model and embedding-model connection objects cached by the provider layer. These are not GPU-memory limits. |
 | `prompt_cache_size` | Number of conversation-specific system prompts cached by an agent harness. |
 | `max_source_file_bytes` | Maximum source-document size accepted for ingestion, in bytes; the default is 100 MiB. |
@@ -1048,10 +1060,12 @@ from nraven import Raven
 
 
 async def main() -> None:
+    # Use a dedicated home so the example opens its own saved workspace.
     home = Path.cwd() / "raven-lifecycle-home"
     raven = Raven(home)
 
     try:
+        # Open the workspace before reading its stores and runtime settings.
         await raven.start()
 
         knowledges = await raven.list_knowledges()
@@ -1168,6 +1182,7 @@ async def use_workspace(home: Path, config: SystemConfig) -> None:
     try:
         await raven.start()
         print("Maximum source bytes:", raven.system_config.max_source_file_bytes)
+        # Compare the system ceiling with the default used by a retrieval call.
         print("Retrieval ceiling:", raven.system_config.max_retrieval_top_k)
         print("Runtime retrieval default:", raven.runtime_config.retrieval_top_k)
     finally:
@@ -1176,6 +1191,7 @@ async def use_workspace(home: Path, config: SystemConfig) -> None:
 
 def main() -> None:
     home = Path.cwd() / "raven-policy-home"
+    # Pass workspace limits at construction so Raven can validate runtime settings against them.
     config = SystemConfig(
         max_source_file_bytes=50 * 1024 * 1024,
         max_retrieval_top_k=12,
@@ -1335,11 +1351,13 @@ async def main() -> None:
 
     try:
         await raven.start()
+        # Read the revision so the update applies to the settings version we inspected.
         current = raven.get_runtime_settings()
         task = await raven.update_runtime_settings(
             {"retrieval_top_k": 5, "agent_max_iterations": 12},
             expected_revision=current["revision"],
         )
+        # Wait for the settings write before reading its new revision.
         updated = await task.result()
         print("Retrieval default:", updated["retrieval_top_k"])
         print("Agent iteration default:", updated["agent_max_iterations"])
@@ -1347,6 +1365,7 @@ async def main() -> None:
     finally:
         await raven.close()
 
+    # Open a fresh instance over the same home to read the saved defaults.
     reopened = Raven(home)
     try:
         await reopened.start()
@@ -1422,6 +1441,7 @@ async def main() -> None:
         updated = await first.result()
 
         try:
+            # Reuse the old revision to simulate a client submitting an outdated update.
             stale = await raven.update_runtime_settings(
                 {"memory_top_k": original["memory_top_k"] + 2},
                 expected_revision=original["revision"],
@@ -1432,6 +1452,7 @@ async def main() -> None:
                 raise
             print("Stale update rejected:", error.code.value)
 
+        # Reset against the latest revision, since the first update advanced it.
         reset = await raven.reset_runtime_settings(
             expected_revision=updated["revision"],
         )
@@ -1583,11 +1604,13 @@ async def main(args: argparse.Namespace) -> None:
 
     try:
         await raven.start()
+        # Choose a chat provider independently and keep embedding calls on Ollama.
         task = await raven.configure_models(
             ModelSpec(
                 provider=args.provider,
                 model=args.llm,
                 role=ModelRole.LLM,
+                # Pass the environment variable's name so the API key stays in the environment.
                 api_key_ref=args.api_key_ref,
             ),
             ModelSpec(
@@ -1596,6 +1619,7 @@ async def main(args: argparse.Namespace) -> None:
                 role=ModelRole.EMBEDDING,
             ),
         )
+        # Wait until both adapters are configured before using either one.
         configured = await task.result()
         print(json.dumps(configured, indent=2))
     finally:
@@ -1879,9 +1903,11 @@ async def main(delete: bool) -> None:
 
     try:
         await raven.start()
+        # Reuse the existing knowledge so the example can be run again.
         names = {item["name"] for item in await raven.list_knowledges()}
         if "engineering" not in names:
             task = await raven.create_knowledge("engineering")
+            # Wait for the new knowledge to be available before updating it.
             knowledge = await task.result()
         else:
             knowledge = raven.get_knowledge("engineering")
@@ -1894,6 +1920,7 @@ async def main(delete: bool) -> None:
         print(json.dumps(raven.get_knowledge_details(knowledge.name), indent=2))
         print("Files:", await raven.count_knowledge_files(knowledge.name))
 
+        # Require --delete before removing the knowledge and its indexed files.
         if delete:
             task = await raven.delete_knowledge(knowledge.name)
             await task.result()
@@ -1969,6 +1996,7 @@ async def main(args: argparse.Namespace) -> None:
 
     try:
         await raven.start()
+        # Reuse the same knowledge on later runs so its index remains available.
         names = {item["name"] for item in await raven.list_knowledges()}
         if "engineering" not in names:
             task = await raven.create_knowledge(
@@ -1978,6 +2006,7 @@ async def main(args: argparse.Namespace) -> None:
 
         files = await raven.list_knowledge_files("engineering")
         existing = next((item for item in files if item["file_name"] == source.name), None)
+        # An already indexed filename can be inspected directly. Load models for new ingestion.
         if existing is None:
             task = await raven.configure_models(
                 ModelSpec(provider="ollama", model=args.llm, role=ModelRole.LLM),
@@ -1995,6 +2024,7 @@ async def main(args: argparse.Namespace) -> None:
                         data.get("completed"), "/", data.get("total"),
                         flush=True,
                     )
+            # Await the committed ingestion result before reading the saved file.
             result = await ingestion.result()
             print("Ingested:", json.dumps(result, indent=2))
         else:
@@ -2011,12 +2041,14 @@ async def main(args: argparse.Namespace) -> None:
                 break
             for section in page:
                 print("Section:", section["section_id"], section["summary"])
+            # The next page starts after the final section index in this page.
             cursor = page[-1]["section_index"]
 
         sections = await raven.list_file_sections_page(
             "engineering", source.name, limit=1
         )
         if sections:
+            # Use the stored section ID and filename to read the full text of this section.
             section = await raven.get_knowledge_section(
                 "engineering", sections[0]["section_id"], file_name=source.name
             )
@@ -2395,10 +2427,12 @@ async def main(args: argparse.Namespace) -> None:
             created = await raven.create_knowledge("engineering")
             await created.result()
         files = await raven.list_knowledge_files("engineering")
+        # Index the sample on the first run so retrieval has a real source to search.
         if not any(item["file_name"] == source.name for item in files):
             ingestion = await raven.ingest("engineering", source)
             print("Ingestion:", await ingestion.result(), flush=True)
 
+        # Local modes need a target knowledge. Global modes choose across the workspace.
         retrieval = await raven.retrieve(
             args.mode, args.query,
             knowledge_name="engineering" if args.mode.startswith("local_") else None,
@@ -2406,6 +2440,7 @@ async def main(args: argparse.Namespace) -> None:
         )
         records = await retrieval.result()
         print("Retrieval:", json.dumps(records, indent=2), flush=True)
+        # Pass the retrieval records through so the reconstructor can highlight their sections.
         reconstruction = await raven.reconstruct(records)
         files = await reconstruction.result()
         print("Reconstruction:", json.dumps(files, indent=2))
@@ -2593,8 +2628,10 @@ async def main(args: argparse.Namespace) -> None:
     raven = Raven(Path.cwd() / "raven-conversation-home")
     try:
         await raven.start()
+        # Omit a knowledge name to create a global conversation.
         created = await raven.create_conversation()
         conversation = await created.result()
+        # Use this stored ID for metadata, preference, and history calls.
         conversation_id = conversation.conversation_id
         print("Conversation:", conversation_id)
         updated = await raven.update_conversation(
@@ -2607,6 +2644,7 @@ async def main(args: argparse.Namespace) -> None:
         )
         preference = await saved.result()
         print("Saved preference:", preference)
+        # Use the saved preference ID to remove exactly the preference created above.
         removed = await raven.remove_conversation_preference(
             conversation_id, preference["preference_id"]
         )
@@ -2897,6 +2935,7 @@ async def main(args: argparse.Namespace) -> None:
             ingestion = await raven.ingest("engineering", source)
             print("Ingestion:", await ingestion.result(), flush=True)
 
+        # Reuse a local conversation when an ID is supplied so the next turn sees its history.
         if args.conversation_id:
             conversation = raven.get_conversation(args.conversation_id)
             if conversation.knowledge_name != "engineering":
@@ -2906,10 +2945,13 @@ async def main(args: argparse.Namespace) -> None:
             conversation = await created.result()
         conversation_id = conversation.conversation_id
         print("Conversation:", conversation_id, flush=True)
+        # Open a session on the saved conversation to run and commit a turn.
         session = raven.session(conversation)
         await session.start()
         run = await session.generate_response(args.query, retrieval_mode="local_embedded")
         print("Turn:", run.turn_id, "Operation:", run.operation_id, flush=True)
+        # Render each event by type so tool activity and source updates stay separate from the
+        # reply.
         async for event in run.stream:
             if event.type == EventType.CHAT_THINKING_DELTA:
                 print("[thinking]", event.data.get("delta", ""), flush=True)
@@ -2928,6 +2970,7 @@ async def main(args: argparse.Namespace) -> None:
             }:
                 print("\n[memory]", event.type.value, flush=True)
 
+        # Wait for the saved turn and collect its structured result after streaming.
         result = await run.collect()
         print("\nCollected:", json.dumps(result.model_dump(mode="json"), indent=2))
         await session.close()
@@ -2944,11 +2987,14 @@ async def main(args: argparse.Namespace) -> None:
             for record in page:
                 print("Saved message:", record["message_id"], record["turn_id"],
                       json.dumps(record["message"].model_dump(mode="json")))
+            # Resume after the last saved message to read the next page without duplicates.
             cursor = page[-1]["message_id"]
+        # Use the saved turn's evidence to rebuild its source views later.
         reconstruction = await raven.reconstruct_from_turn(conversation_id, run.turn_id)
         print("Sources from saved turn:", json.dumps(await reconstruction.result(), indent=2))
     finally:
         try:
+            # Close a session left open by an error before shutting down its workspace.
             if session is not None:
                 await session.close()
         finally:
@@ -3283,9 +3329,11 @@ from nraven import Event, EventType, Operation, Raven
 async def main(args: argparse.Namespace) -> None:
     raven = Raven(Path.cwd() / "raven-operations-home")
     name = "example.prepare_discussion"
+    # Use a fresh name so each run can demonstrate creation.
     knowledge_name = "engineering-" + uuid4().hex[:8]
 
     async def worker(operation: Operation) -> dict[str, str]:
+        # Pass the same operation so all child tasks appear together in its event history.
         created = await raven.create_knowledge(knowledge_name, operation=operation)
         await created.result()
         created = await raven.create_conversation(knowledge_name, operation=operation)
@@ -3294,6 +3342,7 @@ async def main(args: argparse.Namespace) -> None:
             conversation.conversation_id, title="Engineering discussion", operation=operation
         )
         await updated.result()
+        # Emit a custom milestone once the knowledge and conversation are both ready.
         await operation.publish(Event(
             type=EventType.WORK_PROGRESS,
             data={"stage": "prepared", "knowledge_name": knowledge_name},
@@ -3303,6 +3352,8 @@ async def main(args: argparse.Namespace) -> None:
 
     try:
         await raven.start()
+        # Both entry points run the same worker. Explicit creation gives the caller the
+        # operation handle first.
         if args.entry == "run":
             task = await raven.run_operation(name, worker)
         else:
@@ -3503,6 +3554,7 @@ async def main(args: argparse.Namespace) -> None:
         print("Operations:", json.dumps([
             record.model_dump(mode="json") for record in page
         ], indent=2))
+        # Listing operations is enough until the caller selects one to inspect.
         if args.operation_id is None:
             return
         operation = await raven.get_operation(args.operation_id)
@@ -3517,11 +3569,15 @@ async def main(args: argparse.Namespace) -> None:
             print("Tasks:", json.dumps([
                 record.model_dump(mode="json") for record in tasks
             ], indent=2))
+            # Resume the next page after this task ID.
             cursor = tasks[-1].task_id
+        # Read a bounded batch for a quick preview of the events after the cursor.
         snapshot = await raven.read_operation_events(
             args.operation_id, after_event_id=args.after_event_id, limit=5
         )
         print("Snapshot event IDs:", [event.event_id for event in snapshot])
+        # Resume from the same cursor to replay saved events and follow live events if the
+        # operation is active.
         async for event in raven.operation_events(
             args.operation_id, after_event_id=args.after_event_id
         ):
@@ -3609,18 +3665,21 @@ async def main() -> None:
         await operation.publish(Event(
             type=EventType.WORK_PROGRESS, data={"stage": "waiting_for_stop"}
         ))
+        # Signal that the worker has started, then keep it alive so the caller can cancel it.
         started.set()
         await asyncio.Event().wait()
 
     try:
         await raven.start()
         try:
+            # An invalid operation name fails before a task is created.
             await raven.create_operation("")
         except RavenError as error:
             print("Immediate error:", error.code.value, error.message)
         if "engineering" not in {item["name"] for item in await raven.list_knowledges()}:
             created = await raven.create_knowledge("engineering")
             await created.result()
+        # A duplicate reaches the worker, so its error is raised when we await the task result.
         duplicate = await raven.create_knowledge("engineering")
         try:
             await duplicate.result()
@@ -3630,6 +3689,7 @@ async def main() -> None:
         print("Failed task:", json.dumps(record.model_dump(mode="json"), indent=2))
 
         task = await raven.run_operation("example.wait_for_stop", wait_for_cancellation)
+        # Wait for a running task to demonstrate cancellation after startup.
         await started.wait()
         operation = await raven.cancel_operation(task.operation_id)
         print("After cancellation:", operation.status.value)
@@ -3750,6 +3810,8 @@ async def main(args: argparse.Namespace) -> None:
         print("Retry policy:", record.retry_policy.value,
               "can_retry:", record.can_retry,
               "attempts_remaining:", record.attempts_remaining, flush=True)
+        # Ingestion and session retries use model adapters. Supply the same embedding model as
+        # the stored data.
         if record.name in {
             OperationType.INGESTION_RUN.value,
             OperationType.SESSION_GENERATE_RESPONSE.value,
@@ -3759,11 +3821,14 @@ async def main(args: argparse.Namespace) -> None:
                 ModelSpec(provider="ollama", model=args.embedding, role=ModelRole.EMBEDDING),
             )
             await configured.result()
+        # Retry by the original IDs. The returned handle identifies the new attempt.
         task = await raven.retry_task(args.operation_id, args.task_id)
         print("New operation:", task.operation_id, "New task:", task.task_id, flush=True)
         async for event in task.events():
             print(event.event_id, event.type.value, flush=True)
         result = await task.result()
+        # Convert a session's result model to JSON. Ingestion and reconstruction already return
+        # plain data.
         payload = result.model_dump(mode="json") if hasattr(result, "model_dump") else result
         print("Retry result:", json.dumps(payload, indent=2))
         attempt = await raven.get_operation_task(task.operation_id, task.task_id)
@@ -3863,13 +3928,16 @@ async def main(args: argparse.Namespace) -> None:
 
     try:
         await raven.start()
+        # Create a knowledge so we can check that it remains available after history cleanup.
         if "keep-me" not in {item["name"] for item in await raven.list_knowledges()}:
             created = await raven.create_knowledge("keep-me")
             await created.result()
         task = await raven.run_operation("example.cleanup_sample", sample)
+        # Wait for completion so the sample operation can qualify for cleanup.
         await task.result()
         print("Sample operation:", task.operation_id)
         settings = raven.system_config
+        # Use zero retention with --expire-now to make finished operations eligible immediately.
         seconds = 0 if args.expire_now else settings.operation_retention_seconds
         cleanup = OperationCleanupService(
             raven.operation_manager, retention=timedelta(seconds=seconds),
@@ -3990,8 +4058,9 @@ main method arguments:
 The retrieval pipelines expose these controls as named arguments:
 
 - `embedded_top_k` limits the preliminary embedded search used by
-  vector-conditioned retrieval. The pipeline selects files from those
-  results before scoring their sections.
+  vector-conditioned retrieval. Local retrieval uses those matches to select
+  files in the chosen knowledge. Global retrieval uses them to select
+  knowledges. The pipeline then scores sections from the selected sources.
 - `max_per_read` limits the number of candidates in one scoring batch.
 - `anchor_count` controls how many previously scored, highly ranked candidates
   are included with their scores as references for later scoring batches.
@@ -4096,6 +4165,8 @@ Use an embedding model compatible with the vectors already stored in each
 knowledge or conversation. Supplying models directly does not make old
 vectors searchable with an unrelated embedding model.
 
+<div class="page-jump-target" id="component-parser-example" aria-hidden="true"></div>
+
 ### 11.5 A focused example: inspect a document before ingestion
 
 `DocumentParser` is useful on its own when the application needs to inspect
@@ -4140,6 +4211,7 @@ from nraven import DocumentParser
 
 async def main(arguments: argparse.Namespace) -> None:
     document_parser = DocumentParser()
+    # Give the preview a file ID so its parsed elements share a source identity.
     file_id = uuid4().hex
     parsed_document = await document_parser.parse(arguments.source, file_id=file_id)
     print("File:", parsed_document.file_name)
@@ -4148,6 +4220,7 @@ async def main(arguments: argparse.Namespace) -> None:
     print("Conversion status:", parsed_document.conversion_status)
     print("Warnings:", parsed_document.warnings)
     print("Elements:", len(parsed_document.elements))
+    # Inspect the element type and source range while keeping long text previews short.
     for element in parsed_document.elements:
         print(json.dumps({
             "element_id": element.element_id,
@@ -4205,10 +4278,11 @@ Without the facade, the application must perform these steps itself:
   model already held by an existing pipeline. Keep embedding choices
   compatible with the vectors in the relevant knowledge or conversation.
 - **Task results and retry handling.** Await task results and decide whether
-  to retry failures. `OperationManager` stores task records and runs workers;
-  it does not choose an ingestion pipeline, reconstructor, or session for a
-  retry. Without `Raven.retry_task()`, the application must select that
-  component and supply the saved retry inputs and required models.
+  to retry failures. `OperationManager` creates and tracks operations.
+  `Operation.run()` schedules the worker and returns its task. For a direct
+  retry, choose the ingestion pipeline, reconstructor, or session that can
+  repeat the work. Pass the saved task record as `retry_of` and supply the
+  inputs and model adapters that method requires.
 - **Shutdown.** Finish or cancel active work before closing the resource
   managers and provider clients it uses, then close the shared operation
   manager. For example, `KnowledgeBase.close()` closes its managed knowledge
@@ -4322,9 +4396,11 @@ Each constructor argument has a specific purpose:
   not delete its stored history.
 - `event_replay_page_size` sets how many stored events are read in each replay
   batch. It does not limit the total number of events that can be replayed.
-- `max_open_knowledges` and `max_open_conversations` limit how many managed
-  resources can keep their storage connections open. Evicting a connection
-  from these caches does not delete the saved knowledge or conversation.
+- `max_open_knowledges` and `max_open_conversations` set targets for the
+  number of open knowledge and conversation stores. Before opening another
+  store, the corresponding manager tries to release idle connections. The
+  count can temporarily exceed the target when all open stores are busy.
+  Saved data remains available when a connection is released.
 
 These constructors accept their individual settings, not a `SystemConfig`
 object. The example creates `SystemConfig()` and passes the relevant field
@@ -4401,6 +4477,8 @@ from nraven import (
 
 async def main() -> None:
     path_config = PathConfig(Path.cwd() / "raven-component-workspace-home")
+    # Pass the same policy values to each component since this example assembles the workspace
+    # directly.
     system_config = SystemConfig()
     operation_manager = OperationManager(
         path_config,
@@ -4425,11 +4503,13 @@ async def main() -> None:
             knowledge_metadata["name"]
             for knowledge_metadata in await knowledge_base.list()
         }
+        # Keep the same knowledge available when the example is run again.
         if "engineering" not in existing_knowledge_names:
             create_knowledge_task = await knowledge_base.create(
                 "engineering", "Engineering reference documents.", operation=operation
             )
             await create_knowledge_task.result()
+        # Bind the new conversation to that knowledge and keep its setup in the same operation.
         create_conversation_task = await conversation_manager.create(
             "engineering", operation=operation
         )
@@ -4449,16 +4529,20 @@ async def main() -> None:
         return workspace_result
 
     async with AsyncExitStack() as exit_stack:
+        # Register cleanup in reverse order so active work is cancelled before managers close.
         exit_stack.push_async_callback(operation_manager.close)
         exit_stack.push_async_callback(knowledge_base.close)
         exit_stack.push_async_callback(conversation_manager.close)
         exit_stack.push_async_callback(operation_manager.cancel_active)
 
+        # Recover interrupted operations before submitting new work.
         recovered_operations = await operation_manager.recover()
         print("Recovered operations:", [
             str(recovered_operation.operation_id)
             for recovered_operation in recovered_operations
         ])
+        # Start the knowledge base first so the conversation manager can resolve local knowledge
+        # names.
         await knowledge_base.start()
         await conversation_manager.start()
         operation = await operation_manager.create("example.component_workspace")
@@ -4495,6 +4579,8 @@ The shared operation groups the work and its events; it does not make all
 three component calls one database transaction. If a later step fails, an
 earlier saved knowledge or conversation can remain. Inspect the resources
 and task records before deciding how to retry, as in Section 10.
+
+<div class="page-jump-target" id="component-workspace-shutdown" aria-hidden="true"></div>
 
 ### 12.4 Stopping tasks before closing their dependencies
 
@@ -4545,10 +4631,10 @@ for an application that constructed and owns them itself.
 
 ## 13. Loading model adapters for individual components
 
-`Raven.configure_models()` installs a model pair into the facade and rebuilds
-its retrieval pipelines. With the component API, an application instead
-obtains model adapters and passes them to the components that need them.
-Loading an adapter does not assign it to every existing pipeline or session.
+`Raven.configure_models()` loads the selected adapters, sets them on `Raven`,
+and rebuilds its retrieval pipelines. It also asks Ollama to preload any
+configured Ollama models. With the component API, the application obtains
+adapters and passes them to the components that need them.
 
 The `ModelSpec` fields, provider identifiers, credentials, and embedding
 compatibility rules remain those in [Section 4](#raven-models). This section
@@ -4792,6 +4878,7 @@ async def main(arguments: argparse.Namespace) -> None:
         embedding_batch_size=10,
         operation_manager=operation_manager,
     )
+    # Use Provider for model selection while retaining the Ollama connection settings above.
     provider = Provider(
         operation_manager=operation_manager, ollama_manager=ollama_manager
     )
@@ -4805,11 +4892,14 @@ async def main(arguments: argparse.Namespace) -> None:
         llm = await load_llm_task.result()
         load_embedding_task = await provider.load(embedding_spec, operation=operation)
         embed_model = await load_embedding_task.result()
+        # Request the same spec again to verify that Provider returns the cached adapter.
         cached_embedding_task = await provider.load_embedding(
             embedding_spec, operation=operation
         )
         cached_embed_model = await cached_embedding_task.result()
 
+        # Use the embedding adapter for splitting and the chat adapter for a separate model
+        # call.
         document_parser = DocumentParser()
         parsed_document = await document_parser.parse(arguments.source, file_id=uuid4().hex)
         semantic_splitter = ProvenanceAwareSemanticSplitter(embed_model)
@@ -4825,6 +4915,7 @@ async def main(arguments: argparse.Namespace) -> None:
             "section_count": len(semantic_sections),
             "llm_reply": chat_response.message.content,
         }
+        # Record the comparison in the operation history for later inspection.
         await operation.publish(Event(
             type=EventType.WORK_PROGRESS,
             data={"stage": "adapters_used", **adapter_result},
@@ -4832,6 +4923,7 @@ async def main(arguments: argparse.Namespace) -> None:
         return adapter_result
 
     async with AsyncExitStack() as exit_stack:
+        # Register cleanup in reverse order so active work is cancelled before managers close.
         exit_stack.push_async_callback(operation_manager.close)
         exit_stack.push_async_callback(provider.close)
         exit_stack.push_async_callback(operation_manager.cancel_active)
@@ -4877,16 +4969,19 @@ constructed `AgentHarness` can use a separate chat LLM. The `Session` receives
 its own `llm` for memory summarization/title generation and `embed_model` for
 vector memory, as described in Section 11.4.
 
-Each model must support its consumer's methods: hierarchical scoring needs
-structured prediction, the splitter needs asynchronous batch embeddings,
-and the chat agent needs function calling. A provider loading task does not
-perform the facade's complete capability and existing-knowledge validation
-sequence. Creating an adapter alone does not prove it supports all these uses.
+Choose adapters that support the methods the consumer calls. Ingestion
+metadata extraction and hierarchical scoring use `astructured_predict()`.
+The semantic splitter uses `aget_text_embedding_batch()` and `similarity()`.
+Embedded retrieval uses `aget_query_embedding()`. The harness needs a
+function-calling LlamaIndex LLM.
 
-Keep the embedding identity compatible with previously stored vectors. Loading
-another model does not rebuild existing vectors or replace adapter references
-already held by a pipeline. Reconfigure the relevant consumers explicitly
-when the application changes models.
+`Raven.configure_models()` checks the adapter methods it needs and validates
+the embedding identity against stored knowledges when the model
+specifications change. When composing directly, select adapters with the
+methods above and reuse the embedding configuration that produced the stored
+vectors. The saved identity includes the adapter type, model, provider,
+endpoint, dimensions, and embedding instructions where present. Construct a
+new pipeline with the new adapter when changing the model used by a stage.
 
 ### 13.6 Adapter caches, shutdown, and model residency
 
@@ -4981,12 +5076,14 @@ async def main() -> None:
     knowledge_base = KnowledgeBase(path_config, operation_manager)
 
     async def manage_knowledge(operation: Operation) -> dict[str, Any]:
+        # Create a fresh sample so deletion only targets the knowledge owned by this run.
         knowledge_name = f"example_{uuid4().hex[:8]}"
         create_knowledge_task = await knowledge_base.create(
             knowledge_name, "Initial document summary.", operation=operation
         )
         knowledge = await create_knowledge_task.result()
         created_metadata = knowledge.meta
+        # Compare the registry's handle with the one returned by creation.
         registered_knowledge = knowledge_base.get(knowledge_name)
         listed_knowledges = await knowledge_base.list()
 
@@ -4994,12 +5091,14 @@ async def main() -> None:
             "Updated document summary.", operation=operation
         )
         await update_summary_task.result()
+        # Capture the updated metadata before deletion closes the handle.
         updated_metadata = knowledge.meta
 
         delete_knowledge_task = await knowledge_base.delete(
             knowledge_name, operation=operation
         )
         await delete_knowledge_task.result()
+        # Read the registry again to confirm that the completed delete removed the sample.
         remaining_knowledges = await knowledge_base.list()
         return {
             "knowledge_name": knowledge_name,
@@ -5011,6 +5110,7 @@ async def main() -> None:
         }
 
     async with AsyncExitStack() as exit_stack:
+        # Register cleanup in reverse order so active work is cancelled before managers close.
         exit_stack.push_async_callback(operation_manager.close)
         exit_stack.push_async_callback(knowledge_base.close)
         exit_stack.push_async_callback(operation_manager.cancel_active)
@@ -5054,11 +5154,11 @@ def get(self, name: str) -> Knowledge
 
 </figure>
 
-After `knowledge_base.start()`, `knowledge_base.get(name)` returns the
-registered `Knowledge` object synchronously. It raises an error if that
-knowledge was not found or its directory could not be loaded. It does not
-create a missing knowledge, and returning the object does not necessarily
-open its Qdrant database.
+After `knowledge_base.start()`, `knowledge_base.get(name)` looks up the
+registered `Knowledge` object synchronously. A missing name raises
+`knowledge_not_found`. If discovery recorded a problem for that knowledge,
+the lookup raises the recorded error. Use `await knowledge.start()` to open
+the file store and Qdrant explicitly. An async search can open them on demand.
 
 There are three different kinds of access:
 
@@ -5194,11 +5294,11 @@ a query:
 python inspect_knowledge.py raven-ingestion-home engineering --query "When must the reaction wheel enter safe-hold?"
 ```
 
-The query command needs Ollama and the embedding model used during ingestion.
-The default is `bge-m3:latest`; `--embedding` and `--ollama-host` select another
-compatible adapter or server. No LLM is needed in either mode. Close another
-application using this same knowledge before running the standalone script,
-so two separate processes do not try to open its local Qdrant storage.
+The query command uses Ollama embeddings. It defaults to `bge-m3:latest`.
+Use `--embedding` and `--ollama-host` to match the model and endpoint used
+during ingestion. The example validates the adapter against the stored
+embedding identity before searching. Close any other application using this
+knowledge before the script opens its local Qdrant storage.
 
 <figure class="code-snippet api-example" markdown="1">
 <figcaption class="code-snippet-filename">inspect_knowledge.py</figcaption>
@@ -5226,8 +5326,11 @@ async def main(arguments: argparse.Namespace) -> None:
     ollama_manager = None
 
     async with AsyncExitStack() as exit_stack:
+        # Register cleanup in reverse order so active work is cancelled before managers close.
         exit_stack.push_async_callback(operation_manager.close)
         exit_stack.push_async_callback(knowledge_base.close)
+        # Metadata and file records are available from storage. Connect to Ollama when a vector
+        # search is requested.
         if arguments.query:
             ollama_manager = OllamaManager(
                 host=arguments.ollama_host, operation_manager=operation_manager
@@ -5239,6 +5342,7 @@ async def main(arguments: argparse.Namespace) -> None:
         await knowledge_base.start()
         knowledge = knowledge_base.get(arguments.knowledge)
         print("Knowledge:", json.dumps(knowledge.meta, indent=2))
+        # Keep the synchronous file-store read off the event loop.
         files = await asyncio.to_thread(knowledge.list_files_page, limit=3)
         print("First files:", json.dumps(files, indent=2))
         if not arguments.query or ollama_manager is None:
@@ -5249,9 +5353,11 @@ async def main(arguments: argparse.Namespace) -> None:
                 arguments.embedding, operation=operation
             )
             embed_model = await load_embedding_task.result()
+            # Check the embedding identity before comparing the query with stored vectors.
             await knowledge.validate_embedding_model(embed_model)
             query_vector = await embed_model.aget_query_embedding(arguments.query)
             hits = await knowledge.search(query_vector, top_k=arguments.top_k)
+            # Several matching chunks can come from the same section. Read each section once.
             seen_section_ids: set[str] = set()
             section_previews = []
             for hit in hits:
@@ -5269,6 +5375,7 @@ async def main(arguments: argparse.Namespace) -> None:
                     "summary": section["summary"],
                     "raw_content_preview": section["raw_content"][:300],
                 })
+            # Record both counts to distinguish chunk matches from distinct sections.
             await operation.publish(Event(
                 type=EventType.WORK_PROGRESS,
                 data={"chunk_matches": len(hits), "sections": len(section_previews)},
@@ -5348,3 +5455,1196 @@ not acquire the agent tool's content flags or output-size safeguards. A custom
 application must choose how much of that data to display or send to a model.
 Calling a backend method directly does not automatically apply the harness's
 tool-selection policy.
+
+<div class="page-jump-target" id="component-ingestion" aria-hidden="true"></div>
+
+## 15. Composing document parsing, splitting, and ingestion
+
+An application can inspect how a document is parsed before storing it. It can
+also preview semantic boundaries using its own sentence splitting function.
+When it is ready to index the source, it can call `IngestionPipeline` with
+its parser and model adapters. These are separate choices about how to read,
+inspect, and store a document.
+
+### 15.1 Inspecting parser output
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">DocumentParser.__init__()</figcaption>
+
+```python
+def __init__(self, converter: DocumentConverter | None = None) -> None
+```
+
+</figure>
+
+`DocumentParser` reads plain text and Markdown directly. For PDF and DOCX,
+it uses Docling. Pass a configured `DocumentConverter` as `converter` to
+control that conversion, or omit the argument to use the default converter.
+The same `DocumentParser` instance can be passed to `IngestionPipeline`.
+
+The parser example in Section 11 calls `parse(source_path, file_id=...)`
+and reads its `ParsedDocument`. That object
+holds the file name, path, media type, conversion status, warnings, and
+ordered `ParsedElement` records. Each element supplies an `element_id`, an
+`element_type`, and its text. The parser uses the supplied file ID when
+forming element IDs, such as `<file_id>-element-1`. [Parser example](#component-parser-example)
+
+The document's `navigation_type` indicates whether it has page navigation.
+An element's `source_range` is a pair of page numbers when that information
+is available. Plain text uses `none` navigation and a `None` range.
+Docling can return `partial_success` with parsed elements and conversion
+warnings. Review the warnings and preview the affected document before
+deciding whether to index that output. The `text_projection()` method joins
+the nonempty element text in order for a quick preview. Keep the element
+records when the application needs source locations for individual passages.
+
+### 15.2 Previewing semantic sections
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">ProvenanceAwareSemanticSplitter.__init__()</figcaption>
+
+```python
+def __init__(
+    self,
+    embed_model: Any,
+    *,
+    breakpoint_percentile_threshold: int = 95,
+    buffer_size: int = 1,
+    sentence_splitter: Callable[[str], list[str]] | None = None,
+) -> None
+```
+
+</figure>
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">ProvenanceAwareSemanticSplitter.split()</figcaption>
+
+```python
+async def split(self, document: ParsedDocument) -> list[SemanticSection]
+```
+
+</figure>
+
+The splitter groups the parsed text into semantic sections. It embeds a
+window around each text unit and compares the distance between neighboring
+windows. `buffer_size` controls how many neighboring units on each side enter
+the window. The splitter starts a new section where the distance exceeds the
+chosen percentile of the document's distances. A higher percentile generally
+selects fewer boundaries.
+
+For text, headings, and list items, `sentence_splitter` can supply the
+ordered units as a `list[str]`. Other elements with text, such as tables, are
+treated as single units. Pass a compatible embedding adapter to the splitter
+for this preview. It returns `SemanticSection` objects with `raw_content`,
+`source_element_ids`, `navigation_type`, and `source_range`. A section can
+refer to multiple elements and can span multiple pages. Persisted section IDs
+are assigned later, when `Knowledge.ingest()` writes the file.
+
+### 15.3 Running ingestion with explicit dependencies
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">IngestionPipeline.__init__()</figcaption>
+
+```python
+def __init__(
+    self,
+    knowledge_base: KnowledgeBase,
+    operation_manager: OperationManager,
+    *,
+    breakpoint_percentile_threshold: int = 95,
+    buffer_size: int = 1,
+    max_extraction_retries: int = 3,
+    document_parser: DocumentParser | None = None,
+) -> None
+```
+
+</figure>
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">IngestionPipeline.run()</figcaption>
+
+```python
+async def run(
+    self,
+    knowledge_name: str,
+    source_path: str | Path,
+    *,
+    llm: Any,
+    embed_model: Any,
+    operation: Operation | None = None,
+    retry_of: OperationTaskRecord | None = None,
+    chunk_size: int = 512,
+    chunk_overlap: int = 50,
+    max_source_size_bytes: int = DEFAULT_MAX_SOURCE_FILE_BYTES,
+    max_document_pages: int = DEFAULT_MAX_DOCUMENT_PAGES,
+) -> OperationTask
+```
+
+</figure>
+
+Construct the pipeline with `KnowledgeBase` and the shared `OperationManager`.
+Start the knowledge base before submitting a run. `document_parser` controls parsing. The threshold
+and buffer settings configure the splitter that the pipeline creates, and
+`max_extraction_retries` controls attempts to extract each section's metadata.
+The custom `sentence_splitter` in Section 15.2 belongs to the standalone
+splitter. The pipeline creates its splitter using the default sentence
+tokenizer.
+
+On each `run()`, pass an LLM adapter for structured metadata extraction and
+an embedding adapter for semantic splitting and indexing. `chunk_size` sets
+the chunk budget in tokens. `chunk_overlap` sets how many tokens adjacent
+chunks can share. The pipeline embeds those chunks for search. Set
+`max_source_size_bytes` for the source size and `max_document_pages` for the
+page limit passed to the parser.
+
+The pipeline assigns a file ID, parses a snapshot of the source, extracts
+metadata for its sections, and hands them to `Knowledge.ingest()`. The saved
+section IDs use `<file_id>-<section_index>`, and the records retain element
+IDs and source ranges. The saved file record carries the navigation type.
+Await the ingestion task's `.result()` for the file identity and counts, as
+shown in the example. Section 5 covers the progress stages and ordinary
+ingestion arguments. [Ingestion workflow](#raven-documents)
+
+### 15.4 Preview and ingest the same source
+
+Save the program as `compose_ingestion.py` and run
+`python compose_ingestion.py Reaction_wheel.txt` with the sample from
+Section 5. The program uses Ollama with `gemma4:e2b` and `bge-m3:latest`.
+It creates a new knowledge in `raven-component-ingestion-home` on each run.
+
+<figure class="code-snippet api-example" markdown="1">
+<figcaption class="code-snippet-filename">compose_ingestion.py</figcaption>
+
+```python
+import argparse
+import asyncio
+from contextlib import AsyncExitStack
+import json
+from pathlib import Path
+import re
+from typing import Any
+from uuid import uuid4
+
+from nraven import (
+    DocumentParser, EventType, IngestionPipeline, KnowledgeBase,
+    OllamaManager, Operation, OperationManager, PathConfig,
+    ProvenanceAwareSemanticSplitter,
+)
+
+
+def split_sentences(text: str) -> list[str]:
+    return [sentence for sentence in re.split(r"(?<=[.!?])\s+", text.strip()) if sentence]
+
+
+async def main(source: Path) -> None:
+    path_config = PathConfig(Path.cwd() / "raven-component-ingestion-home")
+    operation_manager = OperationManager(path_config)
+    knowledge_base = KnowledgeBase(path_config, operation_manager)
+    ollama_manager = OllamaManager(operation_manager=operation_manager)
+    document_parser = DocumentParser()
+    # Share the parser between the preview and the pipeline.
+    ingestion_pipeline = IngestionPipeline(
+        knowledge_base, operation_manager, document_parser=document_parser,
+        breakpoint_percentile_threshold=95, buffer_size=1,
+    )
+    # Keep each run's indexed copy available for the retrieval example.
+    knowledge_name = f"ingestion_{uuid4().hex[:8]}"
+    source_limit = 5 * 1024 * 1024
+    page_limit = 50
+
+    async def preview_and_ingest(operation: Operation) -> dict[str, Any]:
+        # Assign a preview ID. Ingestion assigns a separate ID when parsing the source snapshot.
+        parsed_document = await document_parser.parse(
+            source, file_id=uuid4().hex, max_file_size_bytes=source_limit,
+            max_pages=page_limit,
+        )
+        embedding_task = await ollama_manager.load_embedding("bge-m3:latest", operation=operation)
+        embed_model = await embedding_task.result()
+        # Try a custom sentence splitter for the preview. The ingestion pipeline builds its own
+        # splitter.
+        preview_splitter = ProvenanceAwareSemanticSplitter(
+            embed_model, sentence_splitter=split_sentences,
+        )
+        preview_sections = await preview_splitter.split(parsed_document)
+        print("Preview:", json.dumps([
+            {
+                "source_element_ids": section.source_element_ids,
+                "source_range": section.source_range,
+                "text_preview": section.raw_content[:120],
+            }
+            for section in preview_sections
+        ], indent=2), flush=True)
+
+        # Load the LLM now that ingestion needs to extract section metadata.
+        llm_task = await ollama_manager.load_llm("gemma4:e2b", operation=operation)
+        llm = await llm_task.result()
+        create_knowledge_task = await knowledge_base.create(knowledge_name, operation=operation)
+        knowledge = await create_knowledge_task.result()
+        ingestion_task = await ingestion_pipeline.run(
+            knowledge_name, source, llm=llm, embed_model=embed_model,
+            chunk_size=512, chunk_overlap=50, max_source_size_bytes=source_limit,
+            max_document_pages=page_limit, operation=operation,
+        )
+        ingestion_result = await ingestion_task.result()
+        # Read the committed section IDs and their links to the original parsed elements.
+        stored_sections = await asyncio.to_thread(knowledge.list_sections, source.name)
+        return {
+            "knowledge_name": knowledge_name,
+            "ingestion": ingestion_result,
+            "stored_sections": [
+                {
+                    "section_id": section["section_id"],
+                    "source_element_ids": section["source_element_ids"],
+                    "source_range": section["source_range"],
+                }
+                for section in stored_sections
+            ],
+        }
+
+    async with AsyncExitStack() as exit_stack:
+        # Register cleanup in reverse order so active work is cancelled before managers close.
+        exit_stack.push_async_callback(operation_manager.close)
+        exit_stack.push_async_callback(knowledge_base.close)
+        exit_stack.push_async_callback(ollama_manager.close)
+        exit_stack.push_async_callback(operation_manager.cancel_active)
+        await operation_manager.recover()
+        await knowledge_base.start()
+        operation = await operation_manager.create("example.compose_ingestion")
+        root_task = await operation.run(operation.name, preview_and_ingest)
+        print("Operation:", operation.operation_id, flush=True)
+        async for event in root_task.events():
+            if event.type == EventType.INGESTION_PROGRESS:
+                print(event.data["stage"], event.data["status"], flush=True)
+        print("Result:", json.dumps(await root_task.result(), indent=2))
+
+
+if __name__ == "__main__":
+    argument_parser = argparse.ArgumentParser()
+    argument_parser.add_argument("source", type=Path)
+    asyncio.run(main(argument_parser.parse_args().source))
+```
+
+</figure>
+
+`split_sentences()` is a small punctuation-based function for the preview
+in this example. The preview reads the original file with its own file ID.
+The ingestion task then parses its snapshot with a new file ID and splits
+the text using the pipeline's tokenizer. The preview and stored sections can
+therefore have different boundaries and element IDs. Compare the stored
+section references with the file ID in `ingestion`, and use the stored IDs for
+retrieval and reconstruction. The script prints the knowledge name for use
+with the next example.
+
+<div class="page-jump-target" id="component-retrieval" aria-hidden="true"></div>
+
+## 16. Composing retrieval and reconstruction pipelines
+
+Direct calls let the application choose a search pipeline, supply its model
+adapters, and control which documents the pipeline scores. The same
+`KnowledgeBase` and `OperationManager` can serve the search and the source
+views that follow. Section 6 describes the shared result formats and how to
+choose a retrieval strategy. [Retrieval and source reconstruction](#raven-retrieval)
+
+### 16.1 Choosing the pipeline's dependencies
+
+| Component | Arguments in constructor order |
+| --- | --- |
+| `EmbeddedRetrievalPipeline` | `knowledge_base`, `embed_model`, `operation_manager` |
+| `HierarchicalRetrievalPipeline` | `knowledge_base`, `llm`, `operation_manager` |
+| `AgreementBasedRetrievalPipeline` | `knowledge_base`, `embedded_pipeline`, `hierarchical_pipeline`, `operation_manager` |
+| `VectorConditionedRetrievalPipeline` | `knowledge_base`, `embedded_pipeline`, `hierarchical_pipeline`, `operation_manager` |
+
+An embedded pipeline needs an adapter compatible with the stored embeddings.
+A hierarchical pipeline uses an LLM that can return structured scores for
+the candidate metadata. Agreement and vector-conditioned retrieval reuse the
+two supplied pipelines and their model adapters. Construct only the pipeline
+and dependencies needed for the search.
+
+### 16.2 Controlling how many candidates are scored
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">VectorConditionedRetrievalPipeline.retrieve_local_context()</figcaption>
+
+```python
+async def retrieve_local_context(
+    self,
+    knowledge_name: str,
+    user_query: str,
+    top_k: int = 5,
+    *,
+    embedded_top_k: int = 5,
+    max_per_read: int = 50,
+    anchor_count: int = 4,
+    operation: Operation | None = None,
+) -> OperationTask
+```
+
+</figure>
+
+In local vector-conditioned retrieval, `embedded_top_k` limits the initial
+section matches from embedded retrieval. Their file names select the files
+whose sections are then eligible for hierarchical scoring. In global mode,
+the initial matches select knowledges instead, and the final limit is named
+`top_k_section`. Several initial matches can lead to the same file or
+knowledge, so `embedded_top_k` is a limit on matches, not on distinct sources.
+
+For example, with `embedded_top_k=3` and `top_k=1`, local retrieval can use
+three matches to pick candidate files, score sections from those files, and
+return at most one section. The final section may be a different section
+from an initial match in the same file.
+
+`max_per_read` caps the number of candidates in each scoring batch.
+`anchor_count` limits how many previously scored candidates are shown as
+references when scoring a later batch. Set it to zero to omit those
+references. A smaller batch gives the LLM fewer candidates per request and
+can require more requests. The hierarchical constructor also accepts
+`max_retries` for scoring attempts per batch. `max_scoring_characters` is
+a batching target measured on the serialized candidate metadata. The scorer
+also uses it to shorten long metadata fields. The query and anchor examples
+contribute their own text to the scoring prompt.
+
+Global hierarchical retrieval normally ranks knowledge summaries first and
+scores sections from the top `top_k_knowledge` knowledges. With
+`full_retrieval=True`, it scores sections across all knowledges. Agreement
+retrieval accepts separate preliminary `embedded_top_k` and
+`hierarchical_top_k` limits, then applies its final limit to the agreed list
+or to each returned group. `Raven.retrieve()` exposes a final result limit.
+The component methods also expose candidate selection and scoring settings.
+
+### 16.3 Scoring an explicit set of files or knowledges
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">HierarchicalRetrievalPipeline.retrieve_by_file()</figcaption>
+
+```python
+async def retrieve_by_file(
+    self,
+    knowledge_name: str,
+    user_query: str,
+    file_names: list[str],
+    top_k: int = 5,
+    *,
+    max_per_read: int = 50,
+    anchor_count: int = 4,
+    operation: Operation | None = None,
+) -> OperationTask
+```
+
+</figure>
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">HierarchicalRetrievalPipeline.retrieve_by_knowledge()</figcaption>
+
+```python
+async def retrieve_by_knowledge(
+    self,
+    user_query: str,
+    knowledge_names: list[str],
+    top_k_section: int = 5,
+    *,
+    max_per_read: int = 50,
+    anchor_count: int = 4,
+    operation: Operation | None = None,
+) -> OperationTask
+```
+
+</figure>
+
+Use `retrieve_by_file()` when the application already knows which stored
+files to consider within one knowledge. Pass their exact stored filenames.
+Use `retrieve_by_knowledge()` when the application has selected a list of
+knowledges. Both methods send the candidate section metadata directly to
+the hierarchical scorer. Both return a task whose result is the usual
+list of section records, ready for reconstruction.
+
+### 16.4 Passing retrieval results to the reconstructor
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">Reconstructor.__init__()</figcaption>
+
+```python
+def __init__(
+    self,
+    knowledge_base: KnowledgeBase,
+    operation_manager: OperationManager,
+) -> None
+```
+
+</figure>
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">Reconstructor.reconstruct()</figcaption>
+
+```python
+async def reconstruct(
+    self,
+    retrieval_result: list[dict[str, Any]] | dict[str, Any] | None,
+    *,
+    operation: Operation | None = None,
+    retry_of: OperationTaskRecord | None = None,
+) -> OperationTask
+```
+
+</figure>
+
+Pass the retrieval task's result to `reconstruct()`. A plain list of section
+records and the agreement result object are both accepted. The reconstructor
+groups records by `knowledge_name` and `file_name`, then highlights their
+`section_id` values within each stored file view. Keep all three identifiers
+when selecting or merging records. Two knowledges may contain a file with
+the same name, and each file must be read from its own knowledge.
+
+Reconstruction reads the stored text and navigation data. Its task result
+contains the file's `navigation_type` and the stored sections in order,
+including each section's `source_range` and `highlighted` flag. Empty
+retrieval yields an empty list.
+
+Handle malformed retrieval input at `await reconstructor.reconstruct(...)`.
+That call raises `invalid_metadata` before returning a task. If a referenced
+file or section is missing from storage, `await reconstruction_task.result()`
+raises `file_not_found` or `section_not_found`.
+
+### 16.5 Search and reconstruct within one operation
+
+Save the program as `compose_retrieval.py`. Pass the home, knowledge name,
+and query as positional arguments. The following command uses the
+`engineering` knowledge from Section 5.
+
+```text
+python compose_retrieval.py raven-ingestion-home engineering "When must the reaction wheel enter safe-hold?"
+```
+
+To query the copy from Section 15, pass `raven-component-ingestion-home`
+as the home and the `knowledge_name` printed by `compose_ingestion.py` as
+the second argument.
+
+The default mode runs local vector-conditioned retrieval with `gemma4:e2b`
+and `bge-m3:latest`. Use the same embedding model as ingestion. Add
+`--file Reaction_wheel.txt` to score the named file directly with the LLM.
+Repeat `--file` to select more files in that knowledge. With `--file`, the
+program scores only the selected files and loads the LLM alone.
+
+<figure class="code-snippet api-example" markdown="1">
+<figcaption class="code-snippet-filename">compose_retrieval.py</figcaption>
+
+```python
+import argparse
+import asyncio
+from contextlib import AsyncExitStack
+import json
+from pathlib import Path
+from typing import Any
+
+from nraven import (
+    EmbeddedRetrievalPipeline, HierarchicalRetrievalPipeline, KnowledgeBase,
+    OllamaManager, Operation, OperationManager, PathConfig, Reconstructor,
+    VectorConditionedRetrievalPipeline,
+)
+
+
+async def main(arguments: argparse.Namespace) -> None:
+    path_config = PathConfig(arguments.home)
+    if not path_config.knowledge_base_dir.is_dir():
+        raise ValueError("Choose a Raven home with an existing knowledge base.")
+    operation_manager = OperationManager(path_config)
+    knowledge_base = KnowledgeBase(path_config, operation_manager)
+    ollama_manager = OllamaManager(operation_manager=operation_manager)
+    reconstructor = Reconstructor(knowledge_base, operation_manager)
+
+    async def retrieve_and_reconstruct(operation: Operation) -> dict[str, Any]:
+        llm_task = await ollama_manager.load_llm("gemma4:e2b", operation=operation)
+        llm = await llm_task.result()
+        hierarchical_pipeline = HierarchicalRetrievalPipeline(
+            knowledge_base, llm, operation_manager,
+        )
+        # An explicit file list already defines the candidates, so send it straight to the
+        # scorer.
+        if arguments.file:
+            retrieval_task = await hierarchical_pipeline.retrieve_by_file(
+                arguments.knowledge, arguments.query, arguments.file,
+                top_k=1, max_per_read=1, anchor_count=1, operation=operation,
+            )
+        else:
+            # Use vector matches to choose candidate files when the caller leaves file selection
+            # to the pipeline.
+            embedding_task = await ollama_manager.load_embedding("bge-m3:latest", operation=operation)
+            embed_model = await embedding_task.result()
+            embedded_pipeline = EmbeddedRetrievalPipeline(
+                knowledge_base, embed_model, operation_manager,
+            )
+            vector_conditioned_pipeline = VectorConditionedRetrievalPipeline(
+                knowledge_base, embedded_pipeline, hierarchical_pipeline, operation_manager,
+            )
+            # Use up to three embedded matches to choose files, then return the highest-ranked
+            # section.
+            retrieval_task = await vector_conditioned_pipeline.retrieve_local_context(
+                arguments.knowledge, arguments.query, top_k=1, embedded_top_k=3,
+                max_per_read=1, anchor_count=1, operation=operation,
+            )
+        retrieved_sections = await retrieval_task.result()
+        # Keep reconstruction in the same operation so the source views can be replayed
+        # alongside retrieval.
+        reconstruction_task = await reconstructor.reconstruct(retrieved_sections, operation=operation)
+        reconstructed_files = await reconstruction_task.result()
+        return {"retrieved": retrieved_sections, "files": reconstructed_files}
+
+    async with AsyncExitStack() as exit_stack:
+        # Register cleanup in reverse order so active work is cancelled before managers close.
+        exit_stack.push_async_callback(operation_manager.close)
+        exit_stack.push_async_callback(knowledge_base.close)
+        exit_stack.push_async_callback(ollama_manager.close)
+        exit_stack.push_async_callback(operation_manager.cancel_active)
+        await operation_manager.recover()
+        await knowledge_base.start()
+        operation = await operation_manager.create("example.compose_retrieval")
+        root_task = await operation.run(operation.name, retrieve_and_reconstruct)
+        print("Operation:", operation.operation_id, flush=True)
+        async for event in root_task.events():
+            print(event.event_id, event.type.value, event.task_name, flush=True)
+        print("Result:", json.dumps(await root_task.result(), indent=2))
+
+
+if __name__ == "__main__":
+    argument_parser = argparse.ArgumentParser()
+    argument_parser.add_argument("home", type=Path)
+    argument_parser.add_argument("knowledge")
+    argument_parser.add_argument("query")
+    argument_parser.add_argument("--file", action="append", help="Stored filename. Repeat to select multiple files.")
+    asyncio.run(main(argument_parser.parse_args()))
+```
+
+</figure>
+
+The worker awaits the retrieval task before starting reconstruction and
+passes the same operation into both calls. Their events can be read together,
+and the returned JSON separates the retrieved records from the full stored
+file views. The reconstructed file can contain additional sections for
+context even when `top_k=1` returns a single match.
+
+<div class="page-jump-target" id="component-conversation" aria-hidden="true"></div>
+
+## 17. Working with conversations and memory
+
+`ConversationManager` creates and finds conversations for one user.
+Each `Conversation` holds the messages, turns, and preferences for a single
+discussion. Direct access lets an application commit a transcript it already
+has, choose the memory settings, and retrieve the model context or relevant
+past messages separately.
+
+### 17.1 Managing conversations through the components
+
+Construct `ConversationManager(path_config, knowledge_base, operation_manager)`
+using the shared objects from Section 12. Start the knowledge base before
+the conversation manager. The example below creates, finds, updates, and
+lists conversations through the manager.
+
+| Call | What it returns or changes |
+| --- | --- |
+| `await conversation_manager.create()` | A task whose result is a global `Conversation`. Pass `knowledge_name` to bind a new conversation to an existing knowledge. |
+| `conversation_manager.get(conversation_id)` | The registered `Conversation` for the stored string ID. |
+| `conversation_manager.list()` | A list of conversation metadata dictionaries. |
+| `await conversation_manager.update(conversation_id, title=...)` | A task whose result is the updated `Conversation`. The method also accepts `pinned`. |
+| `await conversation_manager.delete(conversation_id)` | A task that removes the conversation and its stored data. Its completed result is `None`. |
+
+Await each task's `.result()` before using its output or relying on its
+changes. Section 7 covers metadata, pagination, and preference records.
+[Conversation management and history](#raven-conversations)
+
+### 17.2 Preparing model-backed memory
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">Conversation.initialize_memory()</figcaption>
+
+```python
+async def initialize_memory(
+    self,
+    llm: Any,
+    embed_model: Any,
+    *,
+    token_limit: int,
+    memory_top_k: int = 5,
+) -> None
+```
+
+</figure>
+
+`initialize_memory()` opens the conversation as needed and prepares two
+ways for the model to use past turns. The LLM summarizes older context.
+The embedding adapter indexes and searches conversation memory, so it must
+match the embedding identity used for existing memory. `token_limit` is the
+context memory budget. `memory_top_k` limits how many turns a memory search
+can match. Each matched turn can return multiple messages, including the
+user's message and the assistant's reply.
+
+An application running a harness directly initializes memory before the
+run. `Session.generate_response()` initializes it using the session's
+adapters and limits. An application that only reads saved messages can use
+`get_messages()` or `get_turn_messages()` without supplying either model.
+
+<div class="page-jump-target" id="component-commit-turn" aria-hidden="true"></div>
+
+### 17.3 Committing an application-supplied turn
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">Conversation.append_turn()</figcaption>
+
+```python
+async def append_turn(
+    self,
+    messages: Sequence[ChatMessage],
+    *,
+    turn_id: UUID | str | None = None,
+    user_query: str | None = None,
+    result: dict[str, Any] | None = None,
+    index_in_vector_memory: bool = True,
+    operation: Operation | None = None,
+) -> OperationTask
+```
+
+</figure>
+
+`append_turn()` takes the ordered `ChatMessage` records for one turn. It
+saves the turn and messages together and adds the messages to the model
+context. By default, it indexes text from user and assistant messages for
+recall. Initialize memory before submitting the task. Its result is the
+saved turn record, including `turn_id`,
+`memory_indexed`, and the optional `result` dictionary supplied by the
+caller. Supply the completed run's result when saving an agent transcript.
+
+Keep the `turn_id` if the application may need to retry the same write.
+An existing ID with the same query reuses the original commit. An existing
+ID with a different query raises `conversation_turn_conflict`. If vector
+indexing fails after the transcript is saved, read the record with
+`await conversation.get_turn(turn_id)`. A saved turn with `memory_indexed`
+set to `False` still needs indexing. After memory is initialized, call
+`reconcile_turn(turn_id)` and await its task result to finish indexing the
+existing turn. The session retry workflow handles this for session turns.
+
+### 17.4 Reading saved history, context, and recall
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">Conversation.get_context_messages()</figcaption>
+
+```python
+async def get_context_messages(
+    self,
+    *,
+    initial_token_count: int = 0,
+    operation: Operation | None = None,
+) -> OperationTask
+```
+
+</figure>
+
+`get_context_messages()` returns a task whose result is a `list[ChatMessage]`
+for model input. It can summarize older messages to make room in the memory
+budget and save the resulting context. Pass the system prompt's estimated
+token count as `initial_token_count` so the prompt is counted against that
+budget. The caller supplies the prompt separately. When the harness calls
+this method, it builds the prompt and passes its own token estimate.
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">Conversation.search_memory()</figcaption>
+
+```python
+async def search_memory(self, query: str) -> list[ChatMessage]
+```
+
+</figure>
+
+`search_memory()` takes a query and returns relevant original messages from
+indexed turns in this conversation. Its result is a list of `ChatMessage`
+objects rather than an operation task. The canonical transcript returned by
+`get_messages()` or `get_turn_messages()` remains available after
+compaction. Use canonical messages for the visible transcript, compacted
+context for model input, and recall when the model needs to revisit earlier
+conversation content.
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">Conversation.release_memory_resources()</figcaption>
+
+```python
+async def release_memory_resources(self) -> None
+```
+
+</figure>
+
+`release_memory_resources()` releases the model-backed memory objects and
+their Qdrant connection. Use it when the application has finished model
+work with that conversation. The transcript remains readable, and a later
+`initialize_memory()` can reopen the memory resources.
+
+### 17.5 Commit and inspect a turn
+
+Save the program as `compose_conversation_memory.py` and run
+`python compose_conversation_memory.py Reaction_wheel.txt`. It uses the
+sample text as a message and a small context budget to demonstrate
+compaction. The models are `gemma4:e2b` and `bge-m3:latest` through Ollama.
+The program saves the mission-notes conversation in
+`raven-component-memory-home` for inspection.
+
+<figure class="code-snippet api-example" markdown="1">
+<figcaption class="code-snippet-filename">compose_conversation_memory.py</figcaption>
+
+```python
+import argparse
+import asyncio
+from contextlib import AsyncExitStack
+import json
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+from llama_index.core.llms import ChatMessage
+from llama_index.core.utils import get_tokenizer
+from nraven import (
+    ConversationManager, EventType, KnowledgeBase, OllamaManager,
+    Operation, OperationManager, PathConfig,
+)
+
+
+async def main(source: Path) -> None:
+    note = source.read_text(encoding="utf-8")
+    path_config = PathConfig(Path.cwd() / "raven-component-memory-home")
+    operation_manager = OperationManager(path_config)
+    knowledge_base = KnowledgeBase(path_config, operation_manager)
+    conversation_manager = ConversationManager(path_config, knowledge_base, operation_manager)
+    ollama_manager = OllamaManager(operation_manager=operation_manager)
+
+    async def manage_and_inspect_memory(operation: Operation) -> dict[str, Any]:
+        create_task = await conversation_manager.create(operation=operation)
+        conversation = await create_task.result()
+        conversation_id = conversation.conversation_id
+        conversation = conversation_manager.get(conversation_id)
+        update_task = await conversation_manager.update(
+            conversation_id, title="Mission notes", operation=operation,
+        )
+        await update_task.result()
+
+        conversation_ids = [item["conversation_id"] for item in conversation_manager.list()]
+
+        llm_task = await ollama_manager.load_llm("gemma4:e2b", operation=operation)
+        llm = await llm_task.result()
+        embedding_task = await ollama_manager.load_embedding("bge-m3:latest", operation=operation)
+        embed_model = await embedding_task.result()
+        # Give the model a small context budget so the long note triggers compaction.
+        await conversation.initialize_memory(llm, embed_model, token_limit=256, memory_top_k=1)
+
+        # Supply both messages as an application would when importing a transcript.
+        # A known turn lets us compare the original messages with the compacted context.
+        user_query = f"Keep this mission note for later.\n\n{note}"
+        turn_id = uuid4()
+        # Commit this pair as one turn so recall can return both messages together.
+        append_task = await conversation.append_turn(
+            [
+                ChatMessage(role="user", content=user_query),
+                ChatMessage(role="assistant", content="I have recorded the mission note."),
+            ],
+            turn_id=turn_id, user_query=user_query, operation=operation,
+        )
+        saved_turn = await append_task.result()
+
+        # Count the prompt against the context budget before loading model history.
+        system_prompt = "You help the operator review mission notes."
+        context_task = await conversation.get_context_messages(
+            initial_token_count=len(get_tokenizer()(system_prompt)), operation=operation,
+        )
+        context = await context_task.result()
+        # Recall returns the original messages from the indexed turn.
+        recalled_messages = await conversation.search_memory("reaction wheel safe-hold conditions")
+        await conversation.release_memory_resources()
+        # The saved transcript is still readable after releasing model-backed memory.
+        saved_messages = await conversation.get_turn_messages(turn_id)
+        return {
+            "conversation_id": conversation_id,
+            "listed_conversations": conversation_ids,
+            "turn_id": str(turn_id),
+            "memory_indexed": saved_turn["memory_indexed"],
+            "saved_roles": [message.role.value for message in saved_messages],
+            "context_roles": [message.role.value for message in context],
+            "recalled_roles": [message.role.value for message in recalled_messages],
+        }
+
+    async with AsyncExitStack() as exit_stack:
+        # Register cleanup in reverse order so active work is cancelled before managers close.
+        exit_stack.push_async_callback(operation_manager.close)
+        exit_stack.push_async_callback(knowledge_base.close)
+        exit_stack.push_async_callback(conversation_manager.close)
+        exit_stack.push_async_callback(ollama_manager.close)
+        exit_stack.push_async_callback(operation_manager.cancel_active)
+        await operation_manager.recover()
+        await knowledge_base.start()
+        await conversation_manager.start()
+        operation = await operation_manager.create("example.compose_conversation_memory")
+        root_task = await operation.run(operation.name, manage_and_inspect_memory)
+        print("Operation:", operation.operation_id, flush=True)
+        async for event in root_task.events():
+            if event.type in {
+                EventType.CONVERSATION_MEMORY_COMPACTION_STARTED,
+                EventType.CONVERSATION_MEMORY_COMPACTION_COMPLETED,
+            }:
+                print(event.type.value, flush=True)
+        print("Result:", json.dumps(await root_task.result(), indent=2))
+
+
+if __name__ == "__main__":
+    argument_parser = argparse.ArgumentParser()
+    argument_parser.add_argument("source", type=Path)
+    asyncio.run(main(argument_parser.parse_args().source))
+```
+
+</figure>
+
+The application provides both messages itself. The LLM is used for
+compaction when the context budget is exceeded. The printed roles show the
+original turn, the compacted context, and the messages returned by recall.
+The compaction events and saved conversation remain available in the home
+directory for inspection.
+
+<div class="page-jump-target" id="component-session" aria-hidden="true"></div>
+
+## 18. Composing an agent harness and session
+
+`AgentHarness` runs the model and built-in tools, then exposes its events and
+the messages produced by that run. `Session` coordinates a complete turn
+for one conversation and commits its transcript and result. Construct the
+harness directly when the application needs to supply the dependencies or
+control when a run becomes a saved turn.
+
+### 18.1 Supplying the harness dependencies
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">AgentHarness.__init__()</figcaption>
+
+```python
+def __init__(
+    self,
+    llm: Any,
+    knowledge_base: KnowledgeBase,
+    retrieval_pipelines: RetrievalPipelines,
+    operation_manager: OperationManager,
+    *,
+    reconstructor: Reconstructor | None = None,
+    max_iterations: int = 10,
+    top_k: int = 3,
+    max_cached_prompts: int = DEFAULT_PROMPT_CACHE_SIZE,
+    agent_factory: Callable[..., Any] = FunctionAgent,
+) -> None
+```
+
+</figure>
+
+Pass the started `KnowledgeBase`, the shared `OperationManager`, and an LLM
+that supports LlamaIndex function calling. Import `RetrievalPipelines` from
+`nraven.agent` and pass the four pipeline instances described in Section 16.
+The agreement and vector-conditioned pipelines can reuse the embedded and
+hierarchical instances. Supply a `Reconstructor` if the application already
+has one. Otherwise the harness creates one from the knowledge base and
+operation manager.
+
+`top_k` controls the result limit for retrieval tools. `max_iterations`
+controls the agent's iteration budget. `max_cached_prompts` bounds the
+number of cached prompts. The `agent_factory` argument supplies the workflow
+agent that receives the harness's assembled tools and prompt. The built-in
+tool definitions and their scope come from the harness.
+
+### 18.2 Scope and retrieval policy
+
+The harness builds `AgentPolicy` for each run using the conversation scope,
+requested retrieval mode, and its configured limits. A conversation bound
+to one knowledge exposes local retrieval. A global conversation can use
+global retrieval or select a knowledge for a local tool call. Passing a
+specific `RetrievalMode` restricts the available retrieval tools to that
+mode. Use `None` or `"auto"` to make the scope's retrieval modes available.
+Local navigation uses the conversation's bound knowledge. In a global
+conversation, tools such as `list_files` and `get_sections` take a knowledge
+name. Memory searches and preference changes apply to the current
+conversation. The model still decides when to call a tool.
+
+The harness builds the system prompt from the policy and saved preferences.
+The model receives this prompt together with the context loaded from the
+conversation. To select a retrieval mode, pass it to `start()` or
+`generate_response()`, as in the example. Section 8 describes streaming
+and tool behavior for a session run. [Sessions and streamed responses](#raven-sessions)
+
+<div class="page-jump-target" id="component-direct-agent-run" aria-hidden="true"></div>
+
+### 18.3 Running the harness directly
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">AgentHarness.start()</figcaption>
+
+```python
+async def start(
+    self,
+    conversation: Conversation,
+    user_query: str,
+    *,
+    retrieval_mode: RetrievalMode | str | None = None,
+    operation: Operation | None = None,
+) -> AgentRun
+```
+
+</figure>
+
+After initializing memory, call `start()` with the `Conversation` and query.
+The returned `AgentRun` exposes a task, an event stream, and `collect()`,
+which builds an `AgentRunResult` from the events. After completion,
+`conversation_messages()` returns the current run's user message, tool
+interactions, and final assistant message.
+
+The caller decides whether to commit these messages using `append_turn()`.
+A direct run can still compact context or invoke tools that save preferences.
+Its event history and any such changes are separate from committing a
+complete turn to the canonical transcript.
+
+### 18.4 Running and saving a turn through Session
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">Session.__init__()</figcaption>
+
+```python
+def __init__(
+    self,
+    conversation: Conversation,
+    harness: AgentHarness,
+    operation_manager: OperationManager,
+    *,
+    llm: Any,
+    embed_model: Any,
+    memory_token_limit: int = 4000,
+    memory_top_k: int = 5,
+) -> None
+```
+
+</figure>
+
+<figure class="code-snippet api-signature" markdown="1">
+<figcaption class="code-snippet-filename">Session.generate_response()</figcaption>
+
+```python
+async def generate_response(
+    self,
+    user_query: str,
+    *,
+    retrieval_mode: RetrievalMode | str | None = None,
+    operation: Operation | None = None,
+    retry_of: OperationTaskRecord | None = None,
+) -> SessionRun
+```
+
+</figure>
+
+Construct `Session` over the conversation and harness. Supply the adapters
+and limits for conversation memory. The session also uses its LLM for title
+generation when a conversation still needs a title. `await session.start()`
+opens the conversation for use. Call it before submitting a turn.
+
+`generate_response()` reserves the conversation for one active session turn.
+A concurrent call for the same conversation raises `conversation_turn_active`.
+The accepted call prepares memory, starts the harness, and commits the
+completed transcript and result.
+It returns a `SessionRun` with a `turn_id` for reading the stored turn later.
+Use `collect()` to wait for the turn result, including completion of its
+save. Call `await session.close()` when the application is finished with
+that session. The conversation manager owns the conversation's storage and
+closes it separately.
+
+### 18.5 Compare a direct run with a saved turn
+
+Save the program as `compose_session.py`. It expects an existing knowledge
+indexed with `bge-m3:latest` and uses `gemma4:e2b` for the harness. The
+following command uses the `engineering` knowledge from Section 5.
+
+```text
+python compose_session.py raven-ingestion-home engineering "Use local embedded retrieval to find the passage about a reaction wheel telemetry anomaly and passive magnetic-torquer-only safe-hold. How many milliseconds are allowed for that transition?"
+```
+
+To use the knowledge from Section 15, pass `raven-component-ingestion-home`
+and its printed knowledge name. The program creates a new local
+conversation. It first runs a greeting through the harness and reads the
+canonical history. It then runs the supplied query through `Session`, using
+local embedded retrieval as the allowed retrieval mode. The harness allows
+up to two retrieved sections so the model can inspect both passages in the
+sample.
+
+<figure class="code-snippet api-example" markdown="1">
+<figcaption class="code-snippet-filename">compose_session.py</figcaption>
+
+```python
+import argparse
+import asyncio
+from contextlib import AsyncExitStack
+import json
+from pathlib import Path
+
+from nraven import (
+    AgentHarness, AgreementBasedRetrievalPipeline, ConversationManager,
+    EmbeddedRetrievalPipeline, EventType, HierarchicalRetrievalPipeline,
+    KnowledgeBase, OllamaManager, OperationManager, PathConfig, Session,
+    VectorConditionedRetrievalPipeline,
+)
+from nraven.agent import RetrievalMode, RetrievalPipelines
+
+
+async def main(arguments: argparse.Namespace) -> None:
+    path_config = PathConfig(arguments.home)
+    if not path_config.knowledge_base_dir.is_dir():
+        raise ValueError("Choose a Raven home with an existing knowledge base.")
+    operation_manager = OperationManager(path_config)
+    knowledge_base = KnowledgeBase(path_config, operation_manager)
+    conversation_manager = ConversationManager(path_config, knowledge_base, operation_manager)
+    ollama_manager = OllamaManager(operation_manager=operation_manager)
+
+    async with AsyncExitStack() as exit_stack:
+        # Register cleanup in reverse order so active work is cancelled before managers close.
+        exit_stack.push_async_callback(operation_manager.close)
+        exit_stack.push_async_callback(knowledge_base.close)
+        exit_stack.push_async_callback(conversation_manager.close)
+        exit_stack.push_async_callback(ollama_manager.close)
+        exit_stack.push_async_callback(operation_manager.cancel_active)
+        await operation_manager.recover()
+        await knowledge_base.start()
+        await conversation_manager.start()
+
+        llm_task = await ollama_manager.load_llm("gemma4:e2b")
+        llm = await llm_task.result()
+        embedding_task = await ollama_manager.load_embedding("bge-m3:latest")
+        embed_model = await embedding_task.result()
+        embedded_pipeline = EmbeddedRetrievalPipeline(knowledge_base, embed_model, operation_manager)
+        hierarchical_pipeline = HierarchicalRetrievalPipeline(knowledge_base, llm, operation_manager)
+        # Give the harness all four strategies. The combined strategies reuse these two pipeline
+        # instances.
+        retrieval_pipelines = RetrievalPipelines(
+            embedded=embedded_pipeline,
+            hierarchical=hierarchical_pipeline,
+            agreement=AgreementBasedRetrievalPipeline(
+                knowledge_base, embedded_pipeline, hierarchical_pipeline, operation_manager,
+            ),
+            vector_conditioned=VectorConditionedRetrievalPipeline(
+                knowledge_base, embedded_pipeline, hierarchical_pipeline, operation_manager,
+            ),
+        )
+        harness = AgentHarness(llm, knowledge_base, retrieval_pipelines, operation_manager, top_k=2)
+        create_task = await conversation_manager.create(arguments.knowledge)
+        conversation = await create_task.result()
+        update_task = await conversation_manager.update(conversation.conversation_id, title="Mission review")
+        await update_task.result()
+
+        # Prepare memory ourselves because this first call goes directly to the harness.
+        await conversation.initialize_memory(llm, embed_model, token_limit=4000)
+        agent_run = await harness.start(conversation, "Say hello in one sentence.")
+        print("Agent operation:", agent_run.operation_id, flush=True)
+        agent_result = await agent_run.collect()
+        print("Direct reply:", agent_result.response, flush=True)
+        draft_messages = agent_run.conversation_messages()
+        # Compare the run's transcript with the saved history to show where persistence happens.
+        saved_after_direct_run = await conversation.get_messages()
+
+        session = Session(conversation, harness, operation_manager, llm=llm, embed_model=embed_model)
+        exit_stack.push_async_callback(session.close)
+        await session.start()
+        # Restrict retrieval to the local embedded tool for the knowledge bound to this
+        # conversation.
+        session_run = await session.generate_response(arguments.query, retrieval_mode=RetrievalMode.LOCAL_EMBEDDED)
+        print("Session operation:", session_run.operation_id, flush=True)
+        async for event in session_run.stream:
+            if event.type == EventType.CHAT_TOOL_CALL:
+                print("Tool:", event.data["name"], flush=True)
+            elif event.type == EventType.CHAT_RESPONSE_DELTA:
+                print(event.data["delta"], end="", flush=True)
+        print()
+        session_result = await session_run.collect()
+        # Use the turn ID to read the messages that Session committed after the run.
+        saved_messages = await conversation.get_turn_messages(session_run.turn_id)
+        print("Result:", json.dumps({
+            "conversation_id": conversation.conversation_id,
+            "direct_run_message_count": len(draft_messages),
+            "saved_after_direct_run": len(saved_after_direct_run),
+            "turn_id": str(session_run.turn_id),
+            "saved_session_roles": [message.role.value for message in saved_messages],
+            "response": session_result.response,
+            "evidence": [reference.model_dump(mode="json") for reference in session_result.evidence],
+        }, indent=2))
+
+
+if __name__ == "__main__":
+    argument_parser = argparse.ArgumentParser()
+    argument_parser.add_argument("home", type=Path)
+    argument_parser.add_argument("knowledge")
+    argument_parser.add_argument("query")
+    asyncio.run(main(argument_parser.parse_args()))
+```
+
+</figure>
+
+Compare `direct_run_message_count` with `saved_after_direct_run`. The direct
+run yields its own transcript for the caller to inspect. The session
+commits its turn, so the saved messages can be loaded by the printed
+`turn_id`. Both runs have separate operation IDs for inspecting their events.
+
+<div class="page-jump-target" id="api-reference-index" aria-hidden="true"></div>
+
+## 19. Public types and reference index
+
+### 19.1 Importing public types
+
+The module in the **Import from** column is the path to use in a Python
+import. Use the linked sections for constructor signatures, task results,
+and runnable examples.
+
+| Import from | Public names | When to use them |
+| --- | --- | --- |
+| `nraven` | `Raven`, `SystemConfig`, `PathConfig`, `RuntimeConfig` | Open a workspace, set its policy limits, resolve user-specific paths, or read and update saved defaults. [Workspace lifecycle](#raven-lifecycle) · [Configuration](#raven-configuration) |
+| `nraven` | `ModelSpec`, `ModelRole`, `Provider`, `OllamaManager`, `LiteLLMManager` | Describe a model and its role, load an adapter, or configure the provider client directly. [Model configuration](#raven-models) · [Component adapters](#component-adapters) |
+| `nraven` | `Operation`, `OperationTask`, `OperationManager`, `OperationStatus`, `OperationType` | Run work, await task results, and identify its status and built-in operation name. [Operations and tasks](#raven-operations) |
+| `nraven` | `Event`, `EventType`, `EventStream` | Publish progress, interpret streamed records, and follow events using a saved cursor. [Event history](#raven-operations) |
+| `nraven` | `OperationRecord`, `OperationTaskRecord`, `RetryPolicy`, `OperationCleanupService`, `OperationCleanupResult` | Inspect saved operation and task status, check retry policy, or clean up expired operation history. [Operation records](#raven-operations) · [Retry and cleanup](#raven-failures) |
+| `nraven.core.errors` | `RavenError`, `ErrorCode` | Handle failures using a stable error code and inspect the details. [Handling errors](#raven-failures) |
+| `nraven` | `DiscoveryIssue`, `Knowledge`, `KnowledgeBase`, `Conversation`, `ConversationManager` | Work with stored resources or inspect discovery problems reported by their managers. [Knowledge storage](#component-knowledge) · [Conversations and discovery](#raven-conversations) |
+| `nraven` | `DocumentParser`, `ParsedDocument`, `ParsedElement`, `ElementType`, `NavigationType`, `ProvenanceAwareSemanticSplitter`, `SemanticSection` | Inspect parsed content and source ranges, or preview semantic sections before ingestion. [Parser example](#component-parser-example) · [Document processing](#component-ingestion) |
+| `nraven` | `IngestionPipeline`, `EmbeddedRetrievalPipeline`, `HierarchicalRetrievalPipeline`, `AgreementBasedRetrievalPipeline`, `VectorConditionedRetrievalPipeline`, `Reconstructor` | Index a source, select a retrieval strategy, or build highlighted file views. [Ingestion](#component-ingestion) · [Retrieval and reconstruction](#component-retrieval) |
+| `nraven` | `AgentHarness`, `AgentPolicy`, `Session`, `SessionRun` | Assemble an agent and run a saved session turn. The harness builds its `AgentPolicy` from the conversation and the `retrieval_mode` passed by the caller. [Harness and session](#component-session) |
+| `nraven.agent` | `RetrievalPipelines`, `RetrievalMode`, `AgentRun`, `AgentRunResult`, `EvidenceReference` | Supply the harness's retrieval pipelines, select a retrieval mode, and read the resulting answer and evidence. [Direct agent runs](#component-direct-agent-run) · [Collected session results](#raven-sessions) |
+| `llama_index.core.llms` | `ChatMessage` | Represent messages when importing a transcript or reading a saved conversation turn. [Committing a turn](#component-commit-turn) |
+
+### 19.2 Finding a component example by task
+
+| When you need to… | Start with… |
+| --- | --- |
+| Own the workspace startup, recovery, and shutdown order | Construct `PathConfig` and `OperationManager`, then start the resource managers that share them. [Section 12](#component-workspace) |
+| Supply a model adapter to a particular stage | Load an adapter through `Provider` or a provider-specific manager and pass the task result into that stage. [Section 13](#component-adapters) |
+| Read stored sections or search with a vector you already have | Get a `Knowledge` and call its read or search methods. [Section 14](#component-knowledge) |
+| Inspect source elements or try custom sentence splitting | Run `DocumentParser` and `ProvenanceAwareSemanticSplitter` directly. Use `IngestionPipeline` when ready to index the source. [Section 15](#component-ingestion) |
+| Select candidate files, tune scoring, or reconstruct the matches | Construct the embedded, hierarchical, agreement, or vector-conditioned pipeline, then pass the retrieval result to `Reconstructor`. [Section 16](#component-retrieval) |
+| Save an imported transcript or inspect memory | Commit a turn with `Conversation.append_turn()` and choose between saved history, model context, and vector recall. [Section 17](#component-conversation) |
+| Decide when an agent run becomes a saved turn | Call `AgentHarness.start()` to collect a run for inspection, or use `Session.generate_response()` to run and commit the turn. [Section 18](#component-session) |
+
+<div class="page-jump-target" id="api-guide-conclusion" aria-hidden="true"></div>
+
+## Conclusion
+
+Use `Raven` when an application needs one entry point for a workspace,
+models, and sessions. Use the component API when a particular stage needs
+its own dependencies or settings, such as a configured parser, an explicit
+set of files to score, or a transcript imported from another application.
+Components obtained from a started `Raven` can use the workspace it already
+owns. When constructing the workspace directly, share the path configuration
+and operation manager. At shutdown, close sessions and stop active work,
+then close the resource managers and model clients. Close the operation
+manager last. [Workspace shutdown](#component-workspace-shutdown)
+
+In either approach, await task results before starting work that depends on
+them. Use events for progress and saved history for later inspection. Keep
+the knowledge, file, and section identifiers returned by retrieval so the
+application can reconstruct the passages that support an answer.
+
+For settings, errors, and event names, consult the project catalogues.
+[Configuration]({{ site.repository_url }}/blob/main/README.md#configuration) ·
+[Error codes]({{ site.repository_url }}/blob/main/README.md#complete-error-code-catalogue) ·
+[Event reference]({{ site.repository_url }}/blob/main/README.md#event-reference)
+
+The architecture page explains how the stores and pipelines fit together.
+The integration guide shows how to connect to them over HTTP.
+[Architecture]({{ '/architecture/' | relative_url }}) ·
+[Integration guides]({{ '/integration_guides/' | relative_url }})
