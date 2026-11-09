@@ -11,7 +11,7 @@ from typing import Any, cast
 from llama_index.core.agent.workflow import FunctionAgent, ToolCall, ToolCallResult
 from llama_index.core.llms import ChatMessage
 
-from ..core.config import DEFAULT_PROMPT_CACHE_SIZE
+from ..core.config import DEFAULT_PROMPT_CACHE_SIZE, RuntimeConfig
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
 from ..core.operations import Operation, OperationManager, OperationType
@@ -50,7 +50,6 @@ class AgentHarness:
         *,
         reconstructor: Reconstructor | None = None,
         max_iterations: int = 10,
-        top_k: int = 3,
         max_cached_prompts: int = DEFAULT_PROMPT_CACHE_SIZE,
         agent_factory: Callable[..., Any] = FunctionAgent,
     ) -> None:
@@ -58,8 +57,6 @@ class AgentHarness:
             raise ValueError("llm is required")
         if max_iterations <= 0:
             raise ValueError("max_iterations must be positive")
-        if top_k <= 0:
-            raise ValueError("top_k must be positive")
         if (
             isinstance(max_cached_prompts, bool)
             or not isinstance(max_cached_prompts, int)
@@ -79,7 +76,6 @@ class AgentHarness:
             operation_manager,
         )
         self._max_iterations = max_iterations
-        self._top_k = top_k
         self._max_cached_prompts = max_cached_prompts
         self._agent_factory = agent_factory
         self._prompt_cache: OrderedDict[tuple[Any, ...], _CachedPrompt] = (
@@ -92,20 +88,16 @@ class AgentHarness:
         return self._max_iterations
 
 
-    @property
-    def top_k(self) -> int:
-        return self._top_k
-
-
     async def start(
         self,
         conversation: Conversation,
         user_query: str,
         *,
         retrieval_mode: RetrievalMode | str | None = None,
+        runtime_config: RuntimeConfig | None = None,
         operation: Operation | None = None,
     ) -> AgentRun:
-        """Start one agent task in a new or caller-owned operation."""
+        """Start an agent task with one snapshot of its retrieval defaults."""
         query = user_query.strip() if isinstance(user_query, str) else ""
         if not query:
             raise RavenError(
@@ -116,7 +108,7 @@ class AgentHarness:
             conversation,
             retrieval_mode,
             max_iterations=self._max_iterations,
-            top_k=self._top_k,
+            runtime_config=runtime_config if runtime_config is not None else RuntimeConfig(),
         )
         transcript = AgentTranscript.from_query(query)
 
@@ -193,7 +185,7 @@ class AgentHarness:
                 max_iterations=policy.max_iterations,
                 early_stopping_method="generate",
             )
-            translator = WorkflowEventTranslator(policy.max_iterations)
+            translator = WorkflowEventTranslator(policy)
             evidence: dict[tuple[str, str, str], dict[str, str]] = {}
             pending_response_events: list[Event] = []
 
@@ -316,8 +308,7 @@ class AgentHarness:
         preferences = conversation.get_preferences()
         key = (
             conversation.conversation_id,
-            policy.conversation_type,
-            policy.knowledge_name,
+            policy.scope,
             policy.retrieval_mode,
             tuple(
                 (preference["preference_id"], preference["text"])

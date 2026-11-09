@@ -37,6 +37,7 @@ class ErrorCode(StrEnum):
     RETRIEVAL_SCORING_INVALID = "retrieval_scoring_invalid"
     FILE_ALREADY_EXISTS = "file_already_exists"
     FILE_NOT_FOUND = "file_not_found"
+    FILE_ID_NAME_MISMATCH = "file_id_name_mismatch"
     SECTION_NOT_FOUND = "section_not_found"
     LLM_MODEL_REQUIRED = "llm_model_required"
     EMBEDDING_MODEL_REQUIRED = "embedding_model_required"

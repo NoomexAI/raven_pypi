@@ -15,6 +15,7 @@ from .core.operations import (
     OperationType,
     RetryPolicy,
 )
+from .core.retrieval_scope import RetrievalScope, RetrievalSelection
 from .data_management.conversation_manager import Conversation, ConversationManager
 from .data_management.discovery import DiscoveryIssue
 from .data_management.knowledge_base import Knowledge, KnowledgeBase
@@ -84,6 +85,8 @@ __all__ = [
     "RuntimeConfig",
     "Reconstructor",
     "RetrievalPipeline",
+    "RetrievalScope",
+    "RetrievalSelection",
     "SemanticSection",
     "SemanticUnit",
     "Session",

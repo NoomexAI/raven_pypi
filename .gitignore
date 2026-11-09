@@ -101,6 +101,7 @@ Desktop.ini
 /v1/
 
 # Knowledge data (vector stores + file.json + meta.json)
+/raven-home/
 /data/knowledge_base/
 /data/conversations/
 /operations/

@@ -238,6 +238,11 @@ class RuntimeConfig:
     chunk_size: int = 512
     chunk_overlap: int = 50
     retrieval_top_k: int = 3
+    retrieval_top_k_knowledge: int = 2
+    retrieval_top_k_files: int = 5
+    full_retrieval: bool = False
+    retrieval_max_per_read: int = 50
+    retrieval_anchor_count: int = 4
     agent_max_iterations: int = 10
     memory_token_limit: int = 4_000
     memory_top_k: int = 5
@@ -267,6 +272,9 @@ class RuntimeConfig:
             "max_extraction_retries",
             "chunk_size",
             "retrieval_top_k",
+            "retrieval_top_k_knowledge",
+            "retrieval_top_k_files",
+            "retrieval_max_per_read",
             "agent_max_iterations",
             "memory_token_limit",
             "memory_top_k",
@@ -281,6 +289,17 @@ class RuntimeConfig:
             "chunk_overlap",
             ErrorCode.INVALID_RUNTIME_CONFIG,
         )
+        _require_nonnegative_int(
+            self.retrieval_anchor_count,
+            "retrieval_anchor_count",
+            ErrorCode.INVALID_RUNTIME_CONFIG,
+        )
+        if not isinstance(self.full_retrieval, bool):
+            _invalid_config(
+                ErrorCode.INVALID_RUNTIME_CONFIG,
+                "full_retrieval",
+                "must be a boolean",
+            )
         if self.chunk_overlap >= self.chunk_size:
             _invalid_config(
                 ErrorCode.INVALID_RUNTIME_CONFIG,
@@ -291,12 +310,14 @@ class RuntimeConfig:
 
     def validate_against(self, system_config: SystemConfig) -> None:
         """Enforce immutable process-wide safety limits."""
-        if self.retrieval_top_k > system_config.max_retrieval_top_k:
-            _invalid_config(
-                ErrorCode.INVALID_RUNTIME_CONFIG,
-                "retrieval_top_k",
-                f"cannot exceed the system maximum of {system_config.max_retrieval_top_k}",
-            )
+        maximum = system_config.max_retrieval_top_k
+        for field_name in ("retrieval_top_k", "retrieval_top_k_knowledge", "retrieval_top_k_files"):
+            if getattr(self, field_name) > maximum:
+                _invalid_config(
+                    ErrorCode.INVALID_RUNTIME_CONFIG,
+                    field_name,
+                    f"cannot exceed the system maximum of {maximum}",
+                )
         if self.agent_max_iterations > system_config.max_agent_iterations:
             _invalid_config(
                 ErrorCode.INVALID_RUNTIME_CONFIG,
@@ -358,19 +379,35 @@ class RuntimeConfig:
 
 
     @classmethod
+    def defaults(cls, system_config: SystemConfig) -> "RuntimeConfig":
+        """Build defaults that fit the system's retrieval ceiling."""
+        config = cls()
+        maximum = system_config.max_retrieval_top_k
+        return replace(
+            config,
+            retrieval_top_k=min(config.retrieval_top_k, maximum),
+            retrieval_top_k_knowledge=min(config.retrieval_top_k_knowledge, maximum),
+            retrieval_top_k_files=min(config.retrieval_top_k_files, maximum),
+        )
+
+
+    @classmethod
     def load_or_create(
         cls,
         path: str | Path,
         system_config: SystemConfig,
     ) -> "RuntimeConfig":
         settings_path = Path(path)
-        if settings_path.exists():
-            config = cls.load(settings_path)
+        defaults = cls.defaults(system_config)
+        exists = settings_path.exists()
+        if exists:
+            stored = _read_json_object(settings_path, "runtime configuration")
+            config = cls.from_dict({**defaults.to_dict(), **stored})
         else:
-            config = cls()
-            config.validate_against(system_config)
-            config.save(settings_path)
+            config = defaults
         config.validate_against(system_config)
+        if not exists:
+            config.save(settings_path)
         return config
 
 

@@ -12,7 +12,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
 from ..core.operations import Operation, OperationManager, OperationTask, OperationType
-from ..data_management.knowledge_base import KnowledgeBase
+from ..core.retrieval_scope import RetrievalScope
+from ..data_management.knowledge_base import Knowledge, KnowledgeBase
 
 
 class RetrievalPipeline:
@@ -55,20 +56,6 @@ class RetrievalPipeline:
     def _raise_if_cancelled(operation: Operation | None) -> None:
         if operation is not None:
             operation.raise_if_cancelled()
-
-
-    async def _knowledge_names(self) -> list[str]:
-        summaries = await self._knowledge_base.list()
-        return [str(summary["safe_name"]) for summary in summaries]
-
-
-    def _sections_of(self, knowledge_name: str) -> list[dict[str, Any]]:
-        knowledge = self._knowledge_base.get(knowledge_name)
-        sections: list[dict[str, Any]] = []
-        for file_info in knowledge.list_files():
-            for section in knowledge.list_sections(file_info["file_name"]):
-                sections.append({**section, "knowledge_name": knowledge_name})
-        return sections
 
 
     def _knowledge_summary(self, knowledge_name: str) -> str:
@@ -164,171 +151,124 @@ class EmbeddedRetrievalPipeline(RetrievalPipeline):
         self._embed_model = embed_model
 
 
-    async def retrieve_local_context(
+    async def _embed_query(
         self,
-        knowledge_name: str,
         user_query: str,
-        top_k: int = 3,
-        *,
-        operation: Operation | None = None,
-    ) -> OperationTask:
-        active_operation = operation or await self._operation_manager.create(
-            OperationType.RETRIEVAL_EMBEDDED_LOCAL
-        )
-        return await active_operation.run(
-            OperationType.RETRIEVAL_EMBEDDED_LOCAL,
-            lambda active_operation: self._retrieve_local_context(
-                knowledge_name,
-                user_query,
-                top_k,
-                operation=active_operation,
-            ),
-        )
-
-
-    async def _retrieve_local_context(
-        self,
-        knowledge_name: str,
-        user_query: str,
-        top_k: int = 3,
-        *,
+        knowledges: list[Knowledge],
         operation: Operation,
-    ) -> list[dict[str, str]]:
-        """Retrieve sections from one knowledge database."""
-        if top_k <= 0:
-            return []
-
-        await self._emit(
-            operation,
-            EventType.RETRIEVAL_EMBEDDED_STARTED,
-            {
-                "scope": "local",
-                "knowledge": knowledge_name,
-                "query": user_query,
-                "top_k": top_k,
-            },
-        )
-
-        try:
-            knowledge = self._knowledge_base.get(knowledge_name)
+    ) -> list[float]:
+        for knowledge in knowledges:
+            self._raise_if_cancelled(operation)
             await knowledge.validate_embedding_model(self._embed_model)
-            self._raise_if_cancelled(operation)
-            query_vector = await self._embed_model.aget_query_embedding(user_query)
-            self._raise_if_cancelled(operation)
-            hits = await knowledge.search(query_vector, top_k=max(top_k * 4, top_k))
-            results: list[dict[str, str]] = []
-            seen: set[str] = set()
-
-            for hit in hits:
-                self._raise_if_cancelled(operation)
-                section_id = hit.get("section_id")
-                if not isinstance(section_id, str) or section_id in seen:
-                    continue
-
-                section = await asyncio.to_thread(knowledge.get_section, section_id)
-                if section is None:
-                    continue
-
-                seen.add(section_id)
-                results.append(
-                    self._section_result(knowledge_name, section, section_id)
-                )
-                if len(results) >= top_k:
-                    break
-
-            await self._emit(
-                operation,
-                EventType.RETRIEVAL_EMBEDDED_COMPLETED,
-                {
-                    "scope": "local",
-                    "knowledge": knowledge_name,
-                    "count": len(results),
-                    "section_ids": [result["section_id"] for result in results],
-                },
-            )
-            return results
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            await self._emit(
-                operation,
-                EventType.RETRIEVAL_EMBEDDED_FAILED,
-                {
-                    "scope": "local",
-                    "knowledge": knowledge_name,
-                    "error": error_payload(exc),
-                },
-            )
-            raise
+        self._raise_if_cancelled(operation)
+        return await self._embed_model.aget_query_embedding(user_query)
 
 
-    async def retrieve_global_context(
+    async def _shortlist_files(
         self,
         user_query: str,
-        top_k: int = 3,
+        resolved_file_ids: dict[str, frozenset[str]],
+        top_k_files: int,
         *,
+        operation: Operation,
+    ) -> list[tuple[str, str]]:
+        if top_k_files <= 0:
+            return []
+        targets = [
+            (self._knowledge_base.get(name), file_ids)
+            for name, file_ids in resolved_file_ids.items()
+            if file_ids
+        ]
+        if not targets:
+            return []
+
+        query_vector = await self._embed_query(user_query, [knowledge for knowledge, _ in targets], operation)
+        ranked_files: list[tuple[str, str, float]] = []
+        for knowledge, file_ids in targets:
+            self._raise_if_cancelled(operation)
+            hits = await knowledge.search_files(query_vector, file_ids=file_ids, top_k=top_k_files)
+            ranked_files.extend((knowledge.name, file_id, score) for file_id, score in hits)
+
+        ranked_files.sort(key=lambda hit: hit[2], reverse=True)
+        return [(name, file_id) for name, file_id, _score in ranked_files[:top_k_files]]
+
+
+    async def retrieve(
+        self,
+        user_query: str,
+        *,
+        scope: RetrievalScope,
+        top_k: int = 3,
         operation: Operation | None = None,
     ) -> OperationTask:
+        """Retrieve sections from the documents selected by scope."""
+        if not isinstance(scope, RetrievalScope):
+            raise TypeError("scope must be a RetrievalScope")
         active_operation = operation or await self._operation_manager.create(
-            OperationType.RETRIEVAL_EMBEDDED_GLOBAL
+            OperationType.RETRIEVAL_EMBEDDED
         )
         return await active_operation.run(
-            OperationType.RETRIEVAL_EMBEDDED_GLOBAL,
-            lambda active_operation: self._retrieve_global_context(
+            OperationType.RETRIEVAL_EMBEDDED,
+            lambda active_operation: self._retrieve_across_knowledges(
                 user_query,
                 top_k,
+                scope=scope,
                 operation=active_operation,
             ),
         )
 
 
-    async def _retrieve_global_context(
+    async def _retrieve_across_knowledges(
         self,
         user_query: str,
         top_k: int = 3,
         *,
+        scope: RetrievalScope,
+        resolved_file_ids: dict[str, frozenset[str]] | None = None,
         operation: Operation,
     ) -> list[dict[str, str]]:
-        """Retrieve sections across all knowledge databases."""
+        """Search eligible knowledges and rank their combined vector hits."""
         if top_k <= 0:
             return []
 
+        event_scope = scope.model_dump(mode="json")
         await self._emit(
             operation,
             EventType.RETRIEVAL_EMBEDDED_STARTED,
             {
-                "scope": "global",
+                "scope": event_scope,
                 "query": user_query,
                 "top_k": top_k,
             },
         )
 
         try:
-            knowledge_names = await self._knowledge_names()
+            if resolved_file_ids is None:
+                resolved_file_ids = await self._knowledge_base.resolve_scope(scope)
             knowledges = [
-                (name, self._knowledge_base.get(name))
-                for name in knowledge_names
+                (name, self._knowledge_base.get(name), file_ids)
+                for name, file_ids in resolved_file_ids.items()
+                if file_ids
             ]
-            for _name, knowledge in knowledges:
-                await knowledge.validate_embedding_model(self._embed_model)
-            self._raise_if_cancelled(operation)
-            query_vector = await self._embed_model.aget_query_embedding(user_query)
-            self._raise_if_cancelled(operation)
-
             ranked_hits: list[dict[str, Any]] = []
-            for knowledge_name, knowledge in knowledges:
-                self._raise_if_cancelled(operation)
-                hits = await knowledge.search(
-                    query_vector,
-                    top_k=max(top_k * 4, top_k),
+            if knowledges:
+                query_vector = await self._embed_query(
+                    user_query, [knowledge for _, knowledge, _ in knowledges], operation
                 )
-                ranked_hits.extend(
-                    {
-                        "knowledge_name": knowledge_name,
-                        **hit,
-                    }
-                    for hit in hits
-                )
+                for knowledge_name, knowledge, file_ids in knowledges:
+                    self._raise_if_cancelled(operation)
+                    hits = await knowledge.search(
+                        query_vector,
+                        top_k=max(top_k * 4, top_k),
+                        file_ids=file_ids,
+                    )
+                    ranked_hits.extend(
+                        {
+                            "knowledge_name": knowledge_name,
+                            **hit,
+                        }
+                        for hit in hits
+                    )
 
             ranked_hits.sort(
                 key=lambda hit: float(hit.get("score", 0.0)),
@@ -366,7 +306,7 @@ class EmbeddedRetrievalPipeline(RetrievalPipeline):
                 operation,
                 EventType.RETRIEVAL_EMBEDDED_COMPLETED,
                 {
-                    "scope": "global",
+                    "scope": event_scope,
                     "count": len(results),
                     "section_ids": [result["section_id"] for result in results],
                 },
@@ -379,7 +319,7 @@ class EmbeddedRetrievalPipeline(RetrievalPipeline):
                 operation,
                 EventType.RETRIEVAL_EMBEDDED_FAILED,
                 {
-                    "scope": "global",
+                    "scope": event_scope,
                     "error": error_payload(exc),
                 },
             )
@@ -428,6 +368,39 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
                     "KNOWLEDGES TO SCORE:\n{candidates}",
                 ),
             ]
+        )
+
+
+    async def retrieve(
+        self,
+        user_query: str,
+        *,
+        scope: RetrievalScope,
+        top_k_section: int = 3,
+        top_k_knowledge: int = 2,
+        full_retrieval: bool = False,
+        max_per_read: int = 50,
+        anchor_count: int = 4,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        """Score sections from the documents selected by scope."""
+        if not isinstance(scope, RetrievalScope):
+            raise TypeError("scope must be a RetrievalScope")
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.RETRIEVAL_HIERARCHICAL
+        )
+        return await active_operation.run(
+            OperationType.RETRIEVAL_HIERARCHICAL,
+            lambda active_operation: self._retrieve_across_knowledges(
+                user_query,
+                top_k_section,
+                scope=scope,
+                top_k_knowledge=top_k_knowledge,
+                full_retrieval=full_retrieval,
+                max_per_read=max_per_read,
+                anchor_count=anchor_count,
+                operation=active_operation,
+            ),
         )
 
 
@@ -659,6 +632,19 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
         return batches
 
 
+    @staticmethod
+    def _sections_of(
+        knowledge: Knowledge,
+        knowledge_name: str,
+        file_ids: frozenset[str],
+    ) -> list[dict[str, Any]]:
+        return [
+            {**section, "knowledge_name": knowledge_name}
+            for file_id in sorted(file_ids)
+            for section in knowledge.list_sections_by_file_id(file_id)
+        ]
+
+
     async def _score_sections(
         self,
         user_query: str,
@@ -666,14 +652,17 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
         top_k: int,
         *,
         operation: Operation | None,
-        mode: str,
         max_per_read: int,
         anchor_count: int,
+        file_ids_by_knowledge: dict[str, frozenset[str]],
     ) -> list[dict[str, str]]:
         candidates: list[dict[str, Any]] = []
         for knowledge_name in knowledge_names:
+            self._raise_if_cancelled(operation)
+            knowledge = self._knowledge_base.get(knowledge_name)
+            file_ids = file_ids_by_knowledge[knowledge_name]
             candidates.extend(
-                await asyncio.to_thread(self._sections_of, knowledge_name)
+                await asyncio.to_thread(self._sections_of, knowledge, knowledge_name, file_ids)
             )
 
         selected = await self._scored_select(
@@ -684,143 +673,33 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
             prompt=self._section_prompt,
             output_cls=SectionScoreOutput,
             id_field="section_id",
-            mode=mode,
+            mode="scoped_section",
             max_per_read=max_per_read,
             anchor_count=anchor_count,
         )
         return self._trim_output(selected)
 
 
-    async def retrieve_local_context(
-        self,
-        knowledge_name: str,
-        user_query: str,
-        top_k: int = 3,
-        *,
-        max_per_read: int = 50,
-        anchor_count: int = 4,
-        operation: Operation | None = None,
-    ) -> OperationTask:
-        active_operation = operation or await self._operation_manager.create(
-            OperationType.RETRIEVAL_HIERARCHICAL_LOCAL
-        )
-        return await active_operation.run(
-            OperationType.RETRIEVAL_HIERARCHICAL_LOCAL,
-            lambda active_operation: self._retrieve_local_context(
-                knowledge_name,
-                user_query,
-                top_k,
-                max_per_read=max_per_read,
-                anchor_count=anchor_count,
-                operation=active_operation,
-            ),
-        )
-
-
-    async def _retrieve_local_context(
-        self,
-        knowledge_name: str,
-        user_query: str,
-        top_k: int = 3,
-        *,
-        max_per_read: int = 50,
-        anchor_count: int = 4,
-        operation: Operation,
-    ) -> list[dict[str, str]]:
-        """Rank sections from one knowledge using metadata."""
-        await self._emit(
-            operation,
-            EventType.RETRIEVAL_HIERARCHICAL_STARTED,
-            {
-                "scope": "local",
-                "knowledge": knowledge_name,
-                "query": user_query,
-                "top_k": top_k,
-            },
-        )
-
-        try:
-            self._raise_if_cancelled(operation)
-            result = await self._score_sections(
-                user_query,
-                [knowledge_name],
-                top_k,
-                operation=operation,
-                mode="local",
-                max_per_read=max_per_read,
-                anchor_count=anchor_count,
-            )
-            await self._emit(
-                operation,
-                EventType.RETRIEVAL_HIERARCHICAL_COMPLETED,
-                {
-                    "scope": "local",
-                    "knowledge": knowledge_name,
-                    "count": len(result),
-                    "section_ids": [item["section_id"] for item in result],
-                },
-            )
-            return result
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            await self._emit(
-                operation,
-                EventType.RETRIEVAL_HIERARCHICAL_FAILED,
-                {
-                    "scope": "local",
-                    "knowledge": knowledge_name,
-                    "error": error_payload(exc),
-                },
-            )
-            raise
-
-
-    async def retrieve_global_context(
+    async def _retrieve_across_knowledges(
         self,
         user_query: str,
         top_k_section: int = 3,
         *,
-        top_k_knowledge: int = 2,
-        full_retrieval: bool = False,
-        max_per_read: int = 50,
-        anchor_count: int = 4,
-        operation: Operation | None = None,
-    ) -> OperationTask:
-        active_operation = operation or await self._operation_manager.create(
-            OperationType.RETRIEVAL_HIERARCHICAL_GLOBAL
-        )
-        return await active_operation.run(
-            OperationType.RETRIEVAL_HIERARCHICAL_GLOBAL,
-            lambda active_operation: self._retrieve_global_context(
-                user_query,
-                top_k_section,
-                top_k_knowledge=top_k_knowledge,
-                full_retrieval=full_retrieval,
-                max_per_read=max_per_read,
-                anchor_count=anchor_count,
-                operation=active_operation,
-            ),
-        )
-
-
-    async def _retrieve_global_context(
-        self,
-        user_query: str,
-        top_k_section: int = 3,
-        *,
+        scope: RetrievalScope,
+        resolved_file_ids: dict[str, frozenset[str]] | None = None,
         top_k_knowledge: int = 2,
         full_retrieval: bool = False,
         max_per_read: int = 50,
         anchor_count: int = 4,
         operation: Operation,
     ) -> list[dict[str, str]]:
-        """Rank knowledge summaries, then rank sections within selected knowledges."""
+        """Optionally shortlist knowledges, then rank their eligible sections."""
+        event_scope = scope.model_dump(mode="json")
         await self._emit(
             operation,
             EventType.RETRIEVAL_HIERARCHICAL_STARTED,
             {
-                "scope": "global",
+                "scope": event_scope,
                 "query": user_query,
                 "top_k": top_k_section,
             },
@@ -828,8 +707,10 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
 
         try:
             self._raise_if_cancelled(operation)
-            knowledge_names = await self._knowledge_names()
-            if not full_retrieval:
+            if resolved_file_ids is None:
+                resolved_file_ids = await self._knowledge_base.resolve_scope(scope)
+            knowledge_names = [name for name, file_ids in resolved_file_ids.items() if file_ids]
+            if not full_retrieval and not scope.selections and len(knowledge_names) > 1:
                 knowledge_candidates = [
                     {
                         "knowledge_name": knowledge_name,
@@ -845,7 +726,7 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
                     prompt=self._knowledge_prompt,
                     output_cls=KnowledgeScoreOutput,
                     id_field="knowledge_name",
-                    mode="global_knowledge",
+                    mode="scoped_knowledge",
                     max_per_read=max_per_read,
                     anchor_count=anchor_count,
                 )
@@ -859,15 +740,15 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
                 knowledge_names,
                 top_k_section,
                 operation=operation,
-                mode="global_section",
                 max_per_read=max_per_read,
                 anchor_count=anchor_count,
+                file_ids_by_knowledge=resolved_file_ids,
             )
             await self._emit(
                 operation,
                 EventType.RETRIEVAL_HIERARCHICAL_COMPLETED,
                 {
-                    "scope": "global",
+                    "scope": event_scope,
                     "count": len(result),
                     "section_ids": [item["section_id"] for item in result],
                 },
@@ -880,126 +761,11 @@ class HierarchicalRetrievalPipeline(RetrievalPipeline):
                 operation,
                 EventType.RETRIEVAL_HIERARCHICAL_FAILED,
                 {
-                    "scope": "global",
+                    "scope": event_scope,
                     "error": error_payload(exc),
                 },
             )
             raise
-
-
-    async def retrieve_by_knowledge(
-        self,
-        user_query: str,
-        knowledge_names: list[str],
-        top_k_section: int = 5,
-        *,
-        max_per_read: int = 50,
-        anchor_count: int = 4,
-        operation: Operation | None = None,
-    ) -> OperationTask:
-        active_operation = operation or await self._operation_manager.create(
-            OperationType.RETRIEVAL_HIERARCHICAL_BY_KNOWLEDGE
-        )
-        return await active_operation.run(
-            OperationType.RETRIEVAL_HIERARCHICAL_BY_KNOWLEDGE,
-            lambda active_operation: self._retrieve_by_knowledge(
-                user_query,
-                knowledge_names,
-                top_k_section,
-                max_per_read=max_per_read,
-                anchor_count=anchor_count,
-                operation=active_operation,
-            ),
-        )
-
-
-    async def _retrieve_by_knowledge(
-        self,
-        user_query: str,
-        knowledge_names: list[str],
-        top_k_section: int = 5,
-        *,
-        max_per_read: int = 50,
-        anchor_count: int = 4,
-        operation: Operation,
-    ) -> list[dict[str, str]]:
-        """Rank sections within an explicit knowledge subset."""
-        self._raise_if_cancelled(operation)
-        result = await self._score_sections(
-            user_query,
-            knowledge_names,
-            top_k_section,
-            operation=operation,
-            mode="by_knowledge",
-            max_per_read=max_per_read,
-            anchor_count=anchor_count,
-        )
-        return result
-
-
-    async def retrieve_by_file(
-        self,
-        knowledge_name: str,
-        user_query: str,
-        file_names: list[str],
-        top_k: int = 5,
-        *,
-        max_per_read: int = 50,
-        anchor_count: int = 4,
-        operation: Operation | None = None,
-    ) -> OperationTask:
-        active_operation = operation or await self._operation_manager.create(
-            OperationType.RETRIEVAL_HIERARCHICAL_BY_FILE
-        )
-        return await active_operation.run(
-            OperationType.RETRIEVAL_HIERARCHICAL_BY_FILE,
-            lambda active_operation: self._retrieve_by_file(
-                knowledge_name,
-                user_query,
-                file_names,
-                top_k,
-                max_per_read=max_per_read,
-                anchor_count=anchor_count,
-                operation=active_operation,
-            ),
-        )
-
-
-    async def _retrieve_by_file(
-        self,
-        knowledge_name: str,
-        user_query: str,
-        file_names: list[str],
-        top_k: int = 5,
-        *,
-        max_per_read: int = 50,
-        anchor_count: int = 4,
-        operation: Operation,
-    ) -> list[dict[str, str]]:
-        """Rank sections within an explicit file subset."""
-        self._raise_if_cancelled(operation)
-        knowledge = self._knowledge_base.get(knowledge_name)
-        candidates: list[dict[str, Any]] = []
-        for file_name in file_names:
-            sections = await asyncio.to_thread(knowledge.list_sections, file_name)
-            candidates.extend(
-                {**section, "knowledge_name": knowledge_name}
-                for section in sections
-            )
-
-        selected = await self._scored_select(
-            user_query,
-            candidates,
-            top_k,
-            operation=operation,
-            prompt=self._section_prompt,
-            output_cls=SectionScoreOutput,
-            id_field="section_id",
-            mode="by_file",
-            max_per_read=max_per_read,
-            anchor_count=anchor_count,
-        )
-        return self._trim_output(selected)
 
 
 def _file_id_of(section_id: str) -> str:
@@ -1008,7 +774,7 @@ def _file_id_of(section_id: str) -> str:
 
 
 class AgreementBasedRetrievalPipeline(RetrievalPipeline):
-    """Compare embedded and hierarchical retrieval using the v1 contract."""
+    """Compare the ranked evidence from embedded and hierarchical retrieval."""
 
     def __init__(
         self,
@@ -1022,22 +788,54 @@ class AgreementBasedRetrievalPipeline(RetrievalPipeline):
         self._hierarchical = hierarchical_pipeline
 
 
+    async def retrieve(
+        self,
+        user_query: str,
+        *,
+        scope: RetrievalScope,
+        top_k: int = 3,
+        top_k_knowledge: int = 2,
+        full_retrieval: bool = False,
+        max_per_read: int = 50,
+        anchor_count: int = 4,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        """Compare two ranked lists drawn from one document scope."""
+        if not isinstance(scope, RetrievalScope):
+            raise TypeError("scope must be a RetrievalScope")
+        active_operation = operation or await self._operation_manager.create(
+            OperationType.RETRIEVAL_AGREEMENT
+        )
+        return await active_operation.run(
+            OperationType.RETRIEVAL_AGREEMENT,
+            lambda active_operation: self._retrieve_across_knowledges(
+                user_query,
+                top_k,
+                scope=scope,
+                top_k_knowledge=top_k_knowledge,
+                full_retrieval=full_retrieval,
+                max_per_read=max_per_read,
+                anchor_count=anchor_count,
+                operation=active_operation,
+            ),
+        )
+
+
     @staticmethod
     def check_agreement(
         embedded_results: list[dict[str, str]],
         hierarchical_results: list[dict[str, str]],
     ) -> str:
-        """Classify results using the existing v1 comparison semantics."""
-        if embedded_results == hierarchical_results:
+        """Compare section order for strong agreement and file overlap for weak agreement."""
+        embedded_sections = [(item["knowledge_name"], item["section_id"]) for item in embedded_results]
+        hierarchical_sections = [(item["knowledge_name"], item["section_id"]) for item in hierarchical_results]
+        if embedded_sections and embedded_sections == hierarchical_sections:
             return "Strong Agreement"
 
-        for embedded, hierarchical in zip(embedded_results, hierarchical_results):
-            embedded_file_id = _file_id_of(embedded.get("section_id", ""))
-            hierarchical_file_id = _file_id_of(
-                hierarchical.get("section_id", "")
-            )
-            if embedded_file_id != hierarchical_file_id:
-                return "Disagreement"
+        embedded_files = {(knowledge, _file_id_of(section_id)) for knowledge, section_id in embedded_sections}
+        hierarchical_files = {(knowledge, _file_id_of(section_id)) for knowledge, section_id in hierarchical_sections}
+        if embedded_files.isdisjoint(hierarchical_files):
+            return "Disagreement"
 
         return "Weak Agreement"
 
@@ -1063,55 +861,25 @@ class AgreementBasedRetrievalPipeline(RetrievalPipeline):
         }
 
 
-    async def retrieve_local_context(
+    async def _retrieve_across_knowledges(
         self,
-        knowledge_name: str,
         user_query: str,
         top_k: int = 3,
         *,
-        embedded_top_k: int = 4,
-        hierarchical_top_k: int = 4,
-        max_per_read: int = 50,
-        anchor_count: int = 4,
-        operation: Operation | None = None,
-    ) -> OperationTask:
-        active_operation = operation or await self._operation_manager.create(
-            OperationType.RETRIEVAL_AGREEMENT_LOCAL
-        )
-        return await active_operation.run(
-            OperationType.RETRIEVAL_AGREEMENT_LOCAL,
-            lambda active_operation: self._retrieve_local_context(
-                knowledge_name,
-                user_query,
-                top_k,
-                embedded_top_k=embedded_top_k,
-                hierarchical_top_k=hierarchical_top_k,
-                max_per_read=max_per_read,
-                anchor_count=anchor_count,
-                operation=active_operation,
-            ),
-        )
-
-
-    async def _retrieve_local_context(
-        self,
-        knowledge_name: str,
-        user_query: str,
-        top_k: int = 3,
-        *,
-        embedded_top_k: int = 4,
-        hierarchical_top_k: int = 4,
+        scope: RetrievalScope,
+        top_k_knowledge: int = 2,
+        full_retrieval: bool = False,
         max_per_read: int = 50,
         anchor_count: int = 4,
         operation: Operation,
     ) -> dict[str, Any]:
-        """Compare local embedded and hierarchical retrieval."""
+        """Compare embedded and hierarchical retrieval across eligible knowledges."""
+        event_scope = scope.model_dump(mode="json")
         await self._emit(
             operation,
             EventType.RETRIEVAL_AGREEMENT_STARTED,
             {
-                "scope": "local",
-                "knowledge": knowledge_name,
+                "scope": event_scope,
                 "query": user_query,
                 "top_k": top_k,
             },
@@ -1119,21 +887,32 @@ class AgreementBasedRetrievalPipeline(RetrievalPipeline):
 
         try:
             self._raise_if_cancelled(operation)
-            embedded_task = await self._embedded.retrieve_local_context(
-                knowledge_name,
-                user_query,
-                top_k=embedded_top_k,
-                operation=operation,
+            resolved_file_ids = await self._knowledge_base.resolve_scope(scope)
+            embedded_task = await operation.run(
+                OperationType.RETRIEVAL_EMBEDDED,
+                lambda active_operation: self._embedded._retrieve_across_knowledges(
+                    user_query,
+                    top_k,
+                    scope=scope,
+                    resolved_file_ids=resolved_file_ids,
+                    operation=active_operation,
+                ),
             )
             embedded_results = await embedded_task.result()
             self._raise_if_cancelled(operation)
-            hierarchical_task = await self._hierarchical.retrieve_local_context(
-                knowledge_name,
-                user_query,
-                top_k=hierarchical_top_k,
-                max_per_read=max_per_read,
-                anchor_count=anchor_count,
-                operation=operation,
+            hierarchical_task = await operation.run(
+                OperationType.RETRIEVAL_HIERARCHICAL,
+                lambda active_operation: self._hierarchical._retrieve_across_knowledges(
+                    user_query,
+                    top_k,
+                    scope=scope,
+                    resolved_file_ids=resolved_file_ids,
+                    top_k_knowledge=top_k_knowledge,
+                    full_retrieval=full_retrieval,
+                    max_per_read=max_per_read,
+                    anchor_count=anchor_count,
+                    operation=active_operation,
+                ),
             )
             hierarchical_results = await hierarchical_task.result()
             agreement = self.check_agreement(
@@ -1150,8 +929,7 @@ class AgreementBasedRetrievalPipeline(RetrievalPipeline):
                 operation,
                 EventType.RETRIEVAL_AGREEMENT_COMPLETED,
                 {
-                    "scope": "local",
-                    "knowledge": knowledge_name,
+                    "scope": event_scope,
                     "agreement_type": agreement,
                 },
             )
@@ -1163,116 +941,7 @@ class AgreementBasedRetrievalPipeline(RetrievalPipeline):
                 operation,
                 EventType.RETRIEVAL_AGREEMENT_FAILED,
                 {
-                    "scope": "local",
-                    "knowledge": knowledge_name,
-                    "error": error_payload(exc),
-                },
-            )
-            raise
-
-
-    async def retrieve_global_context(
-        self,
-        user_query: str,
-        top_k: int = 3,
-        *,
-        embedded_top_k: int = 4,
-        hierarchical_top_k: int = 4,
-        top_k_knowledge: int = 2,
-        full_retrieval: bool = False,
-        max_per_read: int = 50,
-        anchor_count: int = 4,
-        operation: Operation | None = None,
-    ) -> OperationTask:
-        active_operation = operation or await self._operation_manager.create(
-            OperationType.RETRIEVAL_AGREEMENT_GLOBAL
-        )
-        return await active_operation.run(
-            OperationType.RETRIEVAL_AGREEMENT_GLOBAL,
-            lambda active_operation: self._retrieve_global_context(
-                user_query,
-                top_k,
-                embedded_top_k=embedded_top_k,
-                hierarchical_top_k=hierarchical_top_k,
-                top_k_knowledge=top_k_knowledge,
-                full_retrieval=full_retrieval,
-                max_per_read=max_per_read,
-                anchor_count=anchor_count,
-                operation=active_operation,
-            ),
-        )
-
-
-    async def _retrieve_global_context(
-        self,
-        user_query: str,
-        top_k: int = 3,
-        *,
-        embedded_top_k: int = 4,
-        hierarchical_top_k: int = 4,
-        top_k_knowledge: int = 2,
-        full_retrieval: bool = False,
-        max_per_read: int = 50,
-        anchor_count: int = 4,
-        operation: Operation,
-    ) -> dict[str, Any]:
-        """Compare global embedded and hierarchical retrieval."""
-        await self._emit(
-            operation,
-            EventType.RETRIEVAL_AGREEMENT_STARTED,
-            {
-                "scope": "global",
-                "query": user_query,
-                "top_k": top_k,
-            },
-        )
-
-        try:
-            self._raise_if_cancelled(operation)
-            embedded_task = await self._embedded.retrieve_global_context(
-                user_query,
-                top_k=embedded_top_k,
-                operation=operation,
-            )
-            embedded_results = await embedded_task.result()
-            self._raise_if_cancelled(operation)
-            hierarchical_task = await self._hierarchical.retrieve_global_context(
-                user_query,
-                top_k_section=hierarchical_top_k,
-                top_k_knowledge=top_k_knowledge,
-                full_retrieval=full_retrieval,
-                max_per_read=max_per_read,
-                anchor_count=anchor_count,
-                operation=operation,
-            )
-            hierarchical_results = await hierarchical_task.result()
-            agreement = self.check_agreement(
-                embedded_results,
-                hierarchical_results,
-            )
-            result = self._build_result(
-                agreement,
-                embedded_results,
-                hierarchical_results,
-                top_k,
-            )
-            await self._emit(
-                operation,
-                EventType.RETRIEVAL_AGREEMENT_COMPLETED,
-                {
-                    "scope": "global",
-                    "agreement_type": agreement,
-                },
-            )
-            return result
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            await self._emit(
-                operation,
-                EventType.RETRIEVAL_AGREEMENT_FAILED,
-                {
-                    "scope": "global",
+                    "scope": event_scope,
                     "error": error_payload(exc),
                 },
             )
@@ -1294,27 +963,30 @@ class VectorConditionedRetrievalPipeline(RetrievalPipeline):
         self._hierarchical = hierarchical_pipeline
 
 
-    async def retrieve_local_context(
+    async def retrieve(
         self,
-        knowledge_name: str,
         user_query: str,
-        top_k: int = 5,
         *,
-        embedded_top_k: int = 5,
+        scope: RetrievalScope,
+        top_k_files: int = 5,
+        top_k_sections: int = 5,
         max_per_read: int = 50,
         anchor_count: int = 4,
         operation: Operation | None = None,
     ) -> OperationTask:
+        """Shortlist files by vector similarity, then score sections within them."""
+        if not isinstance(scope, RetrievalScope):
+            raise TypeError("scope must be a RetrievalScope")
         active_operation = operation or await self._operation_manager.create(
-            OperationType.RETRIEVAL_VECTOR_CONDITIONED_LOCAL
+            OperationType.RETRIEVAL_VECTOR_CONDITIONED
         )
         return await active_operation.run(
-            OperationType.RETRIEVAL_VECTOR_CONDITIONED_LOCAL,
-            lambda active_operation: self._retrieve_local_context(
-                knowledge_name,
+            OperationType.RETRIEVAL_VECTOR_CONDITIONED,
+            lambda active_operation: self._retrieve_scoped(
                 user_query,
-                top_k,
-                embedded_top_k=embedded_top_k,
+                scope=scope,
+                top_k_files=top_k_files,
+                top_k_sections=top_k_sections,
                 max_per_read=max_per_read,
                 anchor_count=anchor_count,
                 operation=active_operation,
@@ -1322,153 +994,69 @@ class VectorConditionedRetrievalPipeline(RetrievalPipeline):
         )
 
 
-    async def _retrieve_local_context(
+    async def _retrieve_scoped(
         self,
-        knowledge_name: str,
         user_query: str,
-        top_k: int = 5,
         *,
-        embedded_top_k: int = 5,
-        max_per_read: int = 50,
-        anchor_count: int = 4,
+        scope: RetrievalScope,
+        top_k_files: int,
+        top_k_sections: int,
+        max_per_read: int,
+        anchor_count: int,
         operation: Operation,
     ) -> list[dict[str, str]]:
-        """Narrow local retrieval to vector-selected files before scoring sections."""
+        event_scope = scope.model_dump(mode="json")
         await self._emit(
             operation,
             EventType.RETRIEVAL_VECTOR_CONDITIONED_STARTED,
             {
-                "scope": "local",
-                "knowledge": knowledge_name,
+                "scope": event_scope,
                 "query": user_query,
-                "top_k": top_k,
+                "top_k_files": top_k_files,
+                "top_k_sections": top_k_sections,
             },
         )
 
         try:
             self._raise_if_cancelled(operation)
-            embedded_task = await self._embedded.retrieve_local_context(
-                knowledge_name,
-                user_query,
-                top_k=embedded_top_k,
-                operation=operation,
+            resolved_file_ids = await self._knowledge_base.resolve_scope(scope)
+            shortlist_task = await operation.run(
+                OperationType.RETRIEVAL_EMBEDDED_FILES,
+                lambda active_operation: self._embedded._shortlist_files(
+                    user_query, resolved_file_ids, top_k_files, operation=active_operation
+                ),
             )
-            embedded_results = await embedded_task.result()
-            file_names = list(
-                dict.fromkeys(result["file_name"] for result in embedded_results)
-            )
-            self._raise_if_cancelled(operation)
-            hierarchical_task = await self._hierarchical.retrieve_by_file(
-                knowledge_name,
-                user_query,
-                file_names,
-                top_k=top_k,
-                max_per_read=max_per_read,
-                anchor_count=anchor_count,
-                operation=operation,
-            )
-            result = await hierarchical_task.result()
-            await self._emit(
-                operation,
-                EventType.RETRIEVAL_VECTOR_CONDITIONED_COMPLETED,
-                {
-                    "scope": "local",
-                    "knowledge": knowledge_name,
-                    "count": len(result),
-                    "section_ids": [item["section_id"] for item in result],
-                },
-            )
-            return result
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            await self._emit(
-                operation,
-                EventType.RETRIEVAL_VECTOR_CONDITIONED_FAILED,
-                {
-                    "scope": "local",
-                    "knowledge": knowledge_name,
-                    "error": error_payload(exc),
-                },
-            )
-            raise
+            shortlist: list[tuple[str, str]] = await shortlist_task.result()
 
-
-    async def retrieve_global_context(
-        self,
-        user_query: str,
-        top_k_section: int = 5,
-        *,
-        embedded_top_k: int = 10,
-        max_per_read: int = 50,
-        anchor_count: int = 4,
-        operation: Operation | None = None,
-    ) -> OperationTask:
-        active_operation = operation or await self._operation_manager.create(
-            OperationType.RETRIEVAL_VECTOR_CONDITIONED_GLOBAL
-        )
-        return await active_operation.run(
-            OperationType.RETRIEVAL_VECTOR_CONDITIONED_GLOBAL,
-            lambda active_operation: self._retrieve_global_context(
-                user_query,
-                top_k_section,
-                embedded_top_k=embedded_top_k,
-                max_per_read=max_per_read,
-                anchor_count=anchor_count,
-                operation=active_operation,
-            ),
-        )
-
-
-    async def _retrieve_global_context(
-        self,
-        user_query: str,
-        top_k_section: int = 5,
-        *,
-        embedded_top_k: int = 10,
-        max_per_read: int = 50,
-        anchor_count: int = 4,
-        operation: Operation,
-    ) -> list[dict[str, str]]:
-        """Narrow global retrieval to vector-selected knowledges before scoring sections."""
-        await self._emit(
-            operation,
-            EventType.RETRIEVAL_VECTOR_CONDITIONED_STARTED,
-            {
-                "scope": "global",
-                "query": user_query,
-                "top_k": top_k_section,
-            },
-        )
-
-        try:
-            self._raise_if_cancelled(operation)
-            embedded_task = await self._embedded.retrieve_global_context(
-                user_query,
-                top_k=embedded_top_k,
-                operation=operation,
-            )
-            embedded_results = await embedded_task.result()
-            knowledge_names = list(
-                dict.fromkeys(
-                    result["knowledge_name"] for result in embedded_results
+            result: list[dict[str, str]] = []
+            if shortlist and top_k_sections > 0:
+                shortlisted_files: dict[str, set[str]] = {}
+                for knowledge_name, file_id in shortlist:
+                    shortlisted_files.setdefault(knowledge_name, set()).add(file_id)
+                file_ids_by_knowledge = {
+                    name: frozenset(file_ids) for name, file_ids in shortlisted_files.items()
+                }
+                self._raise_if_cancelled(operation)
+                hierarchical_task = await operation.run(
+                    OperationType.RETRIEVAL_HIERARCHICAL,
+                    lambda active_operation: self._hierarchical._retrieve_across_knowledges(
+                        user_query,
+                        top_k_sections,
+                        scope=scope,
+                        resolved_file_ids=file_ids_by_knowledge,
+                        full_retrieval=True,
+                        max_per_read=max_per_read,
+                        anchor_count=anchor_count,
+                        operation=active_operation,
+                    ),
                 )
-            )
-            self._raise_if_cancelled(operation)
-            hierarchical_task = await self._hierarchical.retrieve_by_knowledge(
-                user_query,
-                knowledge_names,
-                top_k_section=top_k_section,
-                max_per_read=max_per_read,
-                anchor_count=anchor_count,
-                operation=operation,
-            )
-            result = await hierarchical_task.result()
+                result = await hierarchical_task.result()
+
             await self._emit(
                 operation,
                 EventType.RETRIEVAL_VECTOR_CONDITIONED_COMPLETED,
                 {
-                    "scope": "global",
+                    "scope": event_scope,
                     "count": len(result),
                     "section_ids": [item["section_id"] for item in result],
                 },
@@ -1480,9 +1068,6 @@ class VectorConditionedRetrievalPipeline(RetrievalPipeline):
             await self._emit(
                 operation,
                 EventType.RETRIEVAL_VECTOR_CONDITIONED_FAILED,
-                {
-                    "scope": "global",
-                    "error": error_payload(exc),
-                },
+                {"scope": event_scope, "error": error_payload(exc)},
             )
             raise

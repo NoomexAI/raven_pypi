@@ -12,19 +12,17 @@ from llama_index.core.agent.workflow import (
     ToolCallResult,
 )
 
-from ..core.errors import error_payload
+from ..core.errors import ErrorCode, error_payload
 from ..core.events import Event, EventType
-from .policy import RETRIEVAL_TOOL_NAMES
+from .policy import RETRIEVAL_TOOL_NAMES, AgentPolicy
 
 
 class WorkflowEventTranslator:
     """Translate one agent workflow while retaining call correlation state."""
 
-    def __init__(self, max_iterations: int) -> None:
-        if max_iterations <= 0:
-            raise ValueError("max_iterations must be positive")
-
-        self._max_iterations = max_iterations
+    def __init__(self, policy: AgentPolicy) -> None:
+        self._max_iterations = policy.max_iterations
+        self._allowed_retrieval_tools = policy.retrieval_tool_names
         self._next_step = 0
         self._call_steps: dict[str, int] = {}
         self._agent_output_count = 0
@@ -137,7 +135,17 @@ class WorkflowEventTranslator:
         error = payload.get("error")
         if isinstance(error, dict):
             data["error"] = error
-        if fatal:
+        if (
+            fatal
+            and name in RETRIEVAL_TOOL_NAMES.values()
+            and name not in self._allowed_retrieval_tools
+        ):
+            # LlamaIndex already sends the model a tool-unavailable message.
+            data["error"] = {
+                "code": ErrorCode.RETRIEVAL_MODE_NOT_ALLOWED.value,
+                "message": "This retrieval mode is not allowed for the current run.",
+            }
+        elif fatal:
             exception = getattr(tool_output, "exception", None)
             data["error"] = error_payload(
                 exception if isinstance(exception, BaseException) else RuntimeError("Tool execution failed.")

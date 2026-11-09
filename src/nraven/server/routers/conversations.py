@@ -7,7 +7,6 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request, status
 
-from ...agent.policy import LOCAL_RETRIEVAL_MODES, RetrievalMode
 from ...core.config import SQLITE_MAX_INTEGER
 from ...core.errors import ErrorCode, RavenError
 from ...h_api.raven import Raven
@@ -74,7 +73,7 @@ async def create_conversation(
     request: ConversationCreateRequest,
     raven: Annotated[Raven, Depends(lease_raven)],
 ) -> ConversationResponse:
-    task = await raven.create_conversation(request.knowledge_name)
+    task = await raven.create_conversation(scope=request.scope)
     conversation = await task.result()
     return ConversationResponse.model_validate(conversation.to_dict())
 
@@ -107,6 +106,7 @@ async def update_conversation(
         conversation_id,
         title=request.title,
         pinned=request.pinned,
+        scope=request.scope,
     )
     await task.result()
     return ConversationResponse.model_validate(
@@ -203,16 +203,6 @@ async def submit_turn(
     http_request: Request,
 ) -> TurnAcceptedResponse:
     conversation = raven.get_conversation(conversation_id)
-    selected_mode = request.retrieval_mode
-    if (
-        conversation.type == "local"
-        and isinstance(selected_mode, RetrievalMode)
-        and selected_mode not in LOCAL_RETRIEVAL_MODES
-    ):
-        raise RavenError(
-            ErrorCode.INVALID_RETRIEVAL_MODE,
-            f"Retrieval mode '{selected_mode.value}' is not valid for a local conversation.",
-        )
     async def start_turn():
         session = raven.session(conversation)
         try:

@@ -19,6 +19,7 @@ from .operations import (
     OperationType,
     RetryPolicy,
 )
+from .retrieval_scope import RetrievalScope, RetrievalSelection
 
 __all__ = [
     "DEFAULT_USER_ID",
@@ -31,6 +32,8 @@ __all__ = [
     "OperationTaskRecord",
     "OperationType",
     "PathConfig",
+    "RetrievalScope",
+    "RetrievalSelection",
     "RetryPolicy",
     "RuntimeConfig",
     "SystemConfig",

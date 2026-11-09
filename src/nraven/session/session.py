@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from ..agent.contracts import AgentRunResult
 from ..agent.harness import AgentHarness
-from ..agent.policy import RetrievalMode
+from ..agent.policy import AgentPolicy, RetrievalMode
 from ..core.async_utils import await_completion
+from ..core.config import RuntimeConfig
 from ..core.errors import ErrorCode, RavenError
 from ..core.events import Event, EventType
 from ..core.operations import (
@@ -37,10 +38,20 @@ class SessionRetryInput(BaseModel):
     user_query: str
     retrieval_mode: RetrievalMode | None
     max_iterations: int
-    top_k: int
+    runtime_config: RuntimeConfig
     memory_token_limit: int
     memory_top_k: int
 
+
+    @field_validator("runtime_config", mode="before")
+    @classmethod
+    def _validate_runtime_config(cls, value: Any) -> RuntimeConfig:
+        if isinstance(value, RuntimeConfig):
+            return value
+        try:
+            return RuntimeConfig.from_dict(value)
+        except RavenError as exc:
+            raise ValueError(exc.message) from exc
 
 
 class SessionRun:
@@ -140,6 +151,7 @@ class Session:
         *,
         llm: Any,
         embed_model: Any,
+        get_runtime_config: Callable[[], RuntimeConfig] = RuntimeConfig,
         memory_token_limit: int = 4000,
         memory_top_k: int = 5,
     ) -> None:
@@ -157,6 +169,7 @@ class Session:
         self._operation_manager = operation_manager
         self._llm = llm
         self._embed_model = embed_model
+        self._get_runtime_config = get_runtime_config
         self._memory_token_limit = memory_token_limit
         self._memory_top_k = memory_top_k
         self._session_id = uuid4()
@@ -252,7 +265,7 @@ class Session:
         operation: Operation | None = None,
         retry_of: OperationTaskRecord | None = None,
     ) -> SessionRun:
-        """Start one autonomous turn after claiming the conversation."""
+        """Start a turn with current retrieval defaults or its saved retry snapshot."""
         self._ensure_started()
         if retry_of is None:
             query = user_query.strip() if isinstance(user_query, str) else ""
@@ -261,14 +274,14 @@ class Session:
                     ErrorCode.INVALID_METADATA,
                     "user_query must be a non-empty string.",
                 )
-            selected_mode = self._normalize_retrieval_mode(retrieval_mode)
+            selected_mode = AgentPolicy.parse_mode(retrieval_mode)
             retry_input = SessionRetryInput(
                 conversation_id=self.conversation_id,
                 turn_id=uuid4(),
                 user_query=query,
                 retrieval_mode=selected_mode,
                 max_iterations=self.harness.max_iterations,
-                top_k=self.harness.top_k,
+                runtime_config=self._get_runtime_config(),
                 memory_token_limit=self._memory_token_limit,
                 memory_top_k=self._memory_top_k,
             )
@@ -338,6 +351,7 @@ class Session:
                     self.conversation,
                     query,
                     retrieval_mode=selected_mode,
+                    runtime_config=retry_input.runtime_config,
                     operation=active_operation,
                 )
                 result = await agent_run.collect()
@@ -402,25 +416,6 @@ class Session:
             if turn_claimed:
                 await self._release_turn_claim(propagate_cancellation=False)
             raise
-
-
-    @staticmethod
-    def _normalize_retrieval_mode(
-        retrieval_mode: RetrievalMode | str | None,
-    ) -> RetrievalMode | None:
-        if retrieval_mode is None or retrieval_mode == "auto":
-            return None
-        try:
-            return (
-                retrieval_mode
-                if isinstance(retrieval_mode, RetrievalMode)
-                else RetrievalMode(retrieval_mode)
-            )
-        except ValueError as exc:
-            raise RavenError(
-                ErrorCode.INVALID_RETRIEVAL_MODE,
-                f"Unknown retrieval mode '{retrieval_mode}'.",
-            ) from exc
 
 
     def _release_run(self, run: SessionRun) -> None:

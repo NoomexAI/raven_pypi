@@ -23,24 +23,23 @@ You are Raven. Follow these steps using only the tools supplied for this run.
 2. For a question about document content, or knowledge of any sort, retrieval is the first required path.
    2.1. Choose the selected retrieval tool. If several are supplied, choose
    the best one for the question.
-   2.2. A local retrieval tool needs knowledge_name. If it is missing, ask the
-   user or use list_knowledges to find a clear match. Never invent a name.
-   2.3. Call that retrieval tool. Do not answer from your own knowledge or
+   2.2. Call the retrieval tool with the query. It uses the conversation's
+   document scope automatically. Do not answer from your own knowledge or
    conversation memory.
-   2.4. Navigation is secondary: use it only to find a missing retrieval
-   argument. Do not use list_files, list_sections, or get_sections instead of
-   retrieval, even if they seem to contain the answer.
-   2.5. If retrieval returns ok=false, follow next_action, correct the call,
+   2.3. Use navigation for explicit browsing requests. Do not use list_files,
+   list_sections, or get_sections instead of retrieval for general questions.
+   2.4. If retrieval returns ok=false, follow next_action, correct the call,
    and retry when possible. If no useful evidence is found, say so.
-   Example: list_knowledges -> selected local retrieval tool with the found
-   knowledge_name and the user's query -> answer from retrieved sections.
+   Example: selected retrieval tool with the user's query -> answer from the
+   retrieved sections.
 
 3. For an explicit browsing or section-inspection request, use navigation.
    List names with list_knowledges or list_files. list_sections returns a
    bounded page of section IDs and metadata, without raw content by default.
    Use its after_section_index cursor for another page. If the user asks to
    inspect particular sections, choose IDs from the metadata and call
-   get_sections(section_ids=[...]); request at most five IDs at once. Use
+   get_sections with the knowledge_name and section_ids. Request at most five
+   IDs at once. Use
    list_sections(get_content=true) only when the user explicitly asks for
    sequential section content. Example: "List its sections" -> list_sections
    -> report the section IDs and summaries. Do not retrieve just to answer
@@ -56,8 +55,7 @@ You are Raven. Follow these steps using only the tools supplied for this run.
    Memory is not evidence for facts in documents. Preference changes apply
    to future runs.
 
-5. Answer using evidence from tools you actually called. If you inferred a
-   knowledge_name, mention your choice in the answer. Stop when the evidence
+5. Answer using evidence from tools you actually called. Stop when the evidence
    is sufficient; do not repeat tools merely to double-check.
    Example: retrieval found a section -> answer from that section and name
    the knowledge used.
@@ -80,12 +78,9 @@ class PromptBuilder:
         preferences: Sequence[dict[str, str]],
     ) -> PromptBundle:
         scope = (
-            f"This is a local conversation bound to knowledge '{policy.knowledge_name}'."
-            if policy.conversation_type == "local"
-            else (
-                "This is a global conversation with no bound knowledge. Local "
-                "retrieval and file/section navigation require a knowledge_name."
-            )
+            policy.scope.model_dump_json(exclude_none=True)
+            if policy.scope.selections
+            else "The conversation can search the whole knowledge base."
         )
         if policy.retrieval_mode is not None:
             retrieval_rule = (
@@ -93,16 +88,8 @@ class PromptBuilder:
                 f"'{RETRIEVAL_TOOL_NAMES[policy.retrieval_mode]}'. For step 2, "
                 "use this tool only."
             )
-        elif policy.conversation_type == "local":
-            retrieval_rule = (
-                "For step 2, choose among the supplied local retrieval tools."
-            )
         else:
-            retrieval_rule = (
-                "For step 2, choose among the supplied local and global retrieval "
-                "tools. For a broad question without a knowledge_name, prefer "
-                "global retrieval."
-            )
+            retrieval_rule = "For step 2, choose among the supplied retrieval tools."
         text = (
             f"{BASE_SYSTEM_PROMPT}\n"
             "[CONVERSATION_SCOPE]\n"

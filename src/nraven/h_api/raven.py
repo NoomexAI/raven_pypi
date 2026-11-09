@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -15,7 +16,6 @@ from llama_index.core.llms import ChatMessage
 
 from ..agent.contracts import RetrievalPipelines
 from ..agent.harness import AgentHarness
-from ..agent.policy import GLOBAL_RETRIEVAL_MODES, LOCAL_RETRIEVAL_MODES, RetrievalMode
 from ..core.async_utils import await_completion
 from ..core.config import (
     DEFAULT_USER_ID,
@@ -36,6 +36,7 @@ from ..core.operations import (
     OperationWorker,
     TaskWorker,
 )
+from ..core.retrieval_scope import RetrievalScope
 from ..core.upload_retention import check_upload_retry
 from ..data_management.conversation_manager import Conversation, ConversationManager
 from ..data_management.discovery import DiscoveryIssue
@@ -69,7 +70,7 @@ class Raven:
             Path(raven_home),
             user_id=user_id,
         )
-        self._runtime_config = RuntimeConfig()
+        self._runtime_config = RuntimeConfig.defaults(self.system_config)
         self._runtime_config.validate_against(self.system_config)
         self.llm: Any | None = None
         self.embed_model: Any | None = None
@@ -233,8 +234,8 @@ class Raven:
         async with self._runtime_config_lock:
             current = self._runtime_config
             self._check_runtime_revision(expected_revision, current.revision)
-            defaults = RuntimeConfig.from_dict(
-                {**RuntimeConfig().to_dict(), "revision": current.revision + 1}
+            defaults = replace(
+                RuntimeConfig.defaults(self.system_config), revision=current.revision + 1
             )
             defaults.validate_against(self.system_config)
             await self._commit_runtime_config(defaults)
@@ -470,7 +471,8 @@ class Raven:
                 retry_input = SessionRetryInput.model_validate(
                     failed_task.retry_input
                 )
-            except ValidationError as exc:
+                retry_input.runtime_config.validate_against(self.system_config)
+            except (ValidationError, RavenError) as exc:
                 raise RavenError(
                     ErrorCode.INVALID_RETRY_INPUT,
                     "The session retry input is invalid.",
@@ -480,7 +482,6 @@ class Raven:
             session = self.session(
                 conversation,
                 max_iterations=retry_input.max_iterations,
-                top_k=retry_input.top_k,
                 memory_token_limit=retry_input.memory_token_limit,
                 memory_top_k=retry_input.memory_top_k,
             )
@@ -1292,55 +1293,110 @@ class Raven:
         )
 
 
-    async def retrieve(
+    async def retrieve_embedded(
         self,
-        mode: RetrievalMode | str,
         user_query: str,
         *,
-        knowledge_name: str | None = None,
+        scope: RetrievalScope,
         top_k: int | None = None,
         operation: Operation | None = None,
     ) -> OperationTask:
-        """Run one retrieval strategy while preserving its operation events."""
+        """Find sections by vector similarity within the selected documents."""
         self._ensure_models_loaded()
-        try:
-            selected = mode if isinstance(mode, RetrievalMode) else RetrievalMode(mode)
-        except ValueError as exc:
-            raise RavenError(
-                ErrorCode.INVALID_RETRIEVAL_MODE,
-                f"Unknown retrieval mode '{mode}'.",
-            ) from exc
+        assert self.embedded_retrieval is not None
+        return await self.embedded_retrieval.retrieve(
+            user_query,
+            scope=scope,
+            top_k=self._retrieval_limit(top_k, "top_k"),
+            operation=operation,
+        )
 
-        effective_top_k = self._runtime_config.retrieval_top_k if top_k is None else top_k
-        self._validate_retrieval_top_k(effective_top_k)
 
-        if selected in LOCAL_RETRIEVAL_MODES:
-            if not knowledge_name:
-                raise RavenError(
-                    ErrorCode.INVALID_METADATA,
-                    "knowledge_name is required for local retrieval.",
-                )
-            method_name = selected.value.removeprefix("local_")
-            pipeline = getattr(self, f"{method_name}_retrieval")
-            return await pipeline.retrieve_local_context(
-                knowledge_name,
-                user_query,
-                effective_top_k,
-                operation=operation,
-            )
+    async def retrieve_hierarchical(
+        self,
+        user_query: str,
+        *,
+        scope: RetrievalScope,
+        top_k_section: int | None = None,
+        top_k_knowledge: int | None = None,
+        full_retrieval: bool | None = None,
+        max_per_read: int | None = None,
+        anchor_count: int | None = None,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        """Rank eligible section metadata with the configured LLM."""
+        self._ensure_models_loaded()
+        assert self.hierarchical_retrieval is not None
+        settings = self._runtime_config
+        return await self.hierarchical_retrieval.retrieve(
+            user_query,
+            scope=scope,
+            top_k_section=self._retrieval_limit(top_k_section, "top_k_section"),
+            top_k_knowledge=self._retrieval_limit(
+                top_k_knowledge, "top_k_knowledge", default=settings.retrieval_top_k_knowledge,
+            ),
+            full_retrieval=settings.full_retrieval if full_retrieval is None else full_retrieval,
+            max_per_read=settings.retrieval_max_per_read if max_per_read is None else max_per_read,
+            anchor_count=settings.retrieval_anchor_count if anchor_count is None else anchor_count,
+            operation=operation,
+        )
 
-        if selected in GLOBAL_RETRIEVAL_MODES:
-            method_name = selected.value.removeprefix("global_")
-            pipeline = getattr(self, f"{method_name}_retrieval")
-            return await pipeline.retrieve_global_context(
-                user_query,
-                effective_top_k,
-                operation=operation,
-            )
 
-        raise RavenError(
-            ErrorCode.INVALID_RETRIEVAL_MODE,
-            f"Unsupported retrieval mode '{selected.value}'.",
+    async def retrieve_agreement(
+        self,
+        user_query: str,
+        *,
+        scope: RetrievalScope,
+        top_k: int | None = None,
+        top_k_knowledge: int | None = None,
+        full_retrieval: bool | None = None,
+        max_per_read: int | None = None,
+        anchor_count: int | None = None,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        """Compare embedded and hierarchical results using one section limit."""
+        self._ensure_models_loaded()
+        assert self.agreement_retrieval is not None
+        settings = self._runtime_config
+        return await self.agreement_retrieval.retrieve(
+            user_query,
+            scope=scope,
+            top_k=self._retrieval_limit(top_k, "top_k"),
+            top_k_knowledge=self._retrieval_limit(
+                top_k_knowledge, "top_k_knowledge", default=settings.retrieval_top_k_knowledge,
+            ),
+            full_retrieval=settings.full_retrieval if full_retrieval is None else full_retrieval,
+            max_per_read=settings.retrieval_max_per_read if max_per_read is None else max_per_read,
+            anchor_count=settings.retrieval_anchor_count if anchor_count is None else anchor_count,
+            operation=operation,
+        )
+
+
+    async def retrieve_vector_conditioned(
+        self,
+        user_query: str,
+        *,
+        scope: RetrievalScope,
+        top_k_files: int | None = None,
+        top_k_sections: int | None = None,
+        max_per_read: int | None = None,
+        anchor_count: int | None = None,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        """Shortlist eligible files by vector similarity and rank their sections."""
+        self._ensure_models_loaded()
+        assert self.vector_conditioned_retrieval is not None
+        settings = self._runtime_config
+        return await self.vector_conditioned_retrieval.retrieve(
+            user_query,
+            scope=scope,
+            top_k_files=self._retrieval_limit(
+                top_k_files, "top_k_files", default=settings.retrieval_top_k_files,
+            ),
+            top_k_sections=self._retrieval_limit(top_k_sections, "top_k_sections"),
+            max_per_read=settings.retrieval_max_per_read if max_per_read is None else max_per_read,
+            anchor_count=settings.retrieval_anchor_count if anchor_count is None else anchor_count,
+            operation=operation,
         )
 
 
@@ -1443,12 +1499,12 @@ class Raven:
 
     async def create_conversation(
         self,
-        knowledge_name: str | None = None,
+        scope: RetrievalScope | None = None,
         *,
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self.conversation_manager.create(
-            knowledge_name,
+            scope=scope,
             operation=operation,
         )
 
@@ -1580,12 +1636,14 @@ class Raven:
         *,
         title: str | None = None,
         pinned: bool | None = None,
+        scope: RetrievalScope | None = None,
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self.conversation_manager.update(
             conversation_id,
             title=title,
             pinned=pinned,
+            scope=scope,
             operation=operation,
         )
 
@@ -1607,7 +1665,6 @@ class Raven:
         conversation: Conversation,
         *,
         max_iterations: int | None = None,
-        top_k: int | None = None,
         memory_token_limit: int | None = None,
         memory_top_k: int | None = None,
     ) -> Session:
@@ -1622,7 +1679,6 @@ class Raven:
             if max_iterations is None
             else max_iterations
         )
-        effective_top_k = settings.retrieval_top_k if top_k is None else top_k
         effective_memory_token_limit = (
             settings.memory_token_limit
             if memory_token_limit is None
@@ -1633,7 +1689,6 @@ class Raven:
         )
         self._validate_session_overrides(
             max_iterations=effective_max_iterations,
-            top_k=effective_top_k,
             memory_token_limit=effective_memory_token_limit,
             memory_top_k=effective_memory_top_k,
         )
@@ -1655,7 +1710,6 @@ class Raven:
             operation_manager=self.operation_manager,
             reconstructor=self.reconstructor,
             max_iterations=effective_max_iterations,
-            top_k=effective_top_k,
             max_cached_prompts=self.system_config.prompt_cache_size,
         )
         return Session(
@@ -1664,6 +1718,7 @@ class Raven:
             self.operation_manager,
             llm=self.llm,
             embed_model=self.embed_model,
+            get_runtime_config=lambda: self.runtime_config,
             memory_token_limit=effective_memory_token_limit,
             memory_top_k=effective_memory_top_k,
         )
@@ -1680,18 +1735,13 @@ class Raven:
         max_source_size_bytes: int,
         max_document_pages: int,
     ) -> None:
-        current = self._runtime_config
-        RuntimeConfig(
-            revision=current.revision,
+        replace(
+            self._runtime_config,
             breakpoint_percentile_threshold=breakpoint_percentile_threshold,
             buffer_size=buffer_size,
             max_extraction_retries=max_extraction_retries,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
-            retrieval_top_k=current.retrieval_top_k,
-            agent_max_iterations=current.agent_max_iterations,
-            memory_token_limit=current.memory_token_limit,
-            memory_top_k=current.memory_top_k,
         ).validate_against(self.system_config)
         self._validate_system_bounded_int(
             max_source_size_bytes,
@@ -1705,23 +1755,21 @@ class Raven:
         )
 
 
-    def _validate_retrieval_top_k(self, top_k: int) -> None:
-        self._validate_system_bounded_int(
-            top_k,
-            "top_k",
-            self.system_config.max_retrieval_top_k,
-        )
+    def _retrieval_limit(self, value: int | None, field_name: str, *, default: int | None = None) -> int:
+        maximum = self.system_config.max_retrieval_top_k
+        if value is None:
+            value = self._runtime_config.retrieval_top_k if default is None else default
+        self._validate_system_bounded_int(value, field_name, maximum)
+        return value
 
 
     def _validate_session_overrides(
         self,
         *,
         max_iterations: int,
-        top_k: int,
         memory_token_limit: int,
         memory_top_k: int,
     ) -> None:
-        self._validate_retrieval_top_k(top_k)
         self._validate_system_bounded_int(
             max_iterations,
             "max_iterations",

@@ -23,6 +23,7 @@ from llama_index.core.memory import ChatSummaryMemoryBuffer, VectorMemory
 from llama_index.core.schema import TextNode
 from llama_index.core.storage.chat_store import SimpleChatStore
 from llama_index.vector_stores.qdrant import QdrantVectorStore
+from pydantic import ValidationError
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qdrant_models
 
@@ -35,6 +36,7 @@ from ..core.config import (
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
 from ..core.operations import Operation, OperationManager, OperationTask, OperationType
+from ..core.retrieval_scope import RetrievalScope
 from ..providers.model_identity import embedding_identity
 from .discovery import DiscoveryIssue
 from .knowledge_base import KnowledgeBase
@@ -56,7 +58,7 @@ MEMORY_SUMMARY_PROMPT = (
     "Distinguish user statements from assistant claims. Omit routine greetings, "
     "reasoning traces, and redundant wording. Do not invent or infer missing facts."
 )
-PERSISTENCE_VERSION = 1
+PERSISTENCE_VERSION = 2
 PREFERENCE_SCHEMA_VERSION = 1
 MEMORY_COLLECTION = "messages"
 MEMORY_VECTOR_NAME = "text-dense"
@@ -485,7 +487,7 @@ class Conversation:
     ) -> None:
         self.dir_path = Path(dir_path)
         self.conversation_id = ""
-        self.knowledge_name: str | None = None
+        self._scope = RetrievalScope()
         self.title = DEFAULT_TITLE
         self.is_titled = False
         self.pinned = False
@@ -522,16 +524,16 @@ class Conversation:
 
 
     @property
-    def type(self) -> str:
-        """Return the conversation scope derived from its knowledge binding."""
-        return "local" if self.knowledge_name else "global"
+    def scope(self) -> RetrievalScope:
+        """Return the document scope saved with this conversation."""
+        return self._scope
 
 
     def _set_metadata(
         self,
         *,
         conversation_id: str,
-        knowledge_name: str | None,
+        scope: RetrievalScope,
         title: str,
         is_titled: bool,
         pinned: bool,
@@ -539,7 +541,7 @@ class Conversation:
     ) -> None:
         """Set the complete conversation metadata state."""
         self.conversation_id = conversation_id
-        self.knowledge_name = knowledge_name
+        self._scope = scope
         self.title = title
         self.is_titled = is_titled
         self.pinned = pinned
@@ -1465,8 +1467,11 @@ class Conversation:
         *,
         title: str | None = None,
         pinned: bool | None = None,
+        scope: RetrievalScope | None = None,
         operation: Operation | None = None,
     ) -> OperationTask:
+        if scope is not None and not isinstance(scope, RetrievalScope):
+            raise TypeError("scope must be a RetrievalScope")
         active_operation = operation or await self._operation_manager.create(
             OperationType.CONVERSATION_UPDATE
         )
@@ -1476,6 +1481,7 @@ class Conversation:
                 lambda: self._update(
                     title=title,
                     pinned=pinned,
+                    scope=scope,
                     operation=active_operation,
                 )
             ),
@@ -1487,11 +1493,12 @@ class Conversation:
         *,
         title: str | None = None,
         pinned: bool | None = None,
+        scope: RetrievalScope | None = None,
         operation: Operation,
         only_if_untitled: bool = False,
     ) -> "Conversation":
         """Update and persist mutable conversation metadata."""
-        if title is None and pinned is None:
+        if title is None and pinned is None and scope is None:
             return self
         if title is not None:
             title = self._validate_title(title)
@@ -1514,8 +1521,13 @@ class Conversation:
                     self.pinned = pinned
 
                 try:
-                    await run_in_thread(self.write_metadata)
+                    if scope is None:
+                        await run_in_thread(self.write_metadata)
+                    else:
+                        await run_in_thread(self.write_metadata, scope=scope)
                 except asyncio.CancelledError:
+                    if scope is not None:
+                        self._scope = scope
                     raise
                 except Exception as exc:
                     self.title = previous_title
@@ -1530,6 +1542,8 @@ class Conversation:
                         },
                     )
                     raise
+                if scope is not None:
+                    self._scope = scope
 
         await self._emit(
             operation,
@@ -1626,8 +1640,7 @@ class Conversation:
         return {
             "schema_version": PERSISTENCE_VERSION,
             "conversation_id": self.conversation_id,
-            "type": self.type,
-            "knowledge_name": self.knowledge_name,
+            "scope": self.scope.model_dump(mode="json"),
             "title": self.title,
             "is_titled": self.is_titled,
             "pinned": self.pinned,
@@ -1635,12 +1648,15 @@ class Conversation:
         }
 
 
-    def write_metadata(self) -> None:
+    def write_metadata(self, *, scope: RetrievalScope | None = None) -> None:
         """Atomically persist conversation metadata."""
         self.dir_path.mkdir(parents=True, exist_ok=True)
         temporary_path = self.metadata_path.with_suffix(".json.tmp")
+        metadata = self.to_dict()
+        if scope is not None:
+            metadata["scope"] = scope.model_dump(mode="json")
         temporary_path.write_text(
-            json.dumps(self.to_dict(), indent=2, ensure_ascii=False),
+            json.dumps(metadata, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
         os.replace(temporary_path, self.metadata_path)
@@ -2013,8 +2029,7 @@ class Conversation:
         expected_fields = {
             "schema_version",
             "conversation_id",
-            "type",
-            "knowledge_name",
+            "scope",
             "title",
             "is_titled",
             "pinned",
@@ -2040,10 +2055,15 @@ class Conversation:
                 f"Conversation metadata ID does not match directory '{directory.name}'.",
             )
 
-        created_at = data.get("created_at")
+        created_at = data["created_at"]
+        if not isinstance(created_at, str):
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                "Conversation metadata contains an invalid created_at value.",
+            )
         try:
             parsed_created_at = datetime.fromisoformat(created_at)
-        except (TypeError, ValueError) as exc:
+        except ValueError as exc:
             raise RavenError(
                 ErrorCode.INVALID_METADATA,
                 "Conversation metadata contains an invalid created_at value.",
@@ -2069,26 +2089,20 @@ class Conversation:
                 "Conversation metadata contains an invalid is_titled value.",
             )
 
-        knowledge_name = data.get("knowledge_name")
-        if knowledge_name is not None and (
-            not isinstance(knowledge_name, str) or not knowledge_name.strip()
-        ):
-            raise RavenError(
-                ErrorCode.INVALID_METADATA,
-                "Conversation metadata contains an invalid knowledge_name.",
-            )
         pinned = data.get("pinned")
         if not isinstance(pinned, bool):
             raise RavenError(
                 ErrorCode.INVALID_METADATA,
                 "Conversation metadata contains an invalid pinned value.",
             )
-        expected_type = "local" if knowledge_name is not None else "global"
-        if data.get("type") != expected_type:
+
+        try:
+            scope = RetrievalScope.model_validate(data["scope"])
+        except ValidationError as exc:
             raise RavenError(
                 ErrorCode.INVALID_METADATA,
-                "Conversation metadata type does not match its knowledge scope.",
-            )
+                "Conversation metadata has an invalid scope.",
+            ) from exc
 
         conversation = cls(
             directory,
@@ -2098,7 +2112,7 @@ class Conversation:
         )
         conversation._set_metadata(
             conversation_id=conversation_id,
-            knowledge_name=knowledge_name,
+            scope=scope,
             title=title,
             is_titled=is_titled,
             pinned=pinned,
@@ -2227,7 +2241,7 @@ class ConversationManager:
 
     async def create(
         self,
-        knowledge_name: str | None = None,
+        scope: RetrievalScope | None = None,
         *,
         operation: Operation | None = None,
     ) -> OperationTask:
@@ -2237,7 +2251,7 @@ class ConversationManager:
         return await active_operation.run(
             OperationType.CONVERSATION_CREATE,
             lambda active_operation: self._create(
-                knowledge_name,
+                scope,
                 operation=active_operation,
             ),
         )
@@ -2245,19 +2259,23 @@ class ConversationManager:
 
     async def _create(
         self,
-        knowledge_name: str | None = None,
+        scope: RetrievalScope | None,
         *,
         operation: Operation,
     ) -> Conversation:
         """Create, persist, and register a new conversation."""
         self._ensure_started()
-        if knowledge_name is not None:
-            self._validate_knowledge(knowledge_name)
+        if scope is None:
+            scope = RetrievalScope()
+        elif not isinstance(scope, RetrievalScope):
+            raise TypeError("scope must be a RetrievalScope")
+        if scope.selections:
+            await self._knowledge_base.resolve_scope(scope)
 
         await self._emit(
             operation,
             EventType.CONVERSATION_CREATE_STARTED,
-            {"knowledge_name": knowledge_name},
+            {"scope": scope.model_dump(mode="json")},
         )
 
         try:
@@ -2274,7 +2292,7 @@ class ConversationManager:
                 )
                 conversation._set_metadata(
                     conversation_id=conversation_id,
-                    knowledge_name=knowledge_name,
+                    scope=scope,
                     title=DEFAULT_TITLE,
                     is_titled=False,
                     pinned=False,
@@ -2377,6 +2395,7 @@ class ConversationManager:
         *,
         title: str | None = None,
         pinned: bool | None = None,
+        scope: RetrievalScope | None = None,
         operation: Operation | None = None,
     ) -> OperationTask:
         active_operation = operation or await self._operation_manager.create(
@@ -2388,6 +2407,7 @@ class ConversationManager:
                 conversation_id,
                 title=title,
                 pinned=pinned,
+                scope=scope,
                 operation=active_operation,
             ),
         )
@@ -2399,13 +2419,20 @@ class ConversationManager:
         *,
         title: str | None = None,
         pinned: bool | None = None,
+        scope: RetrievalScope | None = None,
         operation: Operation,
     ) -> Conversation:
         """Update mutable conversation metadata."""
         conversation = self.get(conversation_id)
+        if scope is not None:
+            if not isinstance(scope, RetrievalScope):
+                raise TypeError("scope must be a RetrievalScope")
+            if scope.selections:
+                await self._knowledge_base.resolve_scope(scope)
         update_task = await conversation.update(
             title=title,
             pinned=pinned,
+            scope=scope,
             operation=operation,
         )
         return await update_task.result()
@@ -2539,15 +2566,6 @@ class ConversationManager:
     async def _after_conversation_open(self, target: Conversation) -> None:
         async with self._resource_lock:
             self._opening_conversations.discard(id(target))
-
-
-    def _validate_knowledge(self, knowledge_name: str) -> None:
-        if not isinstance(knowledge_name, str) or not knowledge_name.strip():
-            raise RavenError(
-                ErrorCode.INVALID_KNOWLEDGE_NAME,
-                "knowledge_name must be a non-empty string.",
-            )
-        self._knowledge_base.get(knowledge_name)
 
 
     @staticmethod

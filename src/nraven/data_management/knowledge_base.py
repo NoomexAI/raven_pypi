@@ -13,10 +13,10 @@ import shutil
 import sqlite3
 import threading
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 from uuid import UUID, uuid5
 
 import qdrant_client
@@ -28,6 +28,7 @@ from ..core.config import DEFAULT_OPEN_KNOWLEDGE_LIMIT, PathConfig
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.events import Event, EventType
 from ..core.operations import Operation, OperationManager, OperationTask, OperationType
+from ..core.retrieval_scope import RetrievalScope, RetrievalSelection
 from ..providers.model_identity import embedding_identity
 from .discovery import DiscoveryIssue
 
@@ -268,13 +269,23 @@ class _KnowledgeFileStore:
 
 
     def list_sections(self, file_name: str) -> list[dict[str, Any]]:
+        return self._list_sections("f.file_name", file_name)
+
+
+    def list_sections_by_file_id(self, file_id: str) -> list[dict[str, Any]]:
+        return self._list_sections("f.file_id", file_id)
+
+
+    def _list_sections(
+        self, column: Literal["f.file_name", "f.file_id"], value: str
+    ) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._require_connection().execute(
-                """
+                f"""
                 SELECT s.*, f.file_name
                 FROM sections AS s
                 JOIN files AS f ON f.file_id = s.file_id
-                WHERE f.file_name = ?
+                WHERE {column} = ?
                   AND NOT EXISTS (
                       SELECT 1
                       FROM pending_file_deletions AS p
@@ -282,7 +293,7 @@ class _KnowledgeFileStore:
                   )
                 ORDER BY s.section_index
                 """,
-                (file_name,),
+                (value,),
             ).fetchall()
         return [self._section_from_row(row) for row in rows]
 
@@ -876,6 +887,11 @@ class Knowledge:
         return self._read_file_store("list_sections", file_name)
 
 
+    def list_sections_by_file_id(self, file_id: str) -> list[dict[str, Any]]:
+        """Read sections of a stored file by its stable ID."""
+        return self._read_file_store("list_sections_by_file_id", file_id)
+
+
     def list_sections_page(
         self,
         file_name: str,
@@ -1412,14 +1428,38 @@ class Knowledge:
         return result
 
 
-    async def search(self, query_vector: list[float], top_k: int = 5) -> list[dict[str, Any]]:
-        """Return vector hits containing only identifiers and scores."""
-        if top_k <= 0:
+    async def search(
+        self,
+        query_vector: list[float],
+        top_k: int = 5,
+        *,
+        file_ids: Collection[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return vector hits, optionally restricted to the given file IDs."""
+        if top_k <= 0 or (file_ids is not None and not file_ids):
             return []
 
         async def search_vectors() -> list[dict[str, Any]]:
             async with self._mutation_lock:
-                return await run_in_thread(self._search, query_vector, top_k)
+                return await run_in_thread(self._search, query_vector, top_k, file_ids)
+
+        return await self._run_in_use(search_vectors)
+
+
+    async def search_files(
+        self,
+        query_vector: list[float],
+        *,
+        file_ids: Collection[str],
+        top_k: int,
+    ) -> list[tuple[str, float]]:
+        """Rank eligible files by their highest-scoring chunk."""
+        if top_k <= 0 or not file_ids:
+            return []
+
+        async def search_vectors() -> list[tuple[str, float]]:
+            async with self._mutation_lock:
+                return await run_in_thread(self._search_files, query_vector, file_ids, top_k)
 
         return await self._run_in_use(search_vectors)
 
@@ -1712,9 +1752,14 @@ class Knowledge:
                 f"Knowledge metadata name does not match directory '{self.name}'.",
             )
         created_at = meta["created_at"]
+        if not isinstance(created_at, str):
+            raise RavenError(
+                ErrorCode.INVALID_METADATA,
+                f"Knowledge '{self.name}' has an invalid created_at value.",
+            )
         try:
             parsed_created_at = datetime.fromisoformat(created_at)
-        except (TypeError, ValueError) as exc:
+        except ValueError as exc:
             raise RavenError(
                 ErrorCode.INVALID_METADATA,
                 f"Knowledge '{self.name}' has an invalid created_at value.",
@@ -1948,12 +1993,18 @@ class Knowledge:
         ).count
 
 
-    def _search(self, query_vector: list[float], top_k: int) -> list[dict[str, Any]]:
+    def _search(
+        self,
+        query_vector: list[float],
+        top_k: int,
+        file_ids: Collection[str] | None = None,
+    ) -> list[dict[str, Any]]:
         if not self._collection_exists():
             return []
         response = self._require_qdrant().query_points(
             collection_name=COLLECTION_NAME,
             query=query_vector,
+            query_filter=None if file_ids is None else self._file_id_filter(file_ids),
             limit=top_k,
             with_payload=True,
         )
@@ -1966,6 +2017,42 @@ class Knowledge:
             }
             for point in response.points
         ]
+
+
+    def _search_files(
+        self,
+        query_vector: list[float],
+        file_ids: Collection[str],
+        top_k: int,
+    ) -> list[tuple[str, float]]:
+        if not self._collection_exists():
+            return []
+        response = self._require_qdrant().query_points_groups(
+            collection_name=COLLECTION_NAME,
+            query=query_vector,
+            query_filter=self._file_id_filter(file_ids),
+            group_by=KEY_FILE_ID,
+            group_size=1,
+            limit=top_k,
+            with_payload=False,
+        )
+        return [
+            (group.id, group.hits[0].score)
+            for group in response.groups
+            if isinstance(group.id, str) and group.hits
+        ]
+
+
+    @staticmethod
+    def _file_id_filter(file_ids: Collection[str]) -> qmodels.Filter:
+        return qmodels.Filter(
+            must=[
+                qmodels.FieldCondition(
+                    key=KEY_FILE_ID,
+                    match=qmodels.MatchAny(any=list(file_ids)),
+                )
+            ]
+        )
 
 
     def _count(self) -> int:
@@ -2212,6 +2299,64 @@ class KnowledgeBase:
         """Return persisted knowledge directories that could not be loaded."""
         self._ensure_started()
         return list(self._discovery_issues.values())
+
+
+    async def resolve_scope(self, scope: RetrievalScope) -> dict[str, frozenset[str]]:
+        """Read eligible file IDs from the current knowledge catalogs."""
+        requested: dict[str, list[RetrievalSelection]] = {}
+        for selection in scope.selections:
+            name = _safe_name(selection.knowledge_name)
+            requested.setdefault(name, []).append(selection)
+
+        async with self._lifecycle_lock:
+            self._ensure_started()
+            if scope.selections:
+                targets = [(self.get(name), selections) for name, selections in requested.items()]
+            else:
+                targets = [(knowledge, []) for knowledge in self._knowledges.values()]
+
+            resolved: dict[str, frozenset[str]] = {}
+            for knowledge, selections in targets:
+                files = await run_in_thread(knowledge.list_files)
+                if not selections:
+                    resolved[knowledge.name] = frozenset(file[KEY_FILE_ID] for file in files)
+                    continue
+
+                names_by_id: dict[str, str] = {file[KEY_FILE_ID]: file["file_name"] for file in files}
+                ids_by_name = {name: file_id for file_id, name in names_by_id.items()}
+                include_all = False
+                selected_ids: set[str] = set()
+                for selection in selections:
+                    file_id = selection.file_id
+                    file_name = selection.file_name
+                    if file_id is None:
+                        if file_name is None:
+                            include_all = True
+                            continue
+                        file_id = ids_by_name.get(file_name)
+
+                    if file_id is None or file_id not in names_by_id:
+                        raise RavenError(
+                            ErrorCode.FILE_NOT_FOUND,
+                            f"File '{selection.file_id or file_name}' does not exist in knowledge '{knowledge.name}'.",
+                            details=selection.model_dump(exclude_none=True),
+                        )
+                    if file_name is not None and file_name != names_by_id[file_id]:
+                        raise RavenError(
+                            ErrorCode.FILE_ID_NAME_MISMATCH,
+                            f"File ID '{file_id}' does not match filename '{file_name}' in knowledge '{knowledge.name}'.",
+                            details={
+                                "knowledge_name": knowledge.name,
+                                "file_id": file_id,
+                                "file_name": file_name,
+                                "actual_file_name": names_by_id[file_id],
+                            },
+                        )
+                    selected_ids.add(file_id)
+
+                resolved[knowledge.name] = frozenset(names_by_id if include_all else selected_ids)
+
+            return resolved
 
 
     async def list(self) -> list[dict[str, Any]]:

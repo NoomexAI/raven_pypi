@@ -21,6 +21,7 @@ from ..core.operations import (
     OperationTaskRecord,
     RetryPolicy,
 )
+from ..core.retrieval_scope import RetrievalScope
 from ..providers import ModelRole, ModelSpec
 
 
@@ -95,6 +96,11 @@ class RuntimeSettingsResponse(BaseModel):
     chunk_size: int = Field(ge=1)
     chunk_overlap: int = Field(ge=0)
     retrieval_top_k: int = Field(ge=1)
+    retrieval_top_k_knowledge: int = Field(ge=1)
+    retrieval_top_k_files: int = Field(ge=1)
+    full_retrieval: bool
+    retrieval_max_per_read: int = Field(ge=1)
+    retrieval_anchor_count: int = Field(ge=0)
     agent_max_iterations: int = Field(ge=1)
     memory_token_limit: int = Field(ge=1)
     memory_top_k: int = Field(ge=1)
@@ -119,6 +125,11 @@ class RuntimeSettingsUpdateRequest(BaseModel):
     chunk_size: int | None = Field(default=None, ge=1, strict=True)
     chunk_overlap: int | None = Field(default=None, ge=0, strict=True)
     retrieval_top_k: int | None = Field(default=None, ge=1, strict=True)
+    retrieval_top_k_knowledge: int | None = Field(default=None, ge=1, strict=True)
+    retrieval_top_k_files: int | None = Field(default=None, ge=1, strict=True)
+    full_retrieval: bool | None = Field(default=None, strict=True)
+    retrieval_max_per_read: int | None = Field(default=None, ge=1, strict=True)
+    retrieval_anchor_count: int | None = Field(default=None, ge=0, strict=True)
     agent_max_iterations: int | None = Field(default=None, ge=1, strict=True)
     memory_token_limit: int | None = Field(default=None, ge=1, strict=True)
     memory_top_k: int | None = Field(default=None, ge=1, strict=True)
@@ -131,7 +142,7 @@ class RuntimeSettingsUpdateRequest(BaseModel):
         return self
 
 
-    def changes(self) -> dict[str, int]:
+    def changes(self) -> dict[str, int | bool]:
         return self.model_dump(
             exclude={"expected_revision"},
             exclude_none=True,
@@ -477,42 +488,40 @@ class KnowledgeStatsResponse(BaseModel):
 
 
 class ConversationCreateRequest(BaseModel):
-    """Create a global chat, or a local chat scoped to one knowledge."""
+    """Create a conversation with an optional document scope."""
 
     model_config = ConfigDict(extra="forbid")
 
-    knowledge_name: str | None = Field(default=None, max_length=MAX_IDENTIFIER_LENGTH)
-
-
+    scope: RetrievalScope | None = None
 
 
 class ConversationUpdateRequest(BaseModel):
-    """Update one or both user-editable conversation fields."""
+    """Update editable conversation fields."""
 
     model_config = ConfigDict(extra="forbid")
 
     title: str | None = Field(default=None, max_length=MAX_TITLE_LENGTH)
     pinned: bool | None = None
+    scope: RetrievalScope | None = None
 
 
     @model_validator(mode="after")
     def require_change(self) -> "ConversationUpdateRequest":
-        if self.title is None and self.pinned is None:
-            raise ValueError("title or pinned must be supplied")
+        if self.title is None and self.pinned is None and self.scope is None:
+            raise ValueError("title, pinned, or scope must be supplied")
         return self
 
 
 
 
 class ConversationResponse(BaseModel):
-    """Persisted conversation metadata with backend-computed scope type."""
+    """Persisted conversation metadata and document scope."""
 
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int
     conversation_id: str
-    type: Literal["local", "global"]
-    knowledge_name: str | None
+    scope: RetrievalScope
     title: str
     is_titled: bool
     pinned: bool
