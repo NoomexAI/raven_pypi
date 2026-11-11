@@ -40,6 +40,13 @@ from ..core.retrieval_scope import RetrievalScope
 from ..providers.model_identity import embedding_identity
 from .discovery import DiscoveryIssue
 from .knowledge_base import KnowledgeBase
+from .activity import (
+    ACTIVITY_MESSAGE_KEY,
+    ActivityLog,
+    ActivityMessage,
+    ManualActivity,
+    ManualActivityKind,
+)
 
 
 _ResultT = TypeVar("_ResultT")
@@ -169,6 +176,44 @@ class _ConversationMessageStore:
                 (turn_id,),
             ).fetchone()
         return None if row is None else self._turn_from_row(row)
+
+
+    def recover_activity_links(self, log: ActivityLog) -> None:
+        """Link pending rows using committed messages and retire the old context table."""
+        with self._lock:
+            connection = self._require_connection()
+            legacy_table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'turn_activity_context'"
+            ).fetchone()
+            if legacy_table is not None:
+                cursor = 0
+                for turn_id, through in connection.execute(
+                    "SELECT turn_id, through_sequence FROM turn_activity_context ORDER BY through_sequence"
+                ):
+                    log.link_legacy_range(turn_id, cursor, through)
+                    cursor = through
+                with connection:
+                    connection.execute("DROP TABLE turn_activity_context")
+
+            pending = log.pending_ids()
+            if not pending:
+                return
+            for turn_id, message_json in connection.execute(
+                """
+                SELECT turn_id, message_json FROM messages
+                WHERE message_order = 0 AND role = 'user' AND instr(message_json, ?) > 0
+                """,
+                (ACTIVITY_MESSAGE_KEY,),
+            ):
+                envelope = ActivityMessage.from_message(self._message_from_json(message_json))
+                if envelope is None:
+                    continue
+                linked = [entry.activity_id for entry in envelope.activities if entry.activity_id in pending]
+                if linked:
+                    log.link(turn_id, linked)
+                    pending.difference_update(linked)
+                    if not pending:
+                        break
 
 
     def list_messages(self) -> list[ChatMessage]:
@@ -495,6 +540,7 @@ class Conversation:
 
         self.metadata_path = self.dir_path / "metadata.json"
         self.messages_path = self.dir_path / "messages.sqlite3"
+        self.activities_path = self.dir_path / "activities.sqlite3"
         self.preferences_path = self.dir_path / "preferences.json"
         self.qdrant_dir = self.dir_path / "qdrant"
 
@@ -502,6 +548,9 @@ class Conversation:
         self._pending_qdrant_close: QdrantClient | None = None
         self._storage_cleanup_pending = False
         self._message_store = _ConversationMessageStore(self.messages_path)
+        self._activity_log = ActivityLog(self.activities_path)
+        self._activity_links_pending = False
+        self._captured_activity_ids: set[UUID] = set()
         self._chat_store: SimpleChatStore | None = None
         self._chat_memory: ChatSummaryMemoryBuffer | None = None
         self._vector_memory: VectorMemory | None = None
@@ -529,6 +578,77 @@ class Conversation:
         return self._scope
 
 
+    async def list_manual_activity(
+        self, *, after_sequence: int = 0, limit: int = 50, turn_id: UUID | str | None = None,
+    ) -> list[ManualActivity]:
+        """Read one page of saved actions in commit order."""
+        normalized_turn = UUID(self._validate_turn_id(turn_id)) if turn_id is not None else None
+
+        async def read() -> list[ManualActivity]:
+            async with self._lifecycle_lock:
+                await self._repair_activity_links()
+                return await self._activity_log.list(
+                    after_sequence=after_sequence, limit=limit, turn_id=normalized_turn,
+                )
+
+        return await self._run_in_use(read)
+
+
+    async def remove_from_activity(self, activity_id: UUID | str) -> bool:
+        """Remove a pending activity that the current turn has not captured."""
+        try:
+            normalized = activity_id if isinstance(activity_id, UUID) else UUID(activity_id)
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise RavenError(ErrorCode.INVALID_METADATA, "activity_id must be a valid UUID.") from exc
+
+        async def remove() -> bool:
+            async with self._lifecycle_lock:
+                await self._repair_activity_links()
+                if normalized in self._captured_activity_ids:
+                    raise RavenError(ErrorCode.ACTIVITY_IN_USE, f"Activity '{normalized}' is captured by a running turn.")
+                return await run_in_thread(self._activity_log.remove, normalized)
+
+        return await self._run_in_use(remove)
+
+
+    async def _record_manual_activity(
+        self,
+        kind: ManualActivityKind,
+        *,
+        operation_id: UUID,
+        started_at: datetime,
+        details: dict[str, Any],
+    ) -> ManualActivity:
+        async with self._lifecycle_lock:
+            if self._closed:
+                raise RavenError(ErrorCode.CONVERSATION_CLOSED, "Conversation is closed.")
+            return await self._activity_log.append(
+                kind, operation_id=operation_id, started_at=started_at, details=details,
+            )
+
+
+    async def _capture_activity(
+        self,
+        render: Callable[[list[ManualActivity]], ActivityMessage | None],
+        *,
+        limit: int,
+    ) -> ActivityMessage | None:
+        async with self._lifecycle_lock:
+            self._ensure_started()
+            await self._repair_activity_links()
+            message = render(await self._activity_log.pending(limit))
+            self._captured_activity_ids = (
+                {entry.activity_id for entry in message.activities} if message is not None else set()
+            )
+            return message
+
+
+    async def _repair_activity_links(self) -> None:
+        if self._activity_links_pending:
+            await run_in_thread(self._message_store.recover_activity_links, self._activity_log)
+            self._activity_links_pending = False
+
+
     def _set_metadata(
         self,
         *,
@@ -539,7 +659,7 @@ class Conversation:
         pinned: bool,
         created_at: datetime,
     ) -> None:
-        """Set the complete conversation metadata state."""
+        """Initialize metadata when creating or loading a conversation."""
         self.conversation_id = conversation_id
         self._scope = scope
         self.title = title
@@ -660,7 +780,9 @@ class Conversation:
         """Release the active-turn reservation owned by ``session_id``."""
         async with self._turn_lock:
             if self._active_turn_owner == session_id:
-                self._active_turn_owner = None
+                async with self._lifecycle_lock:
+                    self._captured_activity_ids.clear()
+                    self._active_turn_owner = None
 
 
     async def initialize_memory(
@@ -1056,14 +1178,24 @@ class Conversation:
         try:
             async with self._mutation_lock:
                 operation.raise_if_cancelled()
-                record, created = await run_in_thread(
-                    self._message_store.commit_turn,
-                    turn_id=turn_id,
-                    operation_id=str(operation.operation_id),
-                    user_query=user_query,
-                    messages=messages,
-                    result=result,
-                )
+                envelope = ActivityMessage.from_message(messages[0])
+                async with self._lifecycle_lock:
+                    await self._repair_activity_links()
+                    self._activity_links_pending = envelope is not None
+                    record, created = await run_in_thread(
+                        self._message_store.commit_turn,
+                        turn_id=turn_id,
+                        operation_id=str(operation.operation_id),
+                        user_query=user_query,
+                        messages=messages,
+                        result=result,
+                    )
+                    if created and envelope is not None:
+                        await run_in_thread(
+                            self._activity_log.link, turn_id,
+                            [entry.activity_id for entry in envelope.activities],
+                        )
+                    self._activity_links_pending = False
 
                 await self._reload_context_memory()
                 if index_in_vector_memory:
@@ -1151,6 +1283,8 @@ class Conversation:
         operation: Operation,
     ) -> dict[str, Any]:
         async with self._mutation_lock:
+            async with self._lifecycle_lock:
+                await self._repair_activity_links()
             record = await run_in_thread(
                 self._message_store.get_turn,
                 turn_id,
@@ -1233,6 +1367,8 @@ class Conversation:
                 self._message_store.get_turn_messages,
                 turn_id,
             )
+            if messages and ActivityMessage.from_message(messages[0]) is not None:
+                messages[0] = ChatMessage.from_str(record["user_query"], role=MessageRole.USER)
             indexed_messages = [
                 message
                 for message in messages
@@ -1467,11 +1603,8 @@ class Conversation:
         *,
         title: str | None = None,
         pinned: bool | None = None,
-        scope: RetrievalScope | None = None,
         operation: Operation | None = None,
     ) -> OperationTask:
-        if scope is not None and not isinstance(scope, RetrievalScope):
-            raise TypeError("scope must be a RetrievalScope")
         active_operation = operation or await self._operation_manager.create(
             OperationType.CONVERSATION_UPDATE
         )
@@ -1481,7 +1614,6 @@ class Conversation:
                 lambda: self._update(
                     title=title,
                     pinned=pinned,
-                    scope=scope,
                     operation=active_operation,
                 )
             ),
@@ -1493,12 +1625,11 @@ class Conversation:
         *,
         title: str | None = None,
         pinned: bool | None = None,
-        scope: RetrievalScope | None = None,
         operation: Operation,
         only_if_untitled: bool = False,
     ) -> "Conversation":
         """Update and persist mutable conversation metadata."""
-        if title is None and pinned is None and scope is None:
+        if title is None and pinned is None:
             return self
         if title is not None:
             title = self._validate_title(title)
@@ -1521,14 +1652,7 @@ class Conversation:
                     self.pinned = pinned
 
                 try:
-                    if scope is None:
-                        await run_in_thread(self.write_metadata)
-                    else:
-                        await run_in_thread(self.write_metadata, scope=scope)
-                except asyncio.CancelledError:
-                    if scope is not None:
-                        self._scope = scope
-                    raise
+                    await run_in_thread(self.write_metadata)
                 except Exception as exc:
                     self.title = previous_title
                     self.is_titled = previous_is_titled
@@ -1542,8 +1666,6 @@ class Conversation:
                         },
                     )
                     raise
-                if scope is not None:
-                    self._scope = scope
 
         await self._emit(
             operation,
@@ -1648,15 +1770,12 @@ class Conversation:
         }
 
 
-    def write_metadata(self, *, scope: RetrievalScope | None = None) -> None:
+    def write_metadata(self) -> None:
         """Atomically persist conversation metadata."""
         self.dir_path.mkdir(parents=True, exist_ok=True)
         temporary_path = self.metadata_path.with_suffix(".json.tmp")
-        metadata = self.to_dict()
-        if scope is not None:
-            metadata["scope"] = scope.model_dump(mode="json")
         temporary_path.write_text(
-            json.dumps(metadata, indent=2, ensure_ascii=False),
+            json.dumps(self.to_dict(), indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
         os.replace(temporary_path, self.metadata_path)
@@ -1669,6 +1788,9 @@ class Conversation:
         self._message_store.open()
         try:
             self._open_qdrant()
+            self._activity_log.prepare(self.dir_path / "manual_activity.sqlite3")
+            self._message_store.recover_activity_links(self._activity_log)
+            self._activity_links_pending = False
         except Exception:
             self._message_store.close()
             raise
@@ -2395,7 +2517,6 @@ class ConversationManager:
         *,
         title: str | None = None,
         pinned: bool | None = None,
-        scope: RetrievalScope | None = None,
         operation: Operation | None = None,
     ) -> OperationTask:
         active_operation = operation or await self._operation_manager.create(
@@ -2407,7 +2528,6 @@ class ConversationManager:
                 conversation_id,
                 title=title,
                 pinned=pinned,
-                scope=scope,
                 operation=active_operation,
             ),
         )
@@ -2419,20 +2539,13 @@ class ConversationManager:
         *,
         title: str | None = None,
         pinned: bool | None = None,
-        scope: RetrievalScope | None = None,
         operation: Operation,
     ) -> Conversation:
         """Update mutable conversation metadata."""
         conversation = self.get(conversation_id)
-        if scope is not None:
-            if not isinstance(scope, RetrievalScope):
-                raise TypeError("scope must be a RetrievalScope")
-            if scope.selections:
-                await self._knowledge_base.resolve_scope(scope)
         update_task = await conversation.update(
             title=title,
             pinned=pinned,
-            scope=scope,
             operation=operation,
         )
         return await update_task.result()

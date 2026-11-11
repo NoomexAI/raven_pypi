@@ -71,6 +71,7 @@ class EventType(StrEnum):
     CONVERSATION_TURN_COMMITTED = "conversation.turn_commit.completed"
     CONVERSATION_TURN_REUSED = "conversation.turn_commit.reused"
     CONVERSATION_TURN_COMMIT_FAILED = "conversation.turn_commit.failed"
+    MANUAL_ACTIVITY_RECORDED = "conversation.manual_activity.recorded"
     CONVERSATION_MEMORY_INDEX_STARTED = "conversation.memory_index.started"
     CONVERSATION_MEMORY_INDEX_COMPLETED = "conversation.memory_index.completed"
     CONVERSATION_MEMORY_INDEX_FAILED = "conversation.memory_index.failed"

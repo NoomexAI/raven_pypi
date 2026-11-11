@@ -22,6 +22,7 @@ from ..core.operations import (
     RetryPolicy,
 )
 from ..core.retrieval_scope import RetrievalScope
+from ..data_management.activity import ManualActivity
 from ..providers import ModelRole, ModelSpec
 
 
@@ -502,14 +503,29 @@ class ConversationUpdateRequest(BaseModel):
 
     title: str | None = Field(default=None, max_length=MAX_TITLE_LENGTH)
     pinned: bool | None = None
-    scope: RetrievalScope | None = None
 
 
     @model_validator(mode="after")
     def require_change(self) -> "ConversationUpdateRequest":
-        if self.title is None and self.pinned is None and self.scope is None:
-            raise ValueError("title, pinned, or scope must be supplied")
+        if self.title is None and self.pinned is None:
+            raise ValueError("title or pinned must be supplied")
         return self
+
+
+class ConversationTitleRequest(BaseModel):
+    """Set the title of a conversation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=MAX_TITLE_LENGTH)
+
+
+class ConversationPinnedRequest(BaseModel):
+    """Pin or unpin a conversation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    pinned: bool = Field(strict=True)
 
 
 
@@ -631,6 +647,32 @@ class TurnCreateRequest(BaseModel):
         return query
 
 
+class ManualRetrievalRequest(BaseModel):
+    """Search the conversation's scope with a specific retrieval strategy."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    query: str = Field(min_length=1, max_length=MAX_USER_QUERY_LENGTH)
+    retrieval_mode: RetrievalMode
+
+
+class ManualActivityPageResponse(BaseModel):
+    """One page of recorded manual actions in sequence order."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ManualActivity]
+    next_cursor: int | None = None
+
+
+class ManualActivityRemovalResponse(BaseModel):
+    """Whether a pending activity was deleted."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    removed: bool
+
+
 
 
 class TurnAcceptedResponse(BaseModel):
@@ -656,6 +698,14 @@ class EvidenceReferenceResponse(BaseModel):
     knowledge_name: str
     file_name: str
     section_id: str
+
+
+class SourceReconstructionRequest(BaseModel):
+    """Section references to highlight in reconstructed source files."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sections: list[EvidenceReferenceResponse]
 
 
 
@@ -872,7 +922,7 @@ class OperationTaskPageResponse(BaseModel):
 
 
 class OperationTaskReference(BaseModel):
-    """Reference returned when a new retry task has been accepted."""
+    """Reference returned when an operation task has been accepted."""
 
     model_config = ConfigDict(extra="forbid")
 

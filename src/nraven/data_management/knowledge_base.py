@@ -305,13 +305,26 @@ class _KnowledgeFileStore:
         after_section_index: int = 0,
     ) -> list[dict[str, Any]]:
         """Read one bounded section page in document order."""
+        return self._list_sections_page("f.file_name", file_name, limit, after_section_index)
+
+
+    def list_sections_page_by_file_id(
+        self, file_id: str, limit: int, after_section_index: int = 0,
+    ) -> list[dict[str, Any]]:
+        return self._list_sections_page("f.file_id", file_id, limit, after_section_index)
+
+
+    def _list_sections_page(
+        self, column: Literal["f.file_name", "f.file_id"], value: str,
+        limit: int, after_section_index: int,
+    ) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._require_connection().execute(
-                """
+                f"""
                 SELECT s.*, f.file_name
                 FROM sections AS s
                 JOIN files AS f ON f.file_id = s.file_id
-                WHERE f.file_name = ? AND s.section_index > ?
+                WHERE {column} = ? AND s.section_index > ?
                   AND NOT EXISTS (
                       SELECT 1 FROM pending_file_deletions AS p
                       WHERE p.file_id = f.file_id
@@ -319,7 +332,7 @@ class _KnowledgeFileStore:
                 ORDER BY s.section_index
                 LIMIT ?
                 """,
-                (file_name, after_section_index, limit),
+                (value, after_section_index, limit),
             ).fetchall()
         return [self._section_from_row(row) for row in rows]
 
@@ -887,6 +900,11 @@ class Knowledge:
         return self._read_file_store("list_sections", file_name)
 
 
+    def get_file(self, file_id: str) -> dict[str, Any] | None:
+        """Read one stored file record by ID."""
+        return self._read_file_store("get_file", file_id)
+
+
     def list_sections_by_file_id(self, file_id: str) -> list[dict[str, Any]]:
         """Read sections of a stored file by its stable ID."""
         return self._read_file_store("list_sections_by_file_id", file_id)
@@ -908,6 +926,15 @@ class Knowledge:
 
     def get_section(self, section_id: str) -> dict[str, Any] | None:
         return self._read_file_store("get_section", section_id)
+
+
+    def list_sections_page_by_file_id(
+        self, file_id: str, limit: int, after_section_index: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Read a bounded section page for a stable file ID."""
+        return self._read_file_store(
+            "list_sections_page_by_file_id", file_id, limit, after_section_index,
+        )
 
 
     async def ingest(

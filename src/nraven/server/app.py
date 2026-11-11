@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from ..core.config import DEFAULT_USER_ID, SystemConfig, load_system_config
 from .errors import install_error_handling
 from .middleware import RequestLimitMiddleware
+from .routers.activities import router as activities_router
 from .routers.conversations import router as conversations_router
 from .routers.health import router as health_router
 from .routers.knowledges import router as knowledges_router
@@ -77,4 +78,5 @@ def create_app(
     app.include_router(models_router)
     app.include_router(knowledges_router)
     app.include_router(conversations_router)
+    app.include_router(activities_router)
     return app

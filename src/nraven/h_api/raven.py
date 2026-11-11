@@ -1636,14 +1636,42 @@ class Raven:
         *,
         title: str | None = None,
         pinned: bool | None = None,
-        scope: RetrievalScope | None = None,
         operation: Operation | None = None,
     ) -> OperationTask:
         return await self.conversation_manager.update(
             conversation_id,
             title=title,
             pinned=pinned,
-            scope=scope,
+            operation=operation,
+        )
+
+
+    async def rename_conversation(
+        self,
+        conversation_id: str,
+        title: str,
+        *,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        """Set the title of a conversation."""
+        return await self.update_conversation(
+            conversation_id,
+            title=title,
+            operation=operation,
+        )
+
+
+    async def set_conversation_pinned(
+        self,
+        conversation_id: str,
+        pinned: bool,
+        *,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        """Pin or unpin a conversation."""
+        return await self.update_conversation(
+            conversation_id,
+            pinned=pinned,
             operation=operation,
         )
 
@@ -1664,15 +1692,14 @@ class Raven:
         self,
         conversation: Conversation,
         *,
+        manual_only: bool = False,
         max_iterations: int | None = None,
         memory_token_limit: int | None = None,
         memory_top_k: int | None = None,
     ) -> Session:
-        """Create a temporary interaction session for a conversation."""
-        self._ensure_models_loaded()
-        assert self.llm is not None
-        assert self.embed_model is not None
-        assert self.retrieval_pipelines is not None
+        """Create a temporary session, with an agent unless manual_only is set."""
+        if not manual_only:
+            self._ensure_models_loaded()
         settings = self._runtime_config
         effective_max_iterations = (
             settings.agent_max_iterations
@@ -1703,15 +1730,18 @@ class Raven:
                 "A model reload is in progress; create the session after it completes.",
             )
 
-        harness = AgentHarness(
-            llm=self.llm,
-            knowledge_base=self.knowledge_base,
-            retrieval_pipelines=self.retrieval_pipelines,
-            operation_manager=self.operation_manager,
-            reconstructor=self.reconstructor,
-            max_iterations=effective_max_iterations,
-            max_cached_prompts=self.system_config.prompt_cache_size,
-        )
+        harness = None
+        if not manual_only:
+            assert self.retrieval_pipelines is not None
+            harness = AgentHarness(
+                llm=self.llm,
+                knowledge_base=self.knowledge_base,
+                retrieval_pipelines=self.retrieval_pipelines,
+                operation_manager=self.operation_manager,
+                reconstructor=self.reconstructor,
+                max_iterations=effective_max_iterations,
+                max_cached_prompts=self.system_config.prompt_cache_size,
+            )
         return Session(
             conversation,
             harness,
@@ -1719,6 +1749,9 @@ class Raven:
             llm=self.llm,
             embed_model=self.embed_model,
             get_runtime_config=lambda: self.runtime_config,
+            knowledge_base=self.knowledge_base,
+            retrieval_pipelines=self.retrieval_pipelines,
+            reconstructor=self.reconstructor,
             memory_token_limit=effective_memory_token_limit,
             memory_top_k=effective_memory_top_k,
         )

@@ -1,4 +1,4 @@
-"""Scope-aware tools exposed to Raven's autonomous agent."""
+"""Retrieval, navigation, and memory tools exposed to Raven's agent."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from llama_index.core.tools import FunctionTool
 
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.operations import Operation
-from ..core.retrieval_scope import RetrievalScope
 from ..data_management.conversation_manager import Conversation
 from ..data_management.knowledge_base import Knowledge, KnowledgeBase
 from .contracts import RetrievalPipelines
@@ -119,7 +118,8 @@ class ToolBuilder:
             for mode in RetrievalMode
             if policy.permits(mode)
         ]
-        tools.extend(self._navigation_tools(policy.scope, operation))
+        tools.append(self._retrieval_scope_tool(policy, operation))
+        tools.extend(self._navigation_tools(operation))
         tools.extend(
             self._memory_tools(
                 conversation,
@@ -128,6 +128,28 @@ class ToolBuilder:
             )
         )
         return tools
+
+
+    @staticmethod
+    def _retrieval_scope_tool(policy: AgentPolicy, operation: Operation) -> FunctionTool:
+        async def get_retrieval_scope() -> str:
+            operation.raise_if_cancelled()
+            return ToolResult(
+                ok=True,
+                result=policy.scope.model_dump(mode="json", exclude_none=True),
+                ui_summary={"kind": "retrieval_scope"},
+            ).to_model_text()
+
+        return FunctionTool.from_defaults(
+            async_fn=get_retrieval_scope,
+            name="get_retrieval_scope",
+            description=(
+                "Inspect the saved retrieval selections when you need to know which documents "
+                "this conversation can search. Empty selections mean the whole knowledge base. "
+                "A selection with only knowledge_name means the entire named knowledge. "
+                "A selection with file_id or file_name identifies a single file."
+            ),
+        )
 
 
     def _retrieval_tool(
@@ -173,27 +195,11 @@ class ToolBuilder:
                 ).to_model_text()
 
             pipeline = getattr(self._retrieval_pipelines, mode.value)
-            limit_field = {
-                RetrievalMode.EMBEDDED: "top_k",
-                RetrievalMode.HIERARCHICAL: "top_k_section",
-                RetrievalMode.AGREEMENT: "top_k",
-                RetrievalMode.VECTOR_CONDITIONED: "top_k_sections",
-            }[mode]
-            config = policy.runtime_config
-            options: dict[str, int | bool] = {limit_field: config.retrieval_top_k}
-            if mode is not RetrievalMode.EMBEDDED:
-                options["max_per_read"] = config.retrieval_max_per_read
-                options["anchor_count"] = config.retrieval_anchor_count
-            if mode in (RetrievalMode.HIERARCHICAL, RetrievalMode.AGREEMENT):
-                options["top_k_knowledge"] = config.retrieval_top_k_knowledge
-                options["full_retrieval"] = config.full_retrieval
-            if mode is RetrievalMode.VECTOR_CONDITIONED:
-                options["top_k_files"] = config.retrieval_top_k_files
             retrieval_task = await pipeline.retrieve(
                 query,
                 scope=policy.scope,
                 operation=operation,
-                **options,
+                **RetrievalPipelines.options(mode, policy.runtime_config),
             )
             result = await retrieval_task.result()
 
@@ -220,33 +226,24 @@ class ToolBuilder:
 
     def _navigation_tools(
         self,
-        scope: RetrievalScope,
         operation: Operation,
     ) -> list[FunctionTool]:
         return [
-            self._list_knowledges_tool(scope, operation),
-            self._list_files_tool(scope, operation),
-            self._list_sections_tool(scope, operation),
-            self._get_sections_tool(scope, operation),
+            self._list_knowledges_tool(operation),
+            self._list_files_tool(operation),
+            self._list_sections_tool(operation),
+            self._get_sections_tool(operation),
         ]
 
 
     def _list_knowledges_tool(
         self,
-        scope: RetrievalScope,
         operation: Operation,
     ) -> FunctionTool:
         async def list_knowledges() -> str:
             try:
                 operation.raise_if_cancelled()
-                if scope.selections:
-                    resolved = await self._knowledge_base.resolve_scope(scope)
-                    knowledges = [
-                        {"name": name, "safe_name": name, "file_count": len(file_ids)}
-                        for name, file_ids in resolved.items()
-                    ]
-                else:
-                    knowledges = await self._knowledge_base.list()
+                knowledges = await self._knowledge_base.list()
                 return ToolResult(
                     ok=True,
                     result=knowledges,
@@ -264,18 +261,18 @@ class ToolBuilder:
         return FunctionTool.from_defaults(
             async_fn=list_knowledges,
             name="list_knowledges",
-            description="List the knowledges available in the conversation scope.",
+            description="List the knowledges in the knowledge base.",
         )
 
 
-    def _list_files_tool(self, scope: RetrievalScope, operation: Operation) -> FunctionTool:
+    def _list_files_tool(self, operation: Operation) -> FunctionTool:
         async def list_files(knowledge_name: str) -> str:
-            return await self._list_files(knowledge_name, operation, scope=scope)
+            return await self._list_files(knowledge_name, operation)
 
         return FunctionTool.from_defaults(
             async_fn=list_files,
             name="list_files",
-            description="List the files in the named knowledge that are in the conversation scope.",
+            description="List the files in the named knowledge.",
         )
 
 
@@ -283,16 +280,11 @@ class ToolBuilder:
         self,
         knowledge_name: str,
         operation: Operation,
-        *,
-        scope: RetrievalScope = RetrievalScope(),
     ) -> str:
         try:
             operation.raise_if_cancelled()
             knowledge = self._knowledge(knowledge_name)
-            eligible_ids = await self._navigation_file_ids(scope, knowledge)
             files = await asyncio.to_thread(knowledge.list_files)
-            if eligible_ids is not None:
-                files = [file for file in files if file["file_id"] in eligible_ids]
             return ToolResult(
                 ok=True,
                 result=files,
@@ -313,7 +305,7 @@ class ToolBuilder:
             )
 
 
-    def _list_sections_tool(self, scope: RetrievalScope, operation: Operation) -> FunctionTool:
+    def _list_sections_tool(self, operation: Operation) -> FunctionTool:
         async def list_sections(
             knowledge_name: str,
             file_name: str,
@@ -325,7 +317,6 @@ class ToolBuilder:
                 knowledge_name,
                 file_name,
                 operation,
-                scope=scope,
                 get_content=get_content,
                 after_section_index=after_section_index,
                 limit=limit,
@@ -335,7 +326,7 @@ class ToolBuilder:
             async_fn=list_sections,
             name="list_sections",
             description=(
-                "List section IDs and metadata in a named file within the conversation scope. "
+                "List section IDs and metadata in a named file. "
                 "The default page contains up to 20 sections. Pass after_section_index from "
                 "the previous result to continue. The limit is at most 50, or 5 with "
                 "get_content=true. Use get_content only for explicit inspection."
@@ -349,7 +340,6 @@ class ToolBuilder:
         file_name: str,
         operation: Operation,
         *,
-        scope: RetrievalScope = RetrievalScope(),
         get_content: bool = False,
         after_section_index: int = 0,
         limit: int | None = None,
@@ -370,19 +360,12 @@ class ToolBuilder:
                     f"limit must be an integer between 1 and {maximum} for this view.",
                 )
             knowledge = self._knowledge(knowledge_name)
-            eligible_ids = await self._navigation_file_ids(scope, knowledge)
-            if eligible_ids is not None:
-                files = await asyncio.to_thread(knowledge.list_files)
-                if not any(file["file_name"] == file_name and file["file_id"] in eligible_ids for file in files):
-                    raise RavenError(ErrorCode.FILE_NOT_FOUND, f"File '{file_name}' is outside the conversation scope.")
             page = await asyncio.to_thread(
                 knowledge.list_sections_page,
                 file_name,
                 page_size + 1,
                 after_section_index,
             )
-            if eligible_ids is not None and any(section["file_id"] not in eligible_ids for section in page):
-                raise RavenError(ErrorCode.FILE_NOT_FOUND, f"File '{file_name}' is outside the conversation scope.")
             if not page and not await asyncio.to_thread(knowledge.file_exists, file_name):
                 raise RavenError(
                     ErrorCode.FILE_NOT_FOUND,
@@ -430,16 +413,16 @@ class ToolBuilder:
             )
 
 
-    def _get_sections_tool(self, scope: RetrievalScope, operation: Operation) -> FunctionTool:
+    def _get_sections_tool(self, operation: Operation) -> FunctionTool:
         async def get_sections(knowledge_name: str, section_ids: list[str]) -> str:
-            return await self._get_sections(knowledge_name, section_ids, operation, scope=scope)
+            return await self._get_sections(knowledge_name, section_ids, operation)
 
         return FunctionTool.from_defaults(
             async_fn=get_sections,
             name="get_sections",
             description=(
                 "Get metadata and raw content for 1 to 5 selected section IDs in a "
-                "named knowledge within the conversation scope. Returns them in requested order."
+                "named knowledge. Returns them in requested order."
             ),
         )
 
@@ -449,8 +432,6 @@ class ToolBuilder:
         knowledge_name: str,
         section_ids: list[str],
         operation: Operation,
-        *,
-        scope: RetrievalScope = RetrievalScope(),
     ) -> str:
         try:
             operation.raise_if_cancelled()
@@ -464,12 +445,11 @@ class ToolBuilder:
                     f"section_ids must contain 1 to {MAX_SECTION_FETCH} non-empty strings.",
                 )
             knowledge = self._knowledge(knowledge_name)
-            eligible_ids = await self._navigation_file_ids(scope, knowledge)
             result: list[dict[str, Any]] = []
             for section_id in section_ids:
                 operation.raise_if_cancelled()
                 section = await asyncio.to_thread(knowledge.get_section, section_id)
-                if section is None or (eligible_ids is not None and section["file_id"] not in eligible_ids):
+                if section is None:
                     raise RavenError(
                         ErrorCode.SECTION_NOT_FOUND,
                         f"Section '{section_id}' does not exist in knowledge '{knowledge_name}'.",
@@ -633,20 +613,6 @@ class ToolBuilder:
                 ),
             ),
         ]
-
-
-    async def _navigation_file_ids(
-        self, scope: RetrievalScope, knowledge: Knowledge
-    ) -> frozenset[str] | None:
-        if not scope.selections:
-            return None
-        resolved = await self._knowledge_base.resolve_scope(scope)
-        if knowledge.name not in resolved:
-            raise RavenError(
-                ErrorCode.KNOWLEDGE_NOT_FOUND,
-                f"Knowledge '{knowledge.name}' is outside the conversation scope.",
-            )
-        return resolved[knowledge.name]
 
 
     def _knowledge(self, knowledge_name: str) -> Knowledge:

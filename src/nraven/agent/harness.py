@@ -10,6 +10,7 @@ from typing import Any, cast
 
 from llama_index.core.agent.workflow import FunctionAgent, ToolCall, ToolCallResult
 from llama_index.core.llms import ChatMessage
+from llama_index.core.utils import get_tokenizer
 
 from ..core.config import DEFAULT_PROMPT_CACHE_SIZE, RuntimeConfig
 from ..core.errors import ErrorCode, RavenError, error_payload
@@ -17,6 +18,7 @@ from ..core.events import Event, EventType
 from ..core.operations import Operation, OperationManager, OperationType
 from ..data_management.conversation_manager import Conversation
 from ..data_management.knowledge_base import KnowledgeBase
+from ..data_management.activity import ACTIVITY_MESSAGE_KEY, ActivityMessage
 from ..pipelines.reconstructor import Reconstructor
 from .contracts import AgentRun, AgentTranscript, RetrievalPipelines
 from .policy import AgentPolicy, RetrievalMode
@@ -95,6 +97,7 @@ class AgentHarness:
         *,
         retrieval_mode: RetrievalMode | str | None = None,
         runtime_config: RuntimeConfig | None = None,
+        activity_message: ActivityMessage | None = None,
         operation: Operation | None = None,
     ) -> AgentRun:
         """Start an agent task with one snapshot of its retrieval defaults."""
@@ -110,15 +113,24 @@ class AgentHarness:
             max_iterations=self._max_iterations,
             runtime_config=runtime_config if runtime_config is not None else RuntimeConfig(),
         )
-        transcript = AgentTranscript.from_query(query)
+        model_query = query
+        activity_tokens = 0
+        if activity_message is not None:
+            if activity_message.current_query != query:
+                raise RavenError(ErrorCode.INVALID_METADATA, "The activity message query does not match the turn.")
+            model_query = activity_message.model_dump_json()
+            tokenizer = get_tokenizer()
+            activity_tokens = len(tokenizer(model_query)) - len(tokenizer(query))
+        transcript = AgentTranscript.from_query(model_query, includes_activity=activity_message is not None)
 
         async def worker(operation: Operation) -> None:
             await self._execute(
                 conversation,
-                query,
+                model_query,
                 policy,
                 operation,
                 transcript,
+                activity_tokens,
             )
 
         active_operation = operation or await self._operation_manager.create(
@@ -145,10 +157,11 @@ class AgentHarness:
     async def _execute(
         self,
         conversation: Conversation,
-        query: str,
+        model_query: str,
         policy: AgentPolicy,
         operation: Operation,
         transcript: AgentTranscript,
+        activity_tokens: int,
     ) -> None:
         handler: Any = None
         translator: WorkflowEventTranslator | None = None
@@ -165,10 +178,19 @@ class AgentHarness:
             )
             prompt = self._update_system_prompt(conversation, policy)
             context_task = await conversation.get_context_messages(
-                initial_token_count=prompt.token_count,
+                initial_token_count=prompt.token_count + activity_tokens,
                 operation=operation,
             )
             history = await context_task.result()
+            history = [
+                message.model_copy(update={
+                    "additional_kwargs": {
+                        key: value for key, value in message.additional_kwargs.items()
+                        if key != ACTIVITY_MESSAGE_KEY
+                    },
+                }) if ACTIVITY_MESSAGE_KEY in message.additional_kwargs else message
+                for message in history
+            ]
             operation.raise_if_cancelled()
 
             agent = self._agent_factory(
@@ -180,7 +202,7 @@ class AgentHarness:
                 early_stopping_method="generate",
             )
             handler = agent.run(
-                user_msg=query,
+                user_msg=model_query,
                 chat_history=history,
                 max_iterations=policy.max_iterations,
                 early_stopping_method="generate",

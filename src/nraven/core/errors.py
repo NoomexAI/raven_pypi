@@ -23,6 +23,8 @@ class ErrorCode(StrEnum):
     CONTEXT_TOKEN_LIMIT_TOO_SMALL = "context_token_limit_too_small"
     CONVERSATION_TURN_CONFLICT = "conversation_turn_conflict"
     CONVERSATION_TURN_ACTIVE = "conversation_turn_active"
+    ACTIVITY_IN_USE = "activity_in_use"
+    ACTIVITY_COMMITTED = "activity_committed"
     CONVERSATION_TURN_NOT_FOUND = "conversation_turn_not_found"
     CONVERSATION_TURN_RESULT_MISSING = "conversation_turn_result_missing"
     RECONSTRUCTION_EVIDENCE_NOT_FOUND = "reconstruction_evidence_not_found"

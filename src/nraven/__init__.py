@@ -19,6 +19,7 @@ from .core.retrieval_scope import RetrievalScope, RetrievalSelection
 from .data_management.conversation_manager import Conversation, ConversationManager
 from .data_management.discovery import DiscoveryIssue
 from .data_management.knowledge_base import Knowledge, KnowledgeBase
+from .data_management.activity import ManualActivity
 from .document_processing.document_parser import (
     DocumentParser,
     ElementType,
@@ -62,6 +63,7 @@ __all__ = [
     "Knowledge",
     "KnowledgeBase",
     "LiteLLMManager",
+    "ManualActivity",
     "ModelRole",
     "ModelSpec",
     "NavigationType",

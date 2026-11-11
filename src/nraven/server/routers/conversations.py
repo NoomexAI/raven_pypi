@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Query, Request, status
 
 from ...core.config import SQLITE_MAX_INTEGER
 from ...core.errors import ErrorCode, RavenError
+from ...core.retrieval_scope import RetrievalScope
 from ...h_api.raven import Raven
 from ..dependencies import lease_raven, submit_task
 from ..schemas import (
@@ -16,7 +17,9 @@ from ..schemas import (
     ConversationMessagePageResponse,
     ConversationMessageResponse,
     ConversationPageResponse,
+    ConversationPinnedRequest,
     ConversationResponse,
+    ConversationTitleRequest,
     ConversationUpdateRequest,
     ErrorResponse,
     OperationTaskReference,
@@ -92,6 +95,20 @@ async def get_conversation(
     )
 
 
+@router.get(
+    "/{conversation_id}/scope",
+    response_model=RetrievalScope,
+    response_model_exclude_none=True,
+    responses=_ERROR_RESPONSES,
+)
+async def get_conversation_scope(
+    conversation_id: str,
+    raven: Annotated[Raven, Depends(lease_raven)],
+) -> RetrievalScope:
+    """Return the saved retrieval selections for this conversation."""
+    return raven.get_conversation(conversation_id).scope
+
+
 @router.patch(
     "/{conversation_id}",
     response_model=ConversationResponse,
@@ -106,12 +123,41 @@ async def update_conversation(
         conversation_id,
         title=request.title,
         pinned=request.pinned,
-        scope=request.scope,
     )
     await task.result()
     return ConversationResponse.model_validate(
         raven.get_conversation_details(conversation_id)
     )
+
+
+@router.patch(
+    "/{conversation_id}/title",
+    response_model=ConversationResponse,
+    responses=_ERROR_RESPONSES,
+)
+async def rename_conversation(
+    conversation_id: str,
+    request: ConversationTitleRequest,
+    raven: Annotated[Raven, Depends(lease_raven)],
+) -> ConversationResponse:
+    task = await raven.rename_conversation(conversation_id, request.title)
+    conversation = await task.result()
+    return ConversationResponse.model_validate(conversation.to_dict())
+
+
+@router.patch(
+    "/{conversation_id}/pinned",
+    response_model=ConversationResponse,
+    responses=_ERROR_RESPONSES,
+)
+async def set_conversation_pinned(
+    conversation_id: str,
+    request: ConversationPinnedRequest,
+    raven: Annotated[Raven, Depends(lease_raven)],
+) -> ConversationResponse:
+    task = await raven.set_conversation_pinned(conversation_id, request.pinned)
+    conversation = await task.result()
+    return ConversationResponse.model_validate(conversation.to_dict())
 
 
 @router.delete(

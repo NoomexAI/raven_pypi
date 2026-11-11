@@ -58,6 +58,8 @@ async def submit_task(
     request: Request,
     raven: Raven,
     submitter: Callable[[], Awaitable[SubmittedValue]],
+    *,
+    cleanup: Callable[[], Awaitable[None]] | None = None,
 ) -> SubmittedValue:
     """Admit, create, and retain one accepted background task."""
     submission = asyncio.create_task(
@@ -65,6 +67,7 @@ async def submit_task(
             resolve_user_id(request),
             raven,
             submitter,
+            cleanup=cleanup,
         )
     )
     submitted, cancellation_requested = await await_completion(submission)

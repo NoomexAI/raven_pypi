@@ -11,9 +11,12 @@ from llama_index.core.base.llms.types import MessageRole, ToolCallBlock
 from llama_index.core.llms import ChatMessage
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..core.config import RuntimeConfig
 from ..core.errors import ErrorCode, RavenError
 from ..core.events import Event, EventType
 from ..core.operations import OperationStatus, OperationTask
+from ..data_management.activity import ACTIVITY_MESSAGE_KEY
+from .policy import RetrievalMode
 
 
 class EvidenceReference(BaseModel):
@@ -49,9 +52,13 @@ class AgentTranscript:
     _messages: list[ChatMessage]
 
     @classmethod
-    def from_query(cls, query: str) -> "AgentTranscript":
+    def from_query(cls, query: str, *, includes_activity: bool = False) -> "AgentTranscript":
         return cls(
-            _messages=[ChatMessage.from_str(query, role=MessageRole.USER)]
+            _messages=[ChatMessage(
+                role=MessageRole.USER,
+                content=query,
+                additional_kwargs={ACTIVITY_MESSAGE_KEY: 1} if includes_activity else {},
+            )]
         )
 
 
@@ -115,6 +122,26 @@ class RetrievalPipelines:
     hierarchical: Any
     agreement: Any
     vector_conditioned: Any
+
+    @staticmethod
+    def options(mode: RetrievalMode, config: RuntimeConfig) -> dict[str, int | bool]:
+        """Translate shared defaults to the selected pipeline's arguments."""
+        limit_field = {
+            RetrievalMode.EMBEDDED: "top_k",
+            RetrievalMode.HIERARCHICAL: "top_k_section",
+            RetrievalMode.AGREEMENT: "top_k",
+            RetrievalMode.VECTOR_CONDITIONED: "top_k_sections",
+        }[mode]
+        options: dict[str, int | bool] = {limit_field: config.retrieval_top_k}
+        if mode is not RetrievalMode.EMBEDDED:
+            options["max_per_read"] = config.retrieval_max_per_read
+            options["anchor_count"] = config.retrieval_anchor_count
+        if mode in (RetrievalMode.HIERARCHICAL, RetrievalMode.AGREEMENT):
+            options["top_k_knowledge"] = config.retrieval_top_k_knowledge
+            options["full_retrieval"] = config.full_retrieval
+        if mode is RetrievalMode.VECTOR_CONDITIONED:
+            options["top_k_files"] = config.retrieval_top_k_files
+        return options
 
 
 

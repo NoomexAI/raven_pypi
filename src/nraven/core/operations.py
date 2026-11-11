@@ -95,6 +95,13 @@ class OperationType(StrEnum):
 
     CHAT_GENERATE_RESPONSE = "chat.generate_response"
     SESSION_GENERATE_RESPONSE = "session.generate_response"
+    SESSION_RETRIEVE = "session.retrieve"
+    SESSION_LIST_KNOWLEDGES = "session.list_knowledges"
+    SESSION_LIST_FILES = "session.list_files"
+    SESSION_LIST_SECTIONS = "session.list_sections"
+    SESSION_OPEN_FILE = "session.open_file"
+    SESSION_OPEN_SECTION = "session.open_section"
+    SESSION_RECONSTRUCT = "session.reconstruct"
 
 
 

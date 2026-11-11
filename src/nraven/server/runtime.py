@@ -156,16 +156,21 @@ class UserRuntimeRegistry:
         user_id: UUID,
         raven: Raven,
         submitter: TaskSubmitter[SubmittedValue],
+        *,
+        cleanup: Callable[[], Awaitable[None]] | None = None,
     ) -> SubmittedValue:
         """Reserve capacity before creating and retaining an accepted task."""
         await self._reserve_task_slot(user_id)
         try:
             submitted = await submitter()
             task = _submitted_operation_task(submitted)
-            await self.retain_task(user_id, raven, task)
+            await self.retain_task(user_id, raven, task, cleanup)
             return submitted
         except BaseException:
-            await self._release_task_slot(user_id)
+            try:
+                await self._cleanup_submitted_task(cleanup)
+            finally:
+                await self._release_task_slot(user_id)
             raise
 
 
@@ -174,6 +179,7 @@ class UserRuntimeRegistry:
         user_id: UUID,
         raven: Raven,
         task: OperationTask,
+        cleanup: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         """Pin the submitting runtime until an accepted task reaches terminal state."""
         async with self._lock:
@@ -187,7 +193,7 @@ class UserRuntimeRegistry:
             entry.leases += 1
             try:
                 monitor = asyncio.create_task(
-                    self._await_task_terminal(user_id, raven, task),
+                    self._await_task_terminal(user_id, raven, task, cleanup),
                     name=f"nraven-runtime-job-{task.task_id}",
                 )
             except BaseException:
@@ -202,14 +208,27 @@ class UserRuntimeRegistry:
         user_id: UUID,
         raven: Raven,
         task: OperationTask,
+        cleanup: Callable[[], Awaitable[None]] | None,
     ) -> None:
         try:
             await task.result()
         except (Exception, asyncio.CancelledError):
             pass
         finally:
-            await self._release(user_id, raven)
-            await self._release_task_slot(user_id)
+            try:
+                await self._cleanup_submitted_task(cleanup)
+            finally:
+                await self._release(user_id, raven)
+                await self._release_task_slot(user_id)
+
+
+    @staticmethod
+    async def _cleanup_submitted_task(cleanup: Callable[[], Awaitable[None]] | None) -> None:
+        if cleanup is not None:
+            try:
+                await cleanup()
+            except Exception:
+                LOGGER.exception("Accepted task cleanup failed")
 
 
     async def _reserve_task_slot(self, user_id: UUID) -> None:
