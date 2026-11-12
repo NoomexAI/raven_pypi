@@ -42,10 +42,10 @@ from .discovery import DiscoveryIssue
 from .knowledge_base import KnowledgeBase
 from .activity import (
     ACTIVITY_MESSAGE_KEY,
+    Activity,
+    ActivityKind,
     ActivityLog,
     ActivityMessage,
-    ManualActivity,
-    ManualActivityKind,
 )
 
 
@@ -578,13 +578,13 @@ class Conversation:
         return self._scope
 
 
-    async def list_manual_activity(
+    async def list_activities(
         self, *, after_sequence: int = 0, limit: int = 50, turn_id: UUID | str | None = None,
-    ) -> list[ManualActivity]:
+    ) -> list[Activity]:
         """Read one page of saved actions in commit order."""
         normalized_turn = UUID(self._validate_turn_id(turn_id)) if turn_id is not None else None
 
-        async def read() -> list[ManualActivity]:
+        async def read() -> list[Activity]:
             async with self._lifecycle_lock:
                 await self._repair_activity_links()
                 return await self._activity_log.list(
@@ -611,14 +611,14 @@ class Conversation:
         return await self._run_in_use(remove)
 
 
-    async def _record_manual_activity(
+    async def _record_activity(
         self,
-        kind: ManualActivityKind,
+        kind: ActivityKind,
         *,
         operation_id: UUID,
         started_at: datetime,
         details: dict[str, Any],
-    ) -> ManualActivity:
+    ) -> Activity:
         async with self._lifecycle_lock:
             if self._closed:
                 raise RavenError(ErrorCode.CONVERSATION_CLOSED, "Conversation is closed.")
@@ -629,7 +629,7 @@ class Conversation:
 
     async def _capture_activity(
         self,
-        render: Callable[[list[ManualActivity]], ActivityMessage | None],
+        render: Callable[[list[Activity]], ActivityMessage | None],
         *,
         limit: int,
     ) -> ActivityMessage | None:
@@ -1089,6 +1089,12 @@ class Conversation:
 
     async def search_memory(self, query: str) -> list[ChatMessage]:
         """Search semantic conversation memory for messages relevant to ``query``."""
+        turns = await self.search_memory_turns(query)
+        return [message for _, messages in turns for message in messages]
+
+
+    async def search_memory_turns(self, query: str) -> list[tuple[str, list[ChatMessage]]]:
+        """Return ranked memory matches grouped by their conversation turn ID."""
         value = query.strip() if isinstance(query, str) else ""
         if not value:
             raise RavenError(
@@ -1096,9 +1102,14 @@ class Conversation:
                 "Memory query must be a non-empty string.",
             )
 
-        vector_memory = self._require_vector_memory()
         async with self._memory_lock:
-            return await vector_memory.aget(value)
+            vector_memory = self._require_vector_memory()
+            retriever = vector_memory.vector_index.as_retriever(**vector_memory.retriever_kwargs)
+            matches = await run_in_thread(retriever.retrieve, value)
+        return [
+            (match.node_id, [ChatMessage.model_validate(payload) for payload in match.metadata["sub_dicts"]])
+            for match in matches
+        ]
 
 
     async def add_message(
@@ -1788,7 +1799,7 @@ class Conversation:
         self._message_store.open()
         try:
             self._open_qdrant()
-            self._activity_log.prepare(self.dir_path / "manual_activity.sqlite3")
+            self._activity_log.prepare()
             self._message_store.recover_activity_links(self._activity_log)
             self._activity_links_pending = False
         except Exception:

@@ -64,6 +64,7 @@ CONTENT_SECTION_PAGE_SIZE = 3
 MAX_SECTION_PAGE_SIZE = 50
 MAX_CONTENT_SECTION_PAGE_SIZE = 5
 MAX_SECTION_FETCH = 5
+ACTIVITY_PAGE_SIZE = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,12 +485,15 @@ class ToolBuilder:
         async def search_memory(query: str) -> str:
             try:
                 operation.raise_if_cancelled()
-                messages = await conversation.search_memory(query)
-                result = [message_record(message) for message in messages]
+                turns = await conversation.search_memory_turns(query)
+                result = [
+                    {"turn_id": turn_id, "messages": [message_record(message) for message in messages]}
+                    for turn_id, messages in turns
+                ]
                 return ToolResult(
                     ok=True,
                     result=result,
-                    ui_summary={"kind": "memory", "message_count": len(result)},
+                    ui_summary={"kind": "memory", "message_count": sum(len(messages) for _, messages in turns)},
                 ).to_model_text()
             except asyncio.CancelledError:
                 raise
@@ -498,6 +502,34 @@ class ToolBuilder:
                     "search_memory",
                     exc,
                     "Provide a non-empty memory query and retry.",
+                )
+
+        async def list_activities(turn_id: str | None = None, after_sequence: int = 0) -> str:
+            try:
+                operation.raise_if_cancelled()
+                if turn_id is not None and (not isinstance(turn_id, str) or not turn_id.strip()):
+                    raise RavenError(ErrorCode.INVALID_METADATA, "turn_id must be a valid UUID.")
+                activities = await conversation.list_activities(
+                    turn_id=turn_id, after_sequence=after_sequence, limit=ACTIVITY_PAGE_SIZE + 1,
+                )
+                page = activities[:ACTIVITY_PAGE_SIZE]
+                return ToolResult(
+                    ok=True,
+                    result=[activity.model_dump(mode="json") for activity in page],
+                    ui_summary={
+                        "kind": "activities",
+                        "turn_id": turn_id,
+                        "count": len(page),
+                        "next_after_sequence": page[-1].sequence if len(activities) > ACTIVITY_PAGE_SIZE else None,
+                    },
+                ).to_model_text()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                return self._recoverable_result(
+                    "list_activities", exc,
+                    "Omit turn_id for all activities or use a turn_id from search_memory. "
+                    "Omit after_sequence for the first page.",
                 )
 
         async def list_preferences() -> str:
@@ -579,10 +611,19 @@ class ToolBuilder:
                 async_fn=search_memory,
                 name="search_memory",
                 description=(
-                    "Search semantically relevant messages from this conversation's "
-                    "memory. Use this when the user asks about prior discussion, "
-                    "past decisions, or information previously shared in this "
-                    "conversation."
+                    "Find prior discussion, decisions, or information by a non-empty query. "
+                    "Results group relevant messages by turn_id in this conversation. "
+                    "Use a returned turn_id with list_activities to inspect the manual actions linked to that turn."
+                ),
+            ),
+            FunctionTool.from_defaults(
+                async_fn=list_activities,
+                name="list_activities",
+                description=(
+                    "Read recorded manual actions in the current conversation in sequence order. "
+                    "Pass turn_id to filter by turn, or omit it to include all pending and linked actions. "
+                    "Omit after_sequence for the first page and use ui_summary.next_after_sequence for more. "
+                    "Keep the same turn filter on subsequent pages."
                 ),
             ),
             FunctionTool.from_defaults(

@@ -2,11 +2,11 @@
 
 **Retrieval Augmented Adaptive Epistemic Navigation**
 
-RAVEN is an asynchronous RAG and agent backend for building applications over
-persistent knowledge and conversations. It combines semantic document
-ingestion, multiple retrieval strategies, agent-directed tool use, durable
-operations, replayable event streams, conversation memory, and source
-reconstruction behind one Python API and an optional FastAPI server.
+RAVEN is an asynchronous RAG backend for building applications around stored
+documents. Applications can browse, search, and reconstruct sources directly,
+or start a conversation in which the agent can use the same retrieval tools
+and follow up on the user's manual work. The Python API and optional FastAPI
+server expose durable operations and replayable events for both workflows.
 
 RAVEN is local-first and privacy-conscious, but it is not limited to offline
 models. Applications can use a local Ollama server, cloud models through
@@ -41,6 +41,7 @@ control.
 - [Knowledge and ingestion](#knowledge-and-ingestion)
 - [Retrieval](#retrieval)
 - [Conversations, sessions, and memory](#conversations-sessions-and-memory)
+- [Manual session activity](#manual-session-activity)
 - [Agent harness](#agent-harness)
 - [Source reconstruction](#source-reconstruction)
 - [FastAPI server quick start](#fastapi-server-quick-start)
@@ -49,6 +50,7 @@ control.
 - [HTTP request reference](#http-request-reference)
 - [Configuration](#configuration)
 - [Persistence and recovery](#persistence-and-recovery)
+- [Upgrading to v0.2.1](#upgrading-to-v021)
 - [Backup, restore, and cleanup](#backup-restore-and-cleanup)
 - [Security and deployment responsibilities](#security-and-deployment-responsibilities)
 - [Server troubleshooting](#server-troubleshooting)
@@ -82,9 +84,10 @@ If this is your first time using RAVEN, follow this order:
 2. Install the package and verify the import.
 3. Start RAVEN and configure one LLM plus one embedding model.
 4. Create a knowledge and ingest a document.
-5. Create a conversation and a temporary session.
-6. Start a turn, consume its events, and collect its final result.
-7. Close the session and RAVEN cleanly.
+5. Run a scoped search and inspect or reconstruct the returned sources.
+6. To continue with the agent, create a conversation and a temporary session.
+   The session can record manual actions before the first turn.
+7. Consume the turn events, then close the session and RAVEN cleanly.
 
 The detailed sections explain each step, including cancellation, retry,
 reconnection, persistence, and failures.
@@ -92,8 +95,8 @@ reconnection, persistence, and failures.
 
 ## Key features
 
-- **Agent-driven retrieval** — the model selects and sequences the tools
-  permitted by the conversation scope and the requested retrieval mode.
+- **Document-first retrieval** — choose specific files, whole knowledges, or
+  the entire knowledge base, then search and inspect results from Python or HTTP.
 - **Local and cloud models** — use Ollama locally, LiteLLM-compatible cloud
   providers, or different providers for generation and embeddings.
 - **Durable asynchronous operations** — long-running work has observable
@@ -103,10 +106,12 @@ reconnection, persistence, and failures.
 - **Persistent knowledge** — parse, semantically split, embed, retrieve, and
   navigate documents stored in isolated knowledge databases.
 - **Multiple retrieval strategies** — embedded, hierarchical,
-  agreement-based, and vector-conditioned retrieval, each with local and
-  global variants.
+  agreement-based, and vector-conditioned retrieval. The agent can choose a
+  strategy automatically or use the one requested for the turn.
 - **Persistent conversations** — retain messages, tool calls, tool results,
   compacted context, vector memory, preferences, titles, and turn identity.
+- **Manual session activity** — keep references to searches, source opens,
+  browsing, and reconstruction so the agent can follow up in the same conversation.
 - **Transparent evidence** — reconstruct the source sections used during a
   response so users can inspect and verify the supporting material.
 - **Crash-aware storage** — interrupted operations are detected after restart,
@@ -149,15 +154,15 @@ The main ownership boundaries are:
 | `KnowledgeBase` | Discovers and manages persistent `Knowledge` resources. |
 | `Knowledge` | Owns one knowledge database, its source records, and its vectors. |
 | `ConversationManager` | Discovers and manages persistent `Conversation` resources. |
-| `Conversation` | Owns messages, turns, memory, preferences, and conversation metadata. |
-| `Session` | Temporarily connects one conversation to the agent; it is not persisted. |
+| `Conversation` | Owns its fixed retrieval scope, messages, turns, manual activity, memory, and preferences. |
+| `Session` | Runs manual actions and agent turns against one persistent conversation. |
 | `AgentHarness` | Defines model behavior, available tools, streaming, and evidence handling. |
 | `Provider` | Resolves provider-neutral model specifications to Ollama or LiteLLM adapters. |
 | `Operation` | Owns the lifecycle and event stream of one user-visible action. |
 | `OperationTask` | Represents one invocation, result, cancellation, and retry boundary inside an operation. |
 
-Knowledge and conversations are durable resources. A session is only an
-interaction medium: create one when you need to run a turn, then discard it.
+Knowledge and conversations are durable resources. Create a session when you
+want to work against a conversation, then close it when finished.
 Different conversations may run concurrently, while RAVEN prevents overlapping
 turns from mutating the same conversation.
 
@@ -170,15 +175,15 @@ turns from mutating the same conversation.
 | User runtime | One user-scoped `Raven` instance with isolated paths, settings, operations, knowledges, and conversations. |
 | Knowledge | A persistent collection of source files, semantic sections, and vectors. |
 | Knowledge base | The registry and lifecycle manager for all knowledges belonging to one user. |
-| Conversation | Persistent metadata, canonical messages, turns, compacted context, vector memory, and preferences. |
-| Session | A temporary interaction object connecting one conversation to the agent. It is never persisted. |
+| Conversation | A fixed retrieval scope with persistent messages, manual activity, memory, and preferences. |
+| Session | A temporary object for running manual actions and agent turns in a conversation. |
 | Agent harness | The component that builds model behavior, exposes permitted tools, runs the agent loop, and translates output into events. |
 | Operation | The status, event stream, and durable history of one user-visible action. |
 | Operation task | One invocation inside an operation, with its own result, status, parent relationship, and retry metadata. |
 | Event | An ordered, persisted observation emitted while an operation runs. |
-| Local retrieval | Retrieval constrained to one explicitly named knowledge. |
-| Global retrieval | Retrieval that can select across all knowledges belonging to the current user. |
-| Reconstruction | Reloading complete source-section sequences and marking which sections supplied the model's evidence. |
+| Retrieval scope | The selection of knowledges and files eligible for a search. |
+| Manual activity | A saved record of a completed session action and its source references. |
+| Reconstruction | Reloading stored section sequences and highlighting the selected sections in their surrounding context. |
 
 
 ### Runtime lifecycle
@@ -302,13 +307,13 @@ RAVEN.
 ## Library quick start
 
 The `Raven` facade is the recommended entry point for Python applications. The
-example below configures local Ollama models, ingests one document, creates a
-global conversation, and streams an agent response:
+example configures local Ollama models, ingests and searches one document, then
+streams a turn in a conversation whose retrieval scope selects that file.
 
 ```python
 import asyncio
 
-from nraven import EventType, ModelRole, ModelSpec, Raven
+from nraven import EventType, ModelRole, ModelSpec, Raven, RetrievalScope, RetrievalSelection
 
 
 async def main() -> None:
@@ -333,7 +338,7 @@ async def main() -> None:
 
         create_knowledge_task = await raven.create_knowledge(
             "engineering",
-            user_summary = "Engineering reference documents",
+            user_summary="Engineering reference documents",
         )
         await create_knowledge_task.result()
 
@@ -341,15 +346,23 @@ async def main() -> None:
             "engineering",
             "./documents/system-design.pdf",
         )
-        await ingestion_task.result()
+        ingested = await ingestion_task.result()
 
-        create_conversation_task = await raven.create_conversation()
+        scope = RetrievalScope(selections=(
+            RetrievalSelection(knowledge_name="engineering", file_id=ingested["file_id"]),
+        ))
+        query = "What does the design say about thermal protection?"
+        search = await raven.retrieve_embedded(query, scope=scope)
+        sections = await search.result()
+        print(f"Direct search returned {len(sections)} sections.")
+
+        create_conversation_task = await raven.create_conversation(scope=scope)
         conversation = await create_conversation_task.result()
 
         session = raven.session(conversation)
         await session.start()
         run = await session.generate_response(
-            "What does the design say about thermal protection?",
+            query,
             retrieval_mode="auto",
         )
 
@@ -376,7 +389,9 @@ Ollama must already be running and the selected models must be installed. Use
 `Raven.pull_ollama_model()` when the application should pull a missing Ollama
 model as an observable operation.
 
-This quick start assumes an empty home. On a later process start, persistent
+Save a source document at `./documents/system-design.pdf` or change the path
+and query to match an existing document. This quick start assumes an empty
+home. On a later process start, persistent
 knowledges and conversations are discovered automatically. Use
 `raven.get_knowledge("engineering")`, `raven.list_conversations()`, and
 `raven.get_conversation(conversation_id)` instead of recreating resources that
@@ -453,7 +468,7 @@ operation: session.generate_response
 +-- root task: session.generate_response
     |
     +-- child: conversation.get_context
-    +-- child: retrieval.embedded.global
+    +-- child: retrieval.embedded
     +-- child: reconstruction.reconstruct
     +-- child: conversation.append_turn
 ```
@@ -583,13 +598,14 @@ These stable names appear in task records and event correlation metadata:
 | Model provider | `model.check_connection`, `model.list`, `model.inspect`, `model.pull`, `model.delete`, `model.load_llm`, `model.load_embedding`, `model.preload_llm`, `model.preload_embedding`, `model.unload_llm`, `model.unload_embedding` |
 | Knowledge | `knowledge.set_summary`, `knowledge.ingest`, `knowledge.delete_file`, `knowledge.create`, `knowledge.delete` |
 | Ingestion | `ingestion.run`, `ingestion.cleanup` |
-| Embedded retrieval | `retrieval.embedded.local`, `retrieval.embedded.global` |
-| Hierarchical retrieval | `retrieval.hierarchical.local`, `retrieval.hierarchical.global`, `retrieval.hierarchical.by_knowledge`, `retrieval.hierarchical.by_file` |
-| Agreement retrieval | `retrieval.agreement.local`, `retrieval.agreement.global` |
-| Vector-conditioned retrieval | `retrieval.vector_conditioned.local`, `retrieval.vector_conditioned.global` |
+| Embedded retrieval | `retrieval.embedded`, `retrieval.embedded.files` |
+| Hierarchical retrieval | `retrieval.hierarchical` |
+| Agreement retrieval | `retrieval.agreement` |
+| Vector-conditioned retrieval | `retrieval.vector_conditioned` |
 | Reconstruction | `reconstruction.reconstruct`, `reconstruction.from_turn` |
 | Conversation | `conversation.save_preference`, `conversation.remove_preference`, `conversation.update`, `conversation.generate_title`, `conversation.get_context`, `conversation.append_turn`, `conversation.reconcile_turn`, `conversation.create`, `conversation.update_metadata`, `conversation.delete` |
 | Agent/session | `chat.generate_response`, `session.generate_response` |
+| Manual session activity | `session.list_knowledges`, `session.list_files`, `session.list_sections`, `session.open_file`, `session.open_section`, `session.retrieve`, `session.reconstruct` |
 
 Applications may display these names for diagnostics, but normal UI labels
 should be friendlier and should not infer retryability from the name alone.
@@ -672,7 +688,7 @@ Conceptually, an event contains:
 {
   "type": "chat.tool_call",
   "data": {
-    "name": "global_embedded_retrieval",
+    "name": "embedded_retrieval",
     "step": 1
   },
   "operation_id": "7e6d796c-6711-4fc7-a967-78738ecac96a",
@@ -784,11 +800,13 @@ Event names are grouped by what a consumer normally does with them:
 | Conversation lifecycle | `conversation.create.started`, `conversation.create.completed`, `conversation.create.failed`, `conversation.update.started`, `conversation.update.completed`, `conversation.update.failed`, `conversation.delete.started`, `conversation.delete.completed`, `conversation.delete.failed` | Refresh conversation metadata or remove a deleted conversation. |
 | Context compaction | `conversation.memory_compaction.started`, `conversation.memory_compaction.completed`, `conversation.memory_compaction.failed` | Show that model context is being summarized; canonical UI history remains intact. |
 | Turn persistence | `conversation.turn_commit.started`, `conversation.turn_commit.completed`, `conversation.turn_commit.reused`, `conversation.turn_commit.failed` | Mark durable turn commit or idempotent reuse. |
+| Manual activity | `conversation.activity.recorded` | Read the new `activity_id`, `sequence`, `kind`, and `conversation_id`. For browsing, source opens, and retrieval, `data.result` contains the action output. Reconstruction streams its files separately. |
 | Vector memory | `conversation.memory_index.started`, `conversation.memory_index.completed`, `conversation.memory_index.failed` | Track semantic indexing of committed user/assistant messages. |
 | Embedded retrieval | `retrieval.embedded.started`, `retrieval.embedded.completed`, `retrieval.embedded.failed` | Show direct vector retrieval progress and result count/failure. |
 | Hierarchical retrieval | `retrieval.hierarchical.started`, `retrieval.hierarchical.read`, `retrieval.hierarchical.completed`, `retrieval.hierarchical.failed` | Show knowledge/file reads and LLM-assisted scoring progress. |
 | Agreement retrieval | `retrieval.agreement.started`, `retrieval.agreement.completed`, `retrieval.agreement.failed` | Show the combined embedded/hierarchical comparison. |
 | Vector-conditioned retrieval | `retrieval.vector_conditioned.started`, `retrieval.vector_conditioned.completed`, `retrieval.vector_conditioned.failed` | Show vector narrowing followed by hierarchical selection. |
+| Standalone HTTP retrieval result | `retrieval.result` | Read ranked sections or the native agreement result in `data.result`. Wait for the terminal operation event to confirm success. |
 | Reconstruction | `reconstruction.started`, `reconstruction.file`, `reconstruction.completed`, `reconstruction.failed` | Render each reconstructed file from `reconstruction.file`, then mark the source set complete. |
 | Ollama connection | `model.connection.started`, `model.connection.completed`, `model.connection.failed` | Display connection-check state. |
 | Ollama inventory | `model.list.started`, `model.list.completed`, `model.list.failed`, `model.inspect.started`, `model.inspect.completed`, `model.inspect.failed` | Refresh or inspect the external Ollama model inventory. |
@@ -884,6 +902,8 @@ events, and UI messages precise.
 | `conversation_turn_active` | Another session currently owns the conversation's turn lock. |
 | `conversation_turn_not_found` | The requested committed turn does not exist. |
 | `conversation_turn_result_missing` | A committed/reused turn lacks a valid stored agent result. |
+| `activity_in_use` | A running turn has captured the activity. |
+| `activity_committed` | The activity is already linked to a committed turn. |
 | `reconstruction_evidence_not_found` | Persisted turn data contains no usable reconstruction evidence where evidence was required. |
 | `foreign_conversation` | A `Conversation` from another `Raven` instance was supplied to `session()`. |
 | `invalid_preference_id` | A preference ID is not a valid UUID. |
@@ -893,12 +913,13 @@ events, and UI messages precise.
 | `invalid_message_cursor` | A message pagination cursor is invalid. |
 | `file_already_exists` | The knowledge already contains or is ingesting that file name. |
 | `file_not_found` | The requested stored file or file cursor does not exist. |
+| `file_id_name_mismatch` | The stored name of a selected file differs from the name supplied with its ID. |
 | `section_not_found` | The section does not exist or does not belong to the asserted file. |
 
 | Model, retrieval, and ingestion code | Condition |
 | --- | --- |
 | `invalid_retrieval_mode` | The supplied retrieval mode string is unknown. |
-| `retrieval_mode_not_allowed` | The mode exists but is outside the current conversation/run policy. |
+| `retrieval_mode_not_allowed` | The tool's strategy differs from the strategy selected for this turn. |
 | `retrieval_scoring_invalid` | Hierarchical model scoring remained invalid after bounded retries. |
 | `llm_model_required` | An operation requires a configured LLM. |
 | `embedding_model_required` | An operation requires a configured embedding model. |
@@ -1318,7 +1339,7 @@ knowledge = await create_task.result()
 ```
 
 Knowledge names identify their storage directories and must be unique within
-the current user's RAVEN home. The user summary helps global, reasoning-based
+the current user's RAVEN home. The user summary helps whole-base, reasoning-based
 retrieval decide which knowledge collections are relevant.
 
 Names are trimmed, every character outside letters, numbers, `_`, and `-` is
@@ -1673,9 +1694,8 @@ and provenance; it does not require the original binary.
 
 ## Retrieval
 
-RAVEN provides four retrieval strategies. Each strategy has a local variant
-for one named knowledge and a global variant for searching across the current
-user's knowledge base.
+RAVEN provides four retrieval strategies. Each searches the documents eligible
+under a `RetrievalScope` within the current user's knowledge base.
 
 | Strategy | Best suited for | Relative cost |
 | --- | --- | --- |
@@ -1686,68 +1706,75 @@ user's knowledge base.
 
 The strategies perform different work:
 
-- **Embedded** embeds the query, searches Qdrant in one or all knowledges,
+- **Embedded** embeds the query and searches eligible chunks in Qdrant,
   deduplicates chunk hits by section, and returns the highest-ranked complete
   sections.
-- **Hierarchical** asks the LLM to score knowledge summaries where needed,
-  then scores section metadata in bounded batches. Candidate section records,
-  including their content, are loaded from storage in the selected scope, but
-  only metadata is sent to the scorer. The final result includes the full
-  content of selected sections.
-- **Vector-conditioned** first uses vector retrieval to select likely files or
-  knowledges, then applies hierarchical section scoring only inside that
-  narrowed scope.
+- **Hierarchical** scores section metadata in bounded batches. It first uses
+  knowledge summaries to shortlist candidates when the scope covers the whole
+  knowledge base, `full_retrieval=False`, and at least two knowledges have
+  eligible files. Otherwise it skips knowledge shortlisting. The result includes
+  the full content of the selected sections.
+- **Vector-conditioned** shortlists distinct eligible files by their best
+  matching chunk, then scores sections within those files.
 - **Agreement** independently runs embedded and hierarchical retrieval and
-  preserves both views unless they strongly agree.
+  gives both branches the same resolved scope and result ceiling.
 
-The available mode strings are:
+### Define a retrieval scope
 
-```text
-local_embedded
-local_hierarchical
-local_vector_conditioned
-local_agreement
+Each `RetrievalSelection` has a `knowledge_name` and optional `file_id` and
+`file_name`. Combine selections across knowledges. If they overlap, each
+eligible file is included once.
 
-global_embedded
-global_hierarchical
-global_vector_conditioned
-global_agreement
-```
+| Selection | What it includes |
+| --- | --- |
+| `RetrievalScope()` | The user's entire knowledge base. |
+| `knowledge_name` only | All files in the named knowledge, including files added later. |
+| `knowledge_name` and `file_id` | One file by its stable ID. |
+| `knowledge_name` and `file_name` | The current file with that name in the knowledge. |
+| `knowledge_name`, `file_id`, and `file_name` | The file by ID, with the saved name required to match. |
 
-Run a strategy directly through `Raven.retrieve()`:
+Conversation creation validates explicit selections. Each search resolves the
+selection again against the current catalog and fails if an explicitly
+selected knowledge or file is missing. If both file fields are supplied and
+they disagree, RAVEN raises `file_id_name_mismatch`.
 
 ```python
-retrieval = await raven.retrieve(
-    "local_embedded",
+from nraven import RetrievalScope, RetrievalSelection
+
+scope = RetrievalScope(selections=(
+    RetrievalSelection(knowledge_name="engineering", file_name="system-design.pdf"),
+    RetrievalSelection(knowledge_name="requirements"),
+))
+```
+
+### Run retrieval directly
+
+Use one of the four `Raven` retrieval methods. Each accepts a non-empty query,
+a keyword-only `scope`, and an optional shared `operation`. Configure models
+before searching. Await the returned task for the result.
+
+```python
+retrieval = await raven.retrieve_embedded(
     "What operating temperature does the controller require?",
-    knowledge_name="engineering",
+    scope=scope,
     top_k=3,
 )
 sections = await retrieval.result()
 ```
 
-`Raven.retrieve()` accepts:
+| Method | Optional strategy arguments |
+| --- | --- |
+| `retrieve_embedded()` | `top_k` |
+| `retrieve_hierarchical()` | `top_k_section`, `top_k_knowledge`, `full_retrieval`, `max_per_read`, `anchor_count` |
+| `retrieve_agreement()` | `top_k`, `top_k_knowledge`, `full_retrieval`, `max_per_read`, `anchor_count` |
+| `retrieve_vector_conditioned()` | `top_k_files`, `top_k_sections`, `max_per_read`, `anchor_count` |
 
-| Argument | Type | Required/default | Meaning |
-| --- | --- | --- | --- |
-| `mode` | `RetrievalMode` or string | Required | One exact mode listed above. `"auto"` is not accepted by direct retrieval; it belongs to agent sessions. |
-| `user_query` | string | Required | Query used for embeddings and/or LLM relevance scoring. |
-| `knowledge_name` | string or `None` | Required for local modes; omit for global modes | Restricts retrieval to one existing knowledge. |
-| `top_k` | integer or `None` | Runtime setting, initially `3` | Positive requested result count, bounded by `SystemConfig.max_retrieval_top_k` (initially `25`). |
-| `operation` | `Operation` or `None` | New operation | Reuse only when composing retrieval into a parent workflow. |
-
-The high-level facade intentionally exposes one `top_k` rather than every
-pipeline-internal scoring-batch control. Advanced callers that need controls
-such as scoring batch size, anchor count, or full hierarchical traversal can
-use the individual retrieval pipeline classes.
-
-Local modes require `knowledge_name`. Global modes select from all available
-knowledge collections and do not require a local scope.
-
-Global does not mean cross-user. It searches all knowledges inside the current
-user runtime only. An empty knowledge database or no relevant hits can produce
-an empty list; that is a successful retrieval with no evidence, not a storage
-failure.
+The `top_k` arguments are ceilings. A search can return fewer results, and a
+valid search with no evidence can return an empty list. For agreement,
+`top_k` applies to each branch. For vector-conditioned retrieval,
+`top_k_files` limits the shortlist and `top_k_sections` limits the final
+ranked sections. `top_k_knowledge` is used only when whole-base hierarchical
+shortlisting runs. Omitted arguments use the [runtime defaults](#runtimeconfig).
 
 Except for agreement retrieval, every strategy returns the same bounded list:
 
@@ -1794,7 +1821,7 @@ strategies:
 }
 ```
 
-When both strategies return identical results, `agreement_type` is
+When both strategies select the same nonempty ranked sections, `agreement_type` is
 `"Strong Agreement"` and `retrieved_content` is a single section list. Weak
 agreement and disagreement retain the two lists so the model can reason about
 their differences. Reconstruction accepts both shapes.
@@ -1803,17 +1830,18 @@ Agreement is classified as follows:
 
 | Value | Meaning |
 | --- | --- |
-| `Strong Agreement` | The ordered embedded and hierarchical result lists are equal. `retrieved_content` is that single list. |
-| `Weak Agreement` | Corresponding results come from the same source files but the lists differ. Both lists are retained. |
-| `Disagreement` | At least one corresponding result comes from a different source file. Both lists are retained. |
+| `Strong Agreement` | Both branches return the same nonempty sequence of section identities. `retrieved_content` is one list. |
+| `Weak Agreement` | The ranked section lists differ and share at least one source file. Both lists are retained. |
+| `Disagreement` | The branches share no source files, including when either list is empty. Both lists are retained. |
 
 Agreement is not a truth score. It reports whether two retrieval mechanisms
 selected the same evidence. The model or application must still evaluate the
 content.
 
-`Raven.retrieve()` requires an explicit strategy. Automatic selection belongs
-to an agent session: pass `retrieval_mode="auto"` or omit the argument and let
-the model choose among the tools permitted for that conversation.
+Standalone calls choose the strategy by method or endpoint. Manual session
+retrieval requires `embedded`, `hierarchical`, `agreement`, or
+`vector_conditioned`. An agent turn also accepts `"auto"` so the model can
+choose a strategy.
 
 ### Retrieval events and failures
 
@@ -1825,9 +1853,9 @@ agreement type, and selected section IDs where applicable.
 
 Common failures are:
 
-- `knowledge_not_found` for an invalid local knowledge;
-- `invalid_retrieval_mode` for an unknown direct mode;
-- `invalid_metadata` when local retrieval omits `knowledge_name`;
+- `knowledge_not_found`, `file_not_found`, or `file_id_name_mismatch` for a
+  selection that cannot be resolved;
+- `invalid_retrieval_mode` for an unknown session retrieval mode;
 - `embedding_identity_mismatch` or `embedding_dimension_mismatch` when the
   configured embedding model is incompatible with stored vectors;
 - `retrieval_scoring_invalid` when hierarchical structured output cannot be
@@ -1844,45 +1872,48 @@ described in [Tool results and recoverable errors](#tool-results-and-recoverable
 A conversation and a session are intentionally different resources:
 
 - A `Conversation` is persistent. It owns metadata, canonical messages,
-  committed turns, compacted model context, vector memory, and preferences.
-- A `Session` is temporary. It connects one conversation to the agent harness
-  so the caller can generate responses.
+  committed turns, manual activities, compacted context, vector memory, and
+  preferences.
+- A `Session` is temporary. It lets the caller run manual actions and agent
+  turns against that conversation.
 
 A session is never restored from disk. To continue an existing conversation,
 load the conversation and create a new session around it.
 
-### Global and local conversations
+### Create a conversation with a retrieval scope
 
-Create a global conversation by omitting `knowledge_name`:
+Omit `scope` or pass `RetrievalScope()` to search the user's whole knowledge
+base. Pass explicit selections to limit retrieval to selected knowledges or
+files.
 
 ```python
 create_task = await raven.create_conversation()
 conversation = await create_task.result()
 ```
 
-Create a local conversation by binding it to an existing knowledge:
+This example limits retrieval to a whole knowledge.
 
 ```python
-create_task = await raven.create_conversation("engineering")
+from nraven import RetrievalScope, RetrievalSelection
+
+scope = RetrievalScope(selections=(RetrievalSelection(knowledge_name="engineering"),))
+create_task = await raven.create_conversation(scope=scope)
 conversation = await create_task.result()
+saved_scope = conversation.scope.model_dump(mode="json", exclude_none=True)
 ```
 
-The conversation derives its type from that binding:
-
-```text
-knowledge_name is None   -> global conversation
-knowledge_name is set    -> local conversation
-```
-
-The stable metadata representation includes `conversation_id`, `type`,
-`knowledge_name`, `title`, `is_titled`, `pinned`, and `created_at`.
+Conversation metadata stores `scope` alongside the conversation ID and
+display fields.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "conversation_id": "c36c45ac5575",
-  "type": "local",
-  "knowledge_name": "engineering",
+  "scope": {
+    "selections": [
+      {"knowledge_name": "engineering", "file_id": null, "file_name": null}
+    ]
+  },
   "title": "New Conversation",
   "is_titled": false,
   "pinned": false,
@@ -1890,21 +1921,23 @@ The stable metadata representation includes `conversation_id`, `type`,
 }
 ```
 
-`type` is derived from `knowledge_name`; callers do not set it separately. A
-local conversation cannot be created for a missing knowledge. The knowledge
-binding is fixed for the conversation's lifetime; title and pinned state are
-mutable.
+Set the selection at creation. A whole-knowledge selection continues to
+include newly ingested files. Create a new conversation to use a different
+selection. Navigation, explicit source inspection, and reconstruction can
+access the user's whole knowledge base.
 
 ### Conversation API reference
 
 | Method | Inputs | Return/result | Notes |
 | --- | --- | --- | --- |
-| `create_conversation(knowledge_name=None)` | Optional existing knowledge | Task result: `Conversation` | Omit the name for global scope. |
+| `create_conversation(scope=None)` | Optional `RetrievalScope` | Task result: `Conversation` | Omit the scope to search the whole knowledge base. |
 | `get_conversation(id)` | Conversation ID | `Conversation` handle | Opens or reuses persistent storage lazily. |
 | `get_conversation_details(id)` | Conversation ID | Metadata object | No mutation. |
 | `list_conversations()` | None | All metadata records | No mutation. |
 | `list_conversations_page(limit, after_conversation_id=None)` | Positive size and optional cursor | One metadata page | Use the final ID as the next cursor. |
 | `update_conversation(id, title=None, pinned=None)` | One or both mutable fields | Task result: updated `Conversation` | A manual title sets `is_titled=true`; call `.to_dict()` for metadata. Supplying neither field is a no-op. |
+| `rename_conversation(id, title)` | New title | Task result: updated `Conversation` | Marks the conversation titled. |
+| `set_conversation_pinned(id, pinned)` | `True` to pin or `False` to unpin | Task result: updated `Conversation` | Updates the pin state. |
 | `delete_conversation(id)` | Conversation ID | Task result on completion | Closes resources and removes persistent data. |
 | `get_conversation_messages(id)` | Conversation ID | Complete canonical `ChatMessage` list | Never returns compacted-only model context. |
 | `get_conversation_messages_page(id, limit, after_message_id=0)` | Conversation, positive size, numeric cursor | Durable message records | Suitable for UI history pagination. |
@@ -1914,7 +1947,7 @@ mutable.
 | `get_conversation_preferences(id)` | Conversation ID | Preference records | No mutation. |
 | `save_conversation_preference(id, text)` | Non-empty preference text | Task result: preference record | Exact duplicate text reuses the existing record. |
 | `remove_conversation_preference(id, preference_id)` | Stable preference UUID | Task result: removed record | Fails if the ID is invalid or absent. |
-| `session(conversation, ...)` | A `Conversation` owned by this `Raven` | Temporary `Session` | Requires configured models. |
+| `session(conversation, ...)` | A `Conversation` owned by this `Raven` | Temporary `Session` | Use `manual_only=True` for a session without an agent. |
 
 `raven.list_discovery_issues()` returns validation problems found while
 discovering both knowledge and conversation directories. A malformed resource
@@ -2041,7 +2074,7 @@ finally:
     {
       "call_id": "call-1",
       "step": 1,
-      "name": "global_embedded_retrieval",
+      "name": "embedded_retrieval",
       "ok": true,
       "ui_summary": {}
     }
@@ -2050,19 +2083,19 @@ finally:
 }
 ```
 
-`collect()` uses persisted events, so consuming `run.stream` first does not
-consume or destroy the final result. A failed or cancelled run raises instead
-of returning a partial success object. Use the already received events for any
-partial UI display and inspect the operation/task error for the terminal cause.
+For a new turn, the session worker assembles `AgentRunResult` from the
+persisted agent events and saves the turn before returning the result.
+`run.collect()` waits for that session task and returns its result. It can be
+called after consuming `run.stream` and does not start another inference.
 
-The event stream is authoritative. `collect()` replays those events into an
-`AgentRunResult` containing the accumulated thinking text, response, tool
-calls, evidence references, reconstructed sources, and iteration-limit state.
+If the task fails or is cancelled, `run.collect()` raises. Use the events
+already received for partial UI display and inspect the operation or task error
+for the cause.
 
 `session.generate_response()` accepts a non-empty `user_query`, an optional
 `retrieval_mode`, and—only for component composition—an existing `operation`.
-Omitting `retrieval_mode` or passing `"auto"` exposes all retrieval tools valid
-for the conversation. Passing an exact mode restricts exposure as described in
+Omitting `retrieval_mode` or passing `"auto"` exposes all four retrieval tools.
+Passing an exact strategy exposes that retrieval tool as described in
 [Tool exposure and retrieval constraints](#tool-exposure-and-retrieval-constraints).
 
 `Raven.session()` controls per-session defaults:
@@ -2070,17 +2103,16 @@ for the conversation. Passing an exact mode restricts exposure as described in
 | Argument | Default | Constraint/effect |
 | --- | --- | --- |
 | `conversation` | Required | Must be the actual `Conversation` object owned by this `Raven` instance; an object from another runtime raises `foreign_conversation`. |
+| `manual_only` | `False` | Set `True` to open a session for manual actions without an agent. Manual retrieval still requires configured models. |
 | `max_iterations` | Runtime setting, initially `10` | Positive and no greater than the system maximum, initially `50`. |
-| `top_k` | Runtime setting, initially `3` | Positive and no greater than the retrieval system maximum, initially `25`. |
 | `memory_token_limit` | Runtime setting, initially `4,000` | Positive model-context memory budget. Extremely small values can fail memory initialization. |
 | `memory_top_k` | Runtime setting, initially `5` | Positive maximum number of matched memory nodes per search; currently one node represents one turn and may return both user and assistant messages. |
 
 Starting a session opens the conversation's storage. Memory initialization and
 reconciliation using the configured model pair happen when
 `generate_response()` submits a turn, before its session task is created.
-Closing a session cancels only runs created through that session; it does not
-delete or close the shared persistent conversation owned by
-`ConversationManager`.
+Closing a session cancels its active turns and manual tasks. The shared
+conversation remains owned by `ConversationManager`.
 
 Each run also has a stable `turn_id`. A committed turn contains the user
 message, assistant tool-call messages, tool-result messages, and final
@@ -2140,9 +2172,9 @@ RAVEN maintains two complementary memory views:
 - **Compacted context** uses LlamaIndex's summary memory to keep recent
   messages and a summary of older history within the configured token limit.
   This is the context passed to the model.
-- **Vector memory** indexes canonical user messages and final assistant
-  responses for semantic recall when the agent needs details from earlier
-  discussion. Internal tool traces are not added to this semantic index.
+- **Vector memory** indexes the original user query and final assistant
+  response for semantic recall. The manual activity attached to a user
+  message stays in the canonical transcript and activity log.
 
 The complete canonical history remains available to the application even when
 the model-facing context has been compacted:
@@ -2155,14 +2187,14 @@ messages = await raven.get_conversation_messages(
 
 Compaction does not replace or delete canonical messages in
 `messages.sqlite3`. It updates the derived model-context summary used by the
-LlamaIndex memory layer. Vector memory likewise retains semantic entries for
-the original committed user and final assistant messages rather than indexing
-the compacted summary.
+LlamaIndex memory layer. Vector memory keeps its entries for the original
+query and response across compactions.
 
-The agent accesses vector memory through `search_memory(query)`. This is for
-questions about prior conversation content, not knowledge-base facts. A memory
-result can support conversational continuity but is not counted as source
-evidence for a knowledge claim.
+The agent accesses vector memory through `search_memory(query)`. Each match
+contains a `turn_id` and that turn's recalled messages. The agent can pass that
+ID to `list_activities(turn_id)` to read the manual actions linked to the turn
+in the current conversation, even after compaction. Memory results support
+conversation recall and do not count as source evidence for a knowledge claim.
 
 Compaction emits started, completed, and failed events so a UI can explain a
 delay instead of appearing stalled.
@@ -2206,6 +2238,89 @@ await remove_task.result()
 ```
 
 
+## Manual session activity
+
+Use a session when the agent should be able to follow up on work the user does
+manually. Direct `Raven` retrieval, navigation, and reconstruction methods work
+outside conversation history.
+
+| Session method | Inputs | Result |
+| --- | --- | --- |
+| `list_knowledges()` | No required arguments | Task returning knowledge metadata. |
+| `list_files(knowledge_name)` | Knowledge name | Task returning file metadata. |
+| `list_sections(knowledge_name, file_id, ...)` | Knowledge name and stable file ID. Optional `limit` (default `20`, maximum `50`), `after_section_index` (default `0`), and `get_content` (default `False`). | Task returning a page of section records. Set `get_content=True` to include `raw_content`. |
+| `open_file(knowledge_name, file_id, ...)` | Knowledge name and file ID. Optional `origin_activity_id` and `origin_turn_id`. | Task returning the file record. |
+| `open_section(knowledge_name, section_id, ...)` | Knowledge name and section ID. The same optional origin IDs apply. | Task returning the stored section, including its text. |
+| `retrieve(query, retrieval_mode=...)` | Query and one of the four explicit strategies | Task returning the native retrieval result within the saved conversation scope. |
+| `reconstruct(retrieval_result)` | A section list or agreement result | Task returning reconstructed files. |
+| `remove_from_activity(activity_id)` | Activity UUID | `True` if a pending entry was deleted, `False` if absent. Captured and committed entries raise an error. |
+
+The task methods accept an optional `operation`. Successful manual actions
+are recorded. To refresh an activity panel, call
+`raven.list_activities(conversation_id)` directly. For passive catalog
+browsing, use the direct knowledge APIs.
+
+```python
+from nraven import Conversation, Raven
+
+
+async def search_then_chat(raven: Raven, conversation: Conversation) -> str:
+    session = raven.session(conversation)
+    await session.start()
+    try:
+        search = await session.retrieve(
+            "What are the thermal protection requirements?",
+            retrieval_mode="embedded",
+        )
+        sections = await search.result()
+        if sections:
+            hit = sections[0]
+            opened = await session.open_section(hit["knowledge_name"], hit["section_id"])
+            await opened.result()
+
+        run = await session.generate_response("What did I just search for and open?")
+        return (await run.collect()).response
+    finally:
+        await session.close()
+```
+
+### How activities reach a turn
+
+Each activity has an `activity_id`, `sequence`, `operation_id`, `kind`,
+`started_at`, `recorded_at`, `details`, and an optional `turn_id`. The activity
+database stores compact references. For instance, a retrieval entry keeps the
+query, strategy, scope selection, settings, and ordered section references.
+
+When a turn starts, RAVEN fits a batch of pending activities into its context
+budget. The original user message for that turn stores the same JSON supplied
+to the model.
+
+```json
+{
+  "activities": [
+    {
+      "activity_id": "855a028b-f40b-40e2-b220-0b460c23adec",
+      "context_text": "Opened section engineering/system-design.pdf/a83fd91c20b4-3."
+    }
+  ],
+  "current_query": "What did I just open?"
+}
+```
+
+On commit, the captured activities receive that turn's ID. Entries recorded
+after capture, entries that did not fit, and entries from a turn cancelled or
+failed before commit remain pending. A pending entry can be removed until a
+running turn captures it. The saved turn remains the source of truth for its
+activity links after compaction or restart.
+
+Use `await raven.list_activities(conversation_id)` to read pending and linked
+actions from Python. Pass `turn_id` to read only actions linked to that turn.
+The method returns `Activity` records in ascending sequence order.
+`limit` defaults to `50` and accepts `1` through `200`. For the next page,
+set `after_sequence` to the last record's `sequence` and keep the same turn
+filter. A page shorter than `limit` marks the end of the available records.
+
+
 ## Agent harness
 
 The agent harness owns model behavior; it does not own conversation storage.
@@ -2219,6 +2334,7 @@ classifier. The model decides whether it should:
 
 - answer directly;
 - search conversation memory;
+- inspect the conversation's retrieval scope;
 - navigate knowledge names, files, and sections;
 - retrieve relevant sections;
 - inspect a specific section;
@@ -2236,9 +2352,8 @@ system prompt:
 
 | Conversation/run | Retrieval tools exposed |
 | --- | --- |
-| Local conversation, automatic mode | All four local retrieval tools. |
-| Global conversation, automatic mode | All local and global retrieval tools. Local tools require a `knowledge_name`. |
-| Specific retrieval mode | Only that retrieval tool, if valid for the conversation scope. |
+| `"auto"` or omitted | All four retrieval tools. |
+| `embedded`, `hierarchical`, `agreement`, or `vector_conditioned` | Only the corresponding retrieval tool. |
 
 `"auto"` and `None` both mean automatic mode; there is no `auto` retrieval
 tool. Automatic mode changes which concrete tools are exposed and lets the
@@ -2251,64 +2366,42 @@ retrieval tools from the `FunctionAgent` configuration.
 > access the knowledge base, or refuse a safety-sensitive question—especially
 > a critical medical question—without calling a retrieval tool. When grounding
 > matters, tell the model explicitly to use retrieval and answer only from the
-> retrieved evidence. In a global conversation, also name the intended
-> knowledge when it is known. For example: `Use the retrieval tools with the
-> clinical knowledge and answer only from retrieved evidence.` Selecting a
-> concrete `retrieval_mode` limits which retrieval tool is available, but it
-> cannot force a model that declines to call tools. Retrieved medical material
+> retrieved evidence. Set the conversation scope to the documents intended for
+> that search. Selecting a concrete `retrieval_mode` limits the available
+> strategy. The model still decides whether to call it. Retrieved medical material
 > is still reference information and is not a substitute for qualified medical
 > judgment.
 
 The exact retrieval tool names and arguments are:
 
-| Tool | Local-conversation arguments | Global-conversation arguments | Use |
-| --- | --- | --- | --- |
-| `local_embedded_retrieval` | `query` | `knowledge_name`, `query` | Specific facts, exact details, definitions, numbers, or requirements in one knowledge. |
-| `local_hierarchical_retrieval` | `query` | `knowledge_name`, `query` | Narrative context, chronology, themes, and relationships in one knowledge. Compute-intensive; use when capable hardware is available and vector-conditioned retrieval is insufficient. |
-| `local_vector_conditioned_retrieval` | `query` | `knowledge_name`, `query` | **Default local choice:** best general balance of factual relevance, context, speed, and compute cost. |
-| `local_agreement_retrieval` | `query` | `knowledge_name`, `query` | Critical retrieval where embedded and hierarchical pathways should corroborate evidence. Most expensive; avoid for ordinary questions. |
-| `global_embedded_retrieval` | Not exposed | `query` | Specific facts, exact details, definitions, numbers, or requirements across knowledges. |
-| `global_hierarchical_retrieval` | Not exposed | `query` | Narrative context, chronology, themes, and relationships across knowledges. Compute-intensive; use when capable hardware is available and vector-conditioned retrieval is insufficient. |
-| `global_vector_conditioned_retrieval` | Not exposed | `query` | **Default global choice:** best general balance of factual relevance, context, speed, and compute cost. |
-| `global_agreement_retrieval` | Not exposed | `query` | Critical retrieval where embedded and hierarchical pathways should corroborate evidence. Most expensive; avoid for ordinary questions. |
+| Tool | Arguments | Use |
+| --- | --- | --- |
+| `embedded_retrieval` | `query` | Specific facts, exact details, definitions, numbers, and requirements. |
+| `hierarchical_retrieval` | `query` | Narrative context, chronology, themes, and relationships. |
+| `vector_conditioned_retrieval` | `query` | General-purpose balance of factual relevance, context, and compute cost. |
+| `agreement_retrieval` | `query` | Expensive cross-check when independent searches should corroborate evidence. |
 
-In a local conversation, the bound `knowledge_name` is injected by the tool
-wrapper and the model cannot replace it. In a global conversation, local tools
-require the model to provide an explicit knowledge name.
+The wrappers supply the conversation's scope and the turn's runtime retrieval
+settings. Every tool below stays available when the caller selects a specific
+retrieval strategy. Navigation covers the user's entire knowledge base.
 
-Memory, preference, and permitted navigation tools remain available when a
-specific retrieval strategy is selected. A local conversation's navigation is
-automatically bound to its knowledge. Global navigation requires explicit
-knowledge names where appropriate.
-
-The non-retrieval tools are:
-
-- `list_knowledges`
-- `list_files`
-- `list_sections`
-- `get_sections`
-- `search_memory`
-- `list_preferences`
-- `save_preference`
-- `remove_preference`
-
-Their argument contracts are:
-
-| Tool | Local conversation | Global conversation | Result/effect |
-| --- | --- | --- | --- |
-| `list_knowledges` | No arguments; returns only the bound knowledge | No arguments; returns all knowledge metadata | Structural discovery only. |
-| `list_files` | No arguments | `knowledge_name` | Returns stored file records in the selected knowledge. |
-| `list_sections` | `file_name`; optional `get_content`, `after_section_index`, `limit` | `knowledge_name`, `file_name`; same options | Returns section IDs and metadata, without `raw_content` by default. Paged: 20 by default, maximum 50. With `get_content=true`, 3 by default, maximum 5. Use `ui_summary.next_after_section_index` when `ui_summary.has_more` is true. |
-| `get_sections` | `section_ids` (1–5 IDs) | `knowledge_name`, `section_ids` | Returns a list of sections in requested order, each with metadata and `raw_content`; successful lookups create evidence. |
-| `search_memory` | `query` | `query` | Returns semantically relevant messages from this conversation only. |
-| `list_preferences` | No arguments | No arguments | Returns this conversation's preference IDs and text. |
-| `save_preference` | `text` | `text` | Persists an explicit enduring preference; applies to the next run. |
-| `remove_preference` | `preference_id` | `preference_id` | Removes the exact saved preference; applies to the next run. |
+| Tool | Arguments | Result or effect |
+| --- | --- | --- |
+| `get_retrieval_scope` | None | Returns the saved `RetrievalScope`. A whole knowledge is shown by name, and an empty `selections` list means the entire knowledge base. |
+| `list_knowledges` | None | Returns knowledge metadata. |
+| `list_files` | `knowledge_name` | Returns stored file records in the named knowledge. |
+| `list_sections` | `knowledge_name`, `file_name`. Optional `get_content`, `after_section_index`, `limit`. | Returns section IDs and metadata without `raw_content` by default. Default page size `20`, maximum `50`. With `get_content=true`, default `3`, maximum `5`. Use `ui_summary.next_after_section_index` to continue. |
+| `get_sections` | `knowledge_name`, `section_ids` (1–5 IDs) | Returns sections in requested order with metadata and raw text. Successful lookups supply evidence. |
+| `search_memory` | `query` | Returns semantically relevant messages grouped by `turn_id` within this conversation. |
+| `list_activities` | Optional `turn_id` and `after_sequence` | Reads up to five manual actions in the active conversation in sequence order. Omit `turn_id` to include pending and linked actions. Use `ui_summary.next_after_sequence` for another page with the same filter. |
+| `list_preferences` | None | Returns this conversation's preference IDs and text. |
+| `save_preference` | `text` | Persists an explicit enduring preference for future runs. |
+| `remove_preference` | `preference_id` | Removes the exact saved preference. |
 
 These are **agent tool calls**, not FastAPI routes or the high-level Raven
 navigation methods. The latter still return complete stored section records.
 
-For example, a global conversation can inspect a section metadata page after
+For example, an agent can inspect a section metadata page after
 section index 2 without sending raw section content to the model:
 
 ```json
@@ -2345,9 +2438,7 @@ The `list_sections` tool returns a `ToolResult` like:
 ```
 
 When `has_more` is true, the next call can pass
-`"after_section_index": 3`; the cursor is exclusive. For a local
-conversation, omit `knowledge_name` because the tool is bound to that
-conversation's knowledge. `get_content=true` adds `raw_content` to each
+`"after_section_index": 3`. The cursor is exclusive. `get_content=true` adds `raw_content` to each
 listed section and makes those returned sections evidence; it is intended for
 explicit sequential inspection, not general question answering.
 
@@ -2361,17 +2452,13 @@ To read selected sections instead, pass IDs from the metadata page to
 Its `result` is a list in the requested order. Each item includes its own
 `section_id`, `file_name`, `knowledge_name`, metadata, and complete
 `raw_content`. Its `evidence` and `ui_summary.sections` contain only the
-knowledge/file/section references, not raw content. For a local conversation,
-omit `knowledge_name`. Invalid page sizes or more than five section IDs return
+knowledge/file/section references. Invalid page sizes or more than five section IDs return
 `ok=false`; a missing ID also fails the whole `get_sections` call rather than
 returning a partial list.
 
-Navigation is not retrieval. Listing knowledges/files/sections answers
-structural questions, while `get_sections` directly inspects known sections.
-Retrieval searches by relevance to an open-ended query.
-
-An invalid retrieval mode or a global-only mode requested for a local
-conversation is rejected before model execution.
+The prompt directs general document questions to retrieval and explicit
+browsing or source inspection to navigation. An unknown retrieval mode is
+rejected before model execution.
 
 ### Tool results and recoverable errors
 
@@ -2544,9 +2631,11 @@ Any compatible retrieval result can be reconstructed independently of the
 agent:
 
 ```python
-retrieval = await raven.retrieve(
-    "global_embedded",
+from nraven import RetrievalScope
+
+retrieval = await raven.retrieve_embedded(
     "What does the documentation say about thermal protection?",
+    scope=RetrievalScope(),
 )
 retrieved_sections = await retrieval.result()
 
@@ -2655,8 +2744,10 @@ A normal UI flow is:
 3. Configure the LLM and embedding-model pair.
 4. Create a knowledge database and upload documents.
 5. Consume the returned operation's SSE stream until ingestion finishes.
-6. Create a global or local conversation.
-7. Submit a turn and render its typed events as they arrive.
+6. Run standalone retrieval and reconstruction, or create a conversation with
+   a retrieval scope to retain manual activity.
+7. Submit a turn when the user wants the agent to continue, and render its
+   typed events as they arrive.
 8. Reconnect with `Last-Event-ID` if the connection drops.
 9. Cancel an active operation or explicitly retry an eligible failed task when
    needed.
@@ -2677,7 +2768,7 @@ Host: 127.0.0.1:8765
 Authorization: Bearer <launch-token>
 Content-Type: application/json
 
-{"knowledge_name": null}
+{}
 ```
 
 ### Hosted applications
@@ -2697,7 +2788,7 @@ Authorization: Bearer <launch-token>
 X-Raven-User-ID: 4b9bd24b-61de-42ed-9176-d2db91b66702
 Content-Type: application/json
 
-{"knowledge_name": "engineering"}
+{"scope":{"selections":[{"knowledge_name":"engineering"}]}}
 ```
 
 This example assumes `raven.internal` has been added to `allowed_hosts` in the
@@ -2786,11 +2877,10 @@ async function streamOperation(
 Persist `cursor` only after the UI has successfully handled the event. On
 reconnect, send that value as `Last-Event-ID`; RAVEN replays retained events
 after it and then waits for new events. SSE heartbeat comments keep idle
-connections alive. The stream closes after a final event. If retention cleanup
-has created a gap before the supplied cursor, the API returns `410 Gone`
-rather than silently skipping events. An operation removed by cleanup is no
-longer a resource and returns `404 Not Found`. Operation cleanup is scheduled
-by the application or deployment host, not automatically by RAVEN; see
+connections alive. The stream closes after a final event. A cursor ahead of
+the operation's available event history returns `410 Gone`. A request for an
+operation that cleanup removed returns `404 Not Found`. The application or
+deployment host schedules operation cleanup. See
 [Backup, restore, and cleanup](#backup-restore-and-cleanup).
 
 Render event types independently: thinking is not response text, tool calls
@@ -2817,10 +2907,12 @@ Within one operation, `operation_id` selects the stream, `task_id` identifies
 a root or nested task, `event_id` is the replay cursor, and `call_id` matches
 an agent's `chat.tool_call` with its `chat.tool_result`. If a connection drops,
 reopen the same operation stream with the last successfully handled event ID;
-do not submit the turn a second time just to recover deltas. Direct retrieval
-and direct reconstruction are currently Python-facade capabilities; the HTTP
-server exposes reconstruction of a persisted turn, not a generic direct
-retrieval/reconstruction endpoint.
+do not submit the turn a second time just to recover deltas.
+
+HTTP clients can also search or reconstruct sources without a conversation.
+Use one of the four strategy-specific retrieval routes or
+`POST /api/v1/reconstruction`, then follow the returned `events_url` for
+results. See [Standalone retrieval and reconstruction requests](#standalone-retrieval-and-reconstruction-requests).
 
 
 ## HTTP API overview
@@ -2838,7 +2930,9 @@ and error bodies.
 | Ollama administration | Status, list, inspect, pull, and delete routes under `/api/v1/providers/ollama` |
 | Operations | List and inspect operations/tasks, stream events, cancel operations, discover retryable tasks, and retry a task |
 | Knowledge | CRUD, file listing/deletion, section navigation, statistics, multipart upload, and trusted-path ingestion under `/api/v1/knowledges` |
-| Conversations | CRUD, canonical messages, turns, turn messages, preferences, turn submission, and reconstruction under `/api/v1/conversations` |
+| Standalone search and reconstruction | Four strategy-specific POST routes under `/api/v1/retrieval` and `POST /api/v1/reconstruction` |
+| Conversations | CRUD, saved scope, title, pin state, canonical messages, turns, preferences, and reconstruction under `/api/v1/conversations` |
+| Manual activity | Browse, inspect sources, search, reconstruct, and manage activity history under `/api/v1/conversations/{conversation_id}/activities` |
 
 ### Authentication and errors
 
@@ -2926,15 +3020,17 @@ Content-Type: application/pdf
 ```
 
 The returned operation reference points to ingestion progress and completion
-events. Uploaded sources remain in a private user-scoped retry area for the
-configured retry window, then cleanup removes them. Trusted local paths use
-`POST /api/v1/knowledges/{name}/ingest-path` and are disabled unless the server
-explicitly enables them and allowlists their roots.
+events. The server removes the private staged upload after successful
+ingestion. Failed or interrupted ingestion can reuse the staged file during
+the `upload_retry_retention_seconds` window. The server sweeps expired uploads.
+Trusted local paths use `POST /api/v1/knowledges/{name}/ingest-path` and are
+disabled unless the server explicitly enables them and allowlists their roots.
 
 ### Submitting a turn
 
-Create a global conversation with `{"knowledge_name": null}` or a local one
-with a knowledge name, then submit a turn:
+Create a conversation with `POST /api/v1/conversations`. Send `{}` for a
+whole-base search or include a `scope` with the desired selections. Submit a
+turn to the conversation ID returned by that request.
 
 ```http
 POST /api/v1/conversations/<conversation-id>/turns HTTP/1.1
@@ -3055,8 +3151,9 @@ query parameter. List status filters accept the documented operation states.
 An SSE frame has `id`, typed `event`, and a JSON `data` envelope with
 `event_id`, `operation_id`, `task_id`, `task_name`, `type`, ISO timestamp,
 payload `data`, and `is_final`. Heartbeats are SSE comments, not JSON events.
-The stream closes after a final event. Invalid cursor gives `400`; an expired
-replay gap gives `410`; a cleaned-up operation gives `404`. See
+The stream closes after a final event. An invalid cursor gives `400`. A cursor
+ahead of the available event history gives `410`. A cleaned-up operation gives
+`404`. See
 [Replay after disconnection](#replay-after-disconnection) and
 [Streaming operation events](#streaming-operation-events) for the client flow.
 
@@ -3099,16 +3196,18 @@ metadata state. See [Ingestion safety and retry](#ingestion-safety-and-retry).
 The examples use conversation ID `c36c45ac5575`, turn ID
 `c4d242e9-f6e9-4a84-8cdc-e7bf5c8a3021`, and preference ID
 `562fe22a-8eea-4f24-bb81-eeb0f663fd4d`. Use the IDs returned by your own
-server. A conversation's `type` is computed from `knowledge_name`: `null` is
-global, a named knowledge is local. The server creates a temporary session for
-a turn; there is no session HTTP resource.
+server. The scope is selected at creation. The server creates a temporary
+session when a turn or manual action is submitted.
 
 | Request | Success | Meaning |
 | --- | --- | --- |
 | `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/conversations?limit=10"` | `200 {"items":[],"next_cursor":null}` if none exist | Newest-first metadata; optional `after_conversation_id=<id>`. |
-| `curl -i -X POST -H "Authorization: Bearer $RAVEN_TOKEN" -H 'Content-Type: application/json' -d '{"knowledge_name":null}' "$RAVEN_URL/api/v1/conversations"` | `201` metadata with `conversation_id`, `type:"global"`, `knowledge_name:null`, `title`, `is_titled`, `pinned`, and `created_at` | Create global. Use `"knowledge_name":"engineering"` for local. |
+| `curl -i -X POST -H "Authorization: Bearer $RAVEN_TOKEN" -H 'Content-Type: application/json' -d '{"scope":{"selections":[{"knowledge_name":"engineering"}]}}' "$RAVEN_URL/api/v1/conversations"` | `201` metadata with `schema_version`, `conversation_id`, `scope`, `title`, `is_titled`, `pinned`, and `created_at` | Search all files in `engineering`. Use `{}` for the whole knowledge base. |
 | `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/conversations/c36c45ac5575"` | `200` full conversation metadata | Reload a conversation. |
+| `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/conversations/c36c45ac5575/scope"` | `200 {"selections":[{"knowledge_name":"engineering"}]}` | Read the saved `RetrievalScope`. File selections preserve their supplied `file_id` and `file_name` fields. |
 | `curl -i -X PATCH -H "Authorization: Bearer $RAVEN_TOKEN" -H 'Content-Type: application/json' -d '{"title":"Thermal design","pinned":true}' "$RAVEN_URL/api/v1/conversations/c36c45ac5575"` | `200` updated metadata | Supply `title`, `pinned`, or both; scope cannot be changed. |
+| `curl -i -X PATCH -H "Authorization: Bearer $RAVEN_TOKEN" -H 'Content-Type: application/json' -d '{"title":"Thermal design"}' "$RAVEN_URL/api/v1/conversations/c36c45ac5575/title"` | `200` updated metadata | Set a title and mark the conversation titled. |
+| `curl -i -X PATCH -H "Authorization: Bearer $RAVEN_TOKEN" -H 'Content-Type: application/json' -d '{"pinned":false}' "$RAVEN_URL/api/v1/conversations/c36c45ac5575/pinned"` | `200` updated metadata | Send `true` to pin or `false` to unpin. |
 | `curl -i -X DELETE -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/conversations/c36c45ac5575"` | `202` operation reference | Delete conversation data; back up first if needed. |
 | `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/conversations/c36c45ac5575/messages?limit=10&after_message_id=0"` | `200 {"items":[],"next_cursor":null}` if empty | Canonical, uncompacted transcript. Messages include role, content, turn/order, tool calls, and tool-call identifiers. |
 | `curl -i -H "Authorization: Bearer $RAVEN_TOKEN" "$RAVEN_URL/api/v1/conversations/c36c45ac5575/turns/c4d242e9-f6e9-4a84-8cdc-e7bf5c8a3021"` | `200` turn with `turn_id`, `operation_id`, `user_query`, `result`, `memory_indexed`, `committed_at` | Load a durable turn. Result includes thinking, response, evidence, tool calls, and reconstructed sources. |
@@ -3124,6 +3223,62 @@ calls/results, reconstruction, and answer deltas. Fetch the turn and messages
 after completion for durable display. Two simultaneous turns on the same
 conversation are rejected with `409`; different conversations may run at
 once. See [Conversations, sessions, and memory](#conversations-sessions-and-memory).
+
+
+### Standalone retrieval and reconstruction requests
+
+Use these routes to search or reconstruct without a conversation. Every
+retrieval body requires a non-empty `query` and a `scope`. Use
+`"scope":{"selections":[]}` to search the whole knowledge base. Each route
+accepts only its own strategy options, and omitted options use the runtime
+defaults.
+
+| Route | Example JSON body |
+| --- | --- |
+| `POST /api/v1/retrieval/embedded` | `{"query":"What is the safe-hold deadline?","scope":{"selections":[{"knowledge_name":"engineering"}]},"top_k":3}` |
+| `POST /api/v1/retrieval/hierarchical` | `{"query":"What led to safe-hold?","scope":{"selections":[]},"top_k_section":3,"top_k_knowledge":2,"full_retrieval":false,"max_per_read":50,"anchor_count":4}` |
+| `POST /api/v1/retrieval/agreement` | `{"query":"What is the safe-hold deadline?","scope":{"selections":[{"knowledge_name":"engineering","file_id":"a83fd91c20b4"}]},"top_k":3,"top_k_knowledge":2,"full_retrieval":false,"max_per_read":50,"anchor_count":4}` |
+| `POST /api/v1/retrieval/vector-conditioned` | `{"query":"How do the fault response and power systems interact?","scope":{"selections":[]},"top_k_files":5,"top_k_sections":3,"max_per_read":50,"anchor_count":4}` |
+| `POST /api/v1/reconstruction` | `{"sections":[{"knowledge_name":"engineering","file_name":"system-design.pdf","section_id":"a83fd91c20b4-3"}]}` |
+
+Use real file and section IDs from your catalog. Each command returns `202`
+with an `events_url`. On that stream, standalone retrieval emits
+`retrieval.result` with the strategy's native output in `data.result`.
+Reconstruction emits one `reconstruction.file` event per file and can run
+without configured models. Use the section references from a retrieval result
+to build the `sections` list. For an agreement result, choose references from
+the appropriate branch or combine both branches. Wait for
+`operation.completed` before treating either command as successful.
+Invalid request bodies return `422`. If an accepted search cannot resolve its
+scope, inspect the failed operation's events for the error.
+
+### Manual activity requests
+
+Prefix each path below with `/api/v1/conversations/{conversation_id}/activities`.
+Every POST records a successful action. The activity-history GET reads the
+conversation directly without starting a session or recording an activity.
+The catalog GET routes under `/api/v1/knowledges` also browse without recording
+activity.
+
+| Request after `/activities` | Body or query parameters | Output |
+| --- | --- | --- |
+| `POST /knowledges` | No body | All knowledges for the current user. |
+| `POST /knowledges/engineering/files` | No body | Files in `engineering`. |
+| `POST /knowledges/engineering/files/a83fd91c20b4/sections?limit=10&after_section_index=0&get_content=false` | No body. All query parameters are optional. `limit` defaults to `20` and accepts `1`–`50`. `after_section_index` defaults to `0`. `get_content` defaults to `false`. | A page of section records. Use the last `section_index` to request the next page. |
+| `POST /knowledges/engineering/files/a83fd91c20b4/open` | No body. Optional `origin_activity_id` and `origin_turn_id` query parameters accept UUIDs. | The file's stored metadata. |
+| `POST /knowledges/engineering/sections/a83fd91c20b4-3/open` | No body. The same optional origin IDs apply. | One section record, including its raw text. |
+| `POST /retrieval` | `{"query":"What is the safe-hold deadline?","retrieval_mode":"embedded"}` | Results in the conversation's saved scope. Choose `embedded`, `hierarchical`, `agreement`, or `vector_conditioned`. |
+| `POST /reconstruction` | `{"sections":[{"knowledge_name":"engineering","file_name":"system-design.pdf","section_id":"a83fd91c20b4-3"}]}` | Reconstructed files with matching sections highlighted. |
+| `GET ?limit=10&after_sequence=0` | No body. `limit` defaults to `50` and accepts `1`–`199`. `after_sequence` defaults to `0`. Optional `turn_id` filters by the committed turn UUID. | `200` with `items` and `next_cursor`. Use `next_cursor` as the next `after_sequence` and keep the same `turn_id` filter. A `null` cursor marks the last page. |
+| `DELETE /855a028b-f40b-40e2-b220-0b460c23adec` | No body. Substitute the activity UUID. | `200 {"removed":true}` when removed, or `{"removed":false}` when absent. A captured or committed activity returns `409`. |
+
+The POST routes return `202` with an `events_url`. Read the activity UUID from
+`conversation.activity.recorded`. For browsing, source opens, and
+retrieval, that event also carries the action output in `data.result`.
+Reconstruction emits its files in `reconstruction.file` events. The retrieval
+route uses current runtime settings. The scope applies to retrieval, and
+navigation and reconstruction can access any source in the user's knowledge
+base. Only retrieval requires configured models.
 
 
 ## Configuration
@@ -3266,7 +3421,7 @@ Unknown fields, invalid types, non-finite numbers, and unsupported
 | --- | ---: | --- | --- |
 | `upload_retry_retention_seconds` | `86400.0` (24 hours) | Finite number greater than zero | Time a failed private staged browser upload remains available for user-confirmed ingestion retry. Successful uploads are removed after ingestion. |
 | `max_document_pages` | `1000` | Positive integer | Maximum number of pages accepted from a page-based document parser. |
-| `max_retrieval_top_k` | `25` | Positive integer | Server-wide ceiling for `RuntimeConfig.retrieval_top_k` and per-call retrieval overrides. |
+| `max_retrieval_top_k` | `25` | Positive integer | Server-wide ceiling for the three runtime retrieval counts and per-call `top_k` overrides. |
 | `max_agent_iterations` | `50` | Positive integer | Server-wide ceiling for `RuntimeConfig.agent_max_iterations` and per-session overrides. |
 | `trusted_ingestion_enabled` | `false` | Boolean | Enables the trusted local-path ingestion route for controlled host environments. Browser clients should normally use multipart upload. |
 | `allowed_ingestion_roots` | `[]` | List of filesystem paths | Roots beneath which trusted local-path ingestion is permitted. Paths are expanded and resolved. At least one root is required when trusted ingestion is enabled. |
@@ -3350,10 +3505,8 @@ runtime until they reach a terminal state.
 
 ### `RuntimeConfig`
 
-`RuntimeConfig` is a per-user immutable snapshot of mutable defaults. It stores
-semantic-splitting parameters, extraction retries, chunk settings, retrieval
-`top_k`, agent iteration limits, and conversation-memory limits in
-`runtime_settings.json`.
+`RuntimeConfig` stores each user's adjustable defaults in
+`runtime_settings.json`. An individual configuration snapshot is immutable.
 
 The complete settings document contains these fields:
 
@@ -3366,16 +3519,27 @@ The complete settings document contains these fields:
 | `max_extraction_retries` | `3` | Positive integer | Maximum attempts for LLM-based structured section-metadata extraction during ingestion. |
 | `chunk_size` | `512` | Positive integer | Target chunk size supplied to LlamaIndex's sentence-aware splitter before embedding and vector storage. |
 | `chunk_overlap` | `50` | Non-negative integer smaller than `chunk_size` | Overlap between adjacent embedding chunks. |
-| `retrieval_top_k` | `3` | Positive integer no greater than `SystemConfig.max_retrieval_top_k` (`25` by default) | Default number of results requested by retrieval pipelines and agent retrieval tools. |
+| `retrieval_top_k` | `3` | Positive integer up to `SystemConfig.max_retrieval_top_k` (`25` by default) | Maximum returned sections. Agreement uses it for each branch. |
+| `retrieval_top_k_knowledge` | `2` | Same bounds as `retrieval_top_k` | Maximum shortlisted knowledges in hierarchical or agreement retrieval when whole-base knowledge shortlisting runs. |
+| `retrieval_top_k_files` | `5` | Same bounds as `retrieval_top_k` | Maximum files shortlisted by vector-conditioned retrieval. |
+| `full_retrieval` | `false` | Boolean | Skip knowledge-summary shortlisting in hierarchical and agreement retrieval. Explicit scopes already skip it. |
+| `retrieval_max_per_read` | `50` | Positive integer | Maximum candidate records per LLM scoring batch. |
+| `retrieval_anchor_count` | `4` | Non-negative integer | Maximum previously ranked candidates supplied as scoring anchors to the next batch. `0` disables anchors. |
 | `agent_max_iterations` | `10` | Positive integer no greater than `SystemConfig.max_agent_iterations` (`50` by default) | Maximum number of agent workflow iterations allowed for one turn. |
 | `memory_token_limit` | `4000` | Positive integer | Token budget for the model-facing compacted conversation context. |
 | `memory_top_k` | `5` | Positive integer | Maximum matched memory nodes in conversation-memory search. Currently each node represents a turn and may return both user and assistant messages, so this is not a strict message-count limit. |
 
-Runtime settings are defaults, not global mutable variables inside running
-work. Each ingestion, retrieval, or session run captures its effective values
-when it starts. Updating settings affects subsequent work; it does not alter an
-operation that is already running. Explicit per-call arguments can override
-the persisted defaults without changing them.
+Ingestion and direct retrieval resolve omitted options when their Python
+methods run. For standalone HTTP retrieval, the background worker calls the
+Python retrieval method after submission. A settings change before that call
+can affect the search.
+
+Each new agent turn reads the current retrieval defaults once and uses them for
+all its retrieval tool calls. Manual session retrieval reads them for each
+search. A retried turn reuses its saved settings snapshot. Session constructor
+defaults such as memory and iteration limits are set when the session is
+created. Explicit per-call arguments can override defaults where the method
+exposes them.
 
 #### Python API
 
@@ -3436,6 +3600,11 @@ Example response:
   "chunk_size": 512,
   "chunk_overlap": 50,
   "retrieval_top_k": 3,
+  "retrieval_top_k_knowledge": 2,
+  "retrieval_top_k_files": 5,
+  "full_retrieval": false,
+  "retrieval_max_per_read": 50,
+  "retrieval_anchor_count": 4,
   "agent_max_iterations": 10,
   "memory_token_limit": 4000,
   "memory_top_k": 5
@@ -3473,6 +3642,11 @@ The complete request-body shape is shown below. Apart from
   "chunk_size": 768,
   "chunk_overlap": 75,
   "retrieval_top_k": 5,
+  "retrieval_top_k_knowledge": 3,
+  "retrieval_top_k_files": 6,
+  "full_retrieval": false,
+  "retrieval_max_per_read": 40,
+  "retrieval_anchor_count": 3,
   "agent_max_iterations": 12,
   "memory_token_limit": 8000,
   "memory_top_k": 8
@@ -3544,6 +3718,8 @@ RAVEN stores each user's state under:
 │       └── <conversation-id>/
 │           ├── metadata.json
 │           ├── messages.sqlite3
+│           ├── activities.sqlite3
+│           ├── preferences.json
 │           └── qdrant/
 ├── operations/
 │   └── operations.sqlite3
@@ -3557,7 +3733,7 @@ This persists:
 
 - knowledge metadata, parsed source sections, and Qdrant vectors;
 - conversation metadata, original messages, tool messages, turns, compacted
-  context, vector memory, and preferences;
+  context, vector memory, preferences, and manual activity records;
 - operation records, task records, statuses, retry links, and events;
 - per-user runtime settings.
 
@@ -3578,9 +3754,33 @@ partially committed storage changes. Conversation turn IDs and idempotent turn
 commits prevent the same completed turn from being written twice during retry
 or recovery.
 
+If the process stops after committing a turn and before updating its activity
+links, opening the conversation repairs those links. RAVEN reads the activity
+IDs from the original user message in the `messages` table of
+`messages.sqlite3` and updates the corresponding rows in `activities.sqlite3`.
+The model's compacted context is stored separately in `context_messages`.
+
 Model adapters, active network clients, and Ollama VRAM residency are runtime
 state. They are rebuilt or reconfigured after process restart rather than being
 treated as durable application state.
+
+
+## Upgrading to v0.2.1
+
+- Use `RetrievalScope` when creating conversations and making direct searches.
+  A whole-knowledge selection uses only `knowledge_name`. An empty selection
+  list searches the entire user's knowledge base.
+- Replace the old generic `Raven.retrieve()` call with the appropriate
+  strategy-specific method. Use strategy-only values such as `embedded` for
+  `retrieval_mode`.
+- For HTTP conversation creation, send `{}` or a `scope` object. Read the saved
+  selection at `GET /api/v1/conversations/{conversation_id}/scope`.
+
+Conversation metadata is now schema version `2`. Back up your v0.2.0 home
+before switching versions. Version `1` conversations are rejected during
+discovery and reported through discovery issues. Create new conversations in
+v0.2.1 and keep the backup if you need to open the earlier histories with
+v0.2.0.
 
 
 ## Backup, restore, and cleanup
@@ -3591,8 +3791,8 @@ RAVEN server process, and only then copy the home to protected storage. This
 keeps each user's knowledge SQLite files, Qdrant directories, conversation
 SQLite files, operations/event SQLite store, metadata, and runtime settings
 together. Do not copy only `file.sqlite3` without its corresponding Qdrant
-directory, or only `messages.sqlite3` without conversation metadata and
-memory storage. A live file-by-file copy is not a transactionally consistent
+directory. Copy conversation metadata, messages, activities, preferences, and
+vector memory together. A live file-by-file copy is not a transactionally consistent
 backup across these stores. The externally managed Ollama installation and its
 model cache are separate and are **not** included in a RAVEN-home backup.
 
@@ -3736,7 +3936,7 @@ the original `202` response is not proof of completion.
 | Upload gives `413`, `422`, or trusted path is refused | File/request limit, invalid filename, unsupported format, disabled trusted path, or path outside allowed roots | Check source extension/name and byte limits; for browser files use multipart `file`, not server-local path. Change immutable path policy only after operator review and restart. |
 | Turn gives `409 conversation_turn_active` | Another session is already processing that conversation | Wait for its operation to finish/cancel, then submit a new turn. Separate conversations may run concurrently. |
 | Operation gives `429` | Per-user or global active-operation limit reached | Wait/cancel old work; only increase limits after capacity planning. |
-| SSE reconnect gives `400`, `410`, or `404` | Invalid `Last-Event-ID`, expired replay gap, or fully cleaned operation | Send a decimal cursor; on `410`, fetch operation/turn state and rebuild the UI, because missing deltas cannot be replayed. On `404`, the operation is gone. |
+| SSE reconnect gives `400`, `410`, or `404` | Invalid `Last-Event-ID`, cursor ahead of available history, or missing operation | For `400`, send a non-negative decimal cursor. For `410`, check operation status and use its `last_event_id` to determine where replay can resume. For `404`, use the saved turn when available. |
 | A server crash left an operation interrupted | No worker survives process termination | Inspect retry eligibility; explicitly retry eligible tasks. Do not assume a started-but-unfinished operation succeeded. |
 | `503 operation_database_in_use`, storage failure, or corrupt resource | Another process owns the local database, or storage is unhealthy | Stop conflicting processes, check filesystem permissions/free space, make an offline backup, and inspect discovery issues. Do not manually modify live SQLite/Qdrant files. |
 
@@ -3793,7 +3993,7 @@ administration without requiring direct component ownership:
 | `await raven.get_conversation_turn_messages(conversation_id, turn_id)` | LlamaIndex `ChatMessage` objects belonging to that turn. |
 | `await raven.get_conversation_turn_messages_page(conversation_id, turn_id, limit=10, after_message_id=0)` | Canonical per-turn message records with IDs suitable for paging a UI. |
 | `await raven.get_conversation_preferences(conversation_id)` | List of `{preference_id, text}` dictionaries for that conversation. |
-| `await raven.delete_conversation(conversation_id)` | `OperationTask`; await `.result()` and observe events. Deletes persisted transcript, memory, and preferences. |
+| `await raven.delete_conversation(conversation_id)` | `OperationTask`; await `.result()` and observe events. Deletes the persisted transcript, activity history, memory, and preferences. |
 
 For a long-running method, the returned `OperationTask` is the handle:
 `await task.result()` retrieves completion or raises its error, while
@@ -3846,11 +4046,11 @@ Before release, test the generated wheel in fresh environments in both
 supported installation forms:
 
 ```bash
-python -m pip install ./dist/noomexai_raven-0.2.0-py3-none-any.whl
-python -m pip install "./dist/noomexai_raven-0.2.0-py3-none-any.whl[server]"
+python -m pip install ./dist/noomexai_raven-0.2.1-py3-none-any.whl
+python -m pip install "./dist/noomexai_raven-0.2.1-py3-none-any.whl[server]"
 ```
 
-Replace `0.2.0` with the version being tested.
+Use the wheel filename produced by your build.
 
 The core wheel must cover both Ollama and LiteLLM/cloud provider paths. The
 server smoke test must additionally verify CLI startup, bearer authentication,

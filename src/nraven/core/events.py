@@ -71,7 +71,7 @@ class EventType(StrEnum):
     CONVERSATION_TURN_COMMITTED = "conversation.turn_commit.completed"
     CONVERSATION_TURN_REUSED = "conversation.turn_commit.reused"
     CONVERSATION_TURN_COMMIT_FAILED = "conversation.turn_commit.failed"
-    MANUAL_ACTIVITY_RECORDED = "conversation.manual_activity.recorded"
+    ACTIVITY_RECORDED = "conversation.activity.recorded"
     CONVERSATION_MEMORY_INDEX_STARTED = "conversation.memory_index.started"
     CONVERSATION_MEMORY_INDEX_COMPLETED = "conversation.memory_index.completed"
     CONVERSATION_MEMORY_INDEX_FAILED = "conversation.memory_index.failed"
@@ -89,6 +89,7 @@ class EventType(StrEnum):
     RETRIEVAL_VECTOR_CONDITIONED_STARTED = "retrieval.vector_conditioned.started"
     RETRIEVAL_VECTOR_CONDITIONED_COMPLETED = "retrieval.vector_conditioned.completed"
     RETRIEVAL_VECTOR_CONDITIONED_FAILED = "retrieval.vector_conditioned.failed"
+    RETRIEVAL_RESULT = "retrieval.result"
 
     RECONSTRUCTION_STARTED = "reconstruction.started"
     RECONSTRUCTION_FILE = "reconstruction.file"

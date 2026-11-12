@@ -16,8 +16,8 @@ from ...session.session import Session
 from ..dependencies import lease_raven, submit_task
 from ..schemas import (
     ErrorResponse,
-    ManualActivityPageResponse,
-    ManualActivityRemovalResponse,
+    ActivityPageResponse,
+    ActivityRemovalResponse,
     ManualRetrievalRequest,
     OperationTaskReference,
     SourceReconstructionRequest,
@@ -42,36 +42,35 @@ router = APIRouter(
 RavenLease = Annotated[Raven, Depends(lease_raven)]
 
 
-@router.get("", response_model=ManualActivityPageResponse)
+@router.get("", response_model=ActivityPageResponse)
 async def list_activity(
     conversation_id: str,
     raven: RavenLease,
     after_sequence: Annotated[int, Query(ge=0, le=SQLITE_MAX_INTEGER)] = 0,
     limit: Annotated[int, Query(ge=1, le=199)] = 50,
     turn_id: UUID | None = None,
-) -> ManualActivityPageResponse:
+) -> ActivityPageResponse:
     """Read recorded actions, optionally limited to one committed turn."""
-    async with _manual_session(raven, conversation_id) as session:
-        records = await session.list_manual_activity(
-            after_sequence=after_sequence, limit=limit + 1, turn_id=turn_id,
-        )
+    records = await raven.list_activities(
+        conversation_id, after_sequence=after_sequence, limit=limit + 1, turn_id=turn_id,
+    )
     items = records[:limit]
-    return ManualActivityPageResponse(
+    return ActivityPageResponse(
         items=items,
         next_cursor=items[-1].sequence if len(records) > limit else None,
     )
 
 
-@router.delete("/{activity_id}", response_model=ManualActivityRemovalResponse)
+@router.delete("/{activity_id}", response_model=ActivityRemovalResponse)
 async def remove_activity(
     conversation_id: str,
     activity_id: UUID,
     raven: RavenLease,
-) -> ManualActivityRemovalResponse:
+) -> ActivityRemovalResponse:
     """Remove a pending action that has not been captured by an agent turn."""
     async with _manual_session(raven, conversation_id) as session:
         removed = await session.remove_from_activity(activity_id)
-    return ManualActivityRemovalResponse(removed=removed)
+    return ActivityRemovalResponse(removed=removed)
 
 
 @router.post("/knowledges", status_code=status.HTTP_202_ACCEPTED)

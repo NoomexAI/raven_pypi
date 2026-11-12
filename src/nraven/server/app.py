@@ -19,6 +19,7 @@ from .routers.health import router as health_router
 from .routers.knowledges import router as knowledges_router
 from .routers.models import router as models_router
 from .routers.operations import router as operations_router
+from .routers.retrieval import router as retrieval_router
 from .routers.runtime import router as runtime_router
 from .runtime import UserRuntimeRegistry
 
@@ -79,4 +80,5 @@ def create_app(
     app.include_router(knowledges_router)
     app.include_router(conversations_router)
     app.include_router(activities_router)
+    app.include_router(retrieval_router)
     return app

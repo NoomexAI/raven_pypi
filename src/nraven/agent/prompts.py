@@ -8,7 +8,7 @@ import json
 
 from llama_index.core.utils import get_tokenizer
 
-from ..data_management.activity import ActivityMessage, ActivityMessageEntry, ManualActivity
+from ..data_management.activity import Activity, ActivityMessage, ActivityMessageEntry
 from .policy import AgentPolicy, RETRIEVAL_TOOL_NAMES
 
 
@@ -21,7 +21,8 @@ and follow the steps below to verify document claims.
 1. Decide what the user wants.
    - Casual chat: answer directly, without tools. Example: "Hi" -> "Hello."
    - Question about what the user searched, opened, or reconstructed: use the
-     manual activity records when they contain the answer.
+     manual activity records when they contain the answer. For earlier activity
+     missing from context, go to step 4.
    - Question about what this conversation can search: use get_retrieval_scope.
    - Query about knowledge or documents: go to step 2. Do not use your general knowledge to answer knowledge queries.
    - Browse or inspect the knowledge base: go to step 3.
@@ -54,6 +55,11 @@ and follow the steps below to verify document claims.
    a browsing request.
 
 4. For conversation memory, use search_memory and answer from its result.
+   To browse all recorded manual activity, call list_activities without a
+   turn_id. For a specific turn, pass its turn_id from search_memory or the
+   user. Use next_after_sequence to continue when needed.
+   Example: "Which file did I open before we discussed safe-hold?" -> search_memory("safe-hold") ->
+   list_activities(turn_id) -> answer from the saved activity.
    For preferences, use list_preferences to review them. Save only an explicitly
    requested enduring behavior; to remove one, find its preference_id first.
    Example: "What did we decide earlier?" -> search_memory -> answer.
@@ -70,8 +76,8 @@ and follow the steps below to verify document claims.
 """
 
 
-def render_manual_activity(
-    entries: Sequence[ManualActivity], *, query: str, token_budget: int,
+def render_activity_message(
+    entries: Sequence[Activity], *, query: str, token_budget: int,
 ) -> ActivityMessage | None:
     """Fit an ordered batch of activity records into the next user message."""
     if not entries or token_budget <= 0:
@@ -99,7 +105,7 @@ def render_manual_activity(
     return message
 
 
-def _render_activity(entry: ManualActivity) -> str:
+def _render_activity(entry: Activity) -> str:
     details = entry.details
     if entry.kind == "list_knowledges":
         names = details["knowledges"]

@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 from ..agent.contracts import AgentRunResult, RetrievalPipelines
 from ..agent.harness import AgentHarness
 from ..agent.policy import AgentPolicy, RetrievalMode
-from ..agent.prompts import render_manual_activity
+from ..agent.prompts import render_activity_message
 from ..core.async_utils import await_completion
 from ..core.config import RuntimeConfig, SQLITE_MAX_INTEGER
 from ..core.errors import ErrorCode, RavenError
@@ -28,7 +28,7 @@ from ..core.operations import (
 )
 from ..data_management.conversation_manager import Conversation
 from ..data_management.knowledge_base import KnowledgeBase
-from ..data_management.activity import ManualActivity, ManualActivityKind
+from ..data_management.activity import ActivityKind
 from ..pipelines.reconstructor import Reconstructor
 from ..pipelines.retrieval import _file_id_of
 
@@ -272,15 +272,6 @@ class Session:
         await asyncio.gather(*run_monitors, return_exceptions=True)
 
 
-    async def list_manual_activity(
-        self, *, after_sequence: int = 0, limit: int = 50, turn_id: UUID | str | None = None,
-    ) -> list[ManualActivity]:
-        """Read saved manual actions without recording another entry."""
-        self._ensure_started()
-        return await self.conversation.list_manual_activity(
-            after_sequence=after_sequence, limit=limit, turn_id=turn_id,
-        )
-
     async def remove_from_activity(self, activity_id: UUID | str) -> bool:
         """Remove an activity that is still pending and outside the current turn."""
         self._ensure_started()
@@ -451,7 +442,7 @@ class Session:
         self,
         knowledge_name: str,
         source_id: str,
-        kind: ManualActivityKind,
+        kind: ActivityKind,
         operation_type: OperationType,
         origin_activity_id: UUID | None,
         origin_turn_id: UUID | None,
@@ -527,7 +518,7 @@ class Session:
 
     async def _run_manual_action(
         self,
-        kind: ManualActivityKind,
+        kind: ActivityKind,
         operation_type: OperationType,
         action: Callable[[Operation], Awaitable[tuple[Any, dict[str, Any]]]],
         operation: Operation | None,
@@ -538,7 +529,7 @@ class Session:
             async def run_and_record() -> Any:
                 result, details = await action(active)
                 active.raise_if_cancelled()
-                entry = await self.conversation._record_manual_activity(
+                entry = await self.conversation._record_activity(
                     kind, operation_id=active.operation_id, started_at=started_at, details=details,
                 )
                 data: dict[str, Any] = {
@@ -551,7 +542,7 @@ class Session:
                 if kind != "reconstruction":
                     data["result"] = result
                 await active.publish(Event(
-                    type=EventType.MANUAL_ACTIVITY_RECORDED,
+                    type=EventType.ACTIVITY_RECORDED,
                     data=data,
                 ))
                 return result
@@ -673,7 +664,7 @@ class Session:
                 )
             else:
                 activity_message = await self.conversation._capture_activity(
-                    lambda activities: render_manual_activity(
+                    lambda activities: render_activity_message(
                         activities, query=query, token_budget=min(512, self._memory_token_limit // 8),
                     ),
                     limit=20,

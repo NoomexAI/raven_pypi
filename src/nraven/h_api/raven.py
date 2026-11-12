@@ -38,6 +38,7 @@ from ..core.operations import (
 )
 from ..core.retrieval_scope import RetrievalScope
 from ..core.upload_retention import check_upload_retry
+from ..data_management.activity import Activity
 from ..data_management.conversation_manager import Conversation, ConversationManager
 from ..data_management.discovery import DiscoveryIssue
 from ..data_management.knowledge_base import Knowledge, KnowledgeBase
@@ -1562,6 +1563,21 @@ class Raven:
                 f"Turn '{turn_id}' does not exist in conversation '{conversation_id}'.",
             )
         return turn
+
+
+    async def list_activities(
+        self,
+        conversation_id: str,
+        turn_id: UUID | str | None = None,
+        *,
+        after_sequence: int = 0,
+        limit: int = 50,
+    ) -> list[Activity]:
+        """Read a page of conversation activities, optionally filtered by turn."""
+        conversation = self.get_conversation(conversation_id)
+        return await conversation.list_activities(
+            turn_id=turn_id, after_sequence=after_sequence, limit=limit,
+        )
 
 
     async def get_conversation_turn_messages(

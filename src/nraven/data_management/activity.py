@@ -19,7 +19,7 @@ from ..core.config import SQLITE_MAX_INTEGER
 from ..core.errors import ErrorCode, RavenError
 
 
-ManualActivityKind = Literal[
+ActivityKind = Literal[
     "list_knowledges", "list_files", "list_sections",
     "retrieval", "open_file", "open_section", "reconstruction",
 ]
@@ -27,7 +27,7 @@ _SCHEMA_VERSION = 2
 ACTIVITY_MESSAGE_KEY = "nraven_activity_message"
 
 
-class ManualActivity(BaseModel):
+class Activity(BaseModel):
     """One completed manual action and its compact result references."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -35,7 +35,7 @@ class ManualActivity(BaseModel):
     sequence: int
     activity_id: UUID
     operation_id: UUID
-    kind: ManualActivityKind
+    kind: ActivityKind
     started_at: datetime
     recorded_at: datetime
     details: dict[str, Any]
@@ -72,24 +72,24 @@ class ActivityLog:
 
     async def append(
         self,
-        kind: ManualActivityKind,
+        kind: ActivityKind,
         *,
         operation_id: UUID,
         started_at: datetime,
         details: dict[str, Any],
-    ) -> ManualActivity:
+    ) -> Activity:
         return await run_in_thread(self._append, kind, operation_id, started_at, details)
 
     async def list(
         self, *, after_sequence: int = 0, limit: int = 50, turn_id: UUID | None = None,
-    ) -> list[ManualActivity]:
+    ) -> list[Activity]:
         if type(after_sequence) is not int or not 0 <= after_sequence <= SQLITE_MAX_INTEGER:
-            raise RavenError(ErrorCode.INVALID_METADATA, "Invalid manual activity cursor.")
+            raise RavenError(ErrorCode.INVALID_METADATA, "Invalid activity cursor.")
         if type(limit) is not int or not 1 <= limit <= 200:
-            raise RavenError(ErrorCode.INVALID_METADATA, "Manual activity limit must be between 1 and 200.")
+            raise RavenError(ErrorCode.INVALID_METADATA, "Activity limit must be between 1 and 200.")
         return await run_in_thread(self._list, after_sequence, limit, turn_id=turn_id)
 
-    async def pending(self, limit: int) -> list[ManualActivity]:
+    async def pending(self, limit: int) -> list[Activity]:
         return await run_in_thread(self._list, 0, limit, pending_only=True)
 
     def pending_ids(self) -> set[UUID]:
@@ -103,15 +103,8 @@ class ActivityLog:
                 )
             }
 
-    def prepare(self, legacy_path: Path) -> None:
-        """Move the previous activity file and add turn links to its rows."""
-        if legacy_path.is_file():
-            if self.path.exists():
-                raise RavenError(ErrorCode.PERSISTENCE_FAILED, "Both activity database files exist.")
-            # Opening the original file lets SQLite recover any rollback journal before the move.
-            with closing(sqlite3.connect(legacy_path)) as connection:
-                self._check_version(connection)
-            legacy_path.replace(self.path)
+    def prepare(self) -> None:
+        """Ensure the schema is ready before recovering activity links."""
         if self.path.is_file():
             with closing(sqlite3.connect(self.path)) as connection, connection:
                 connection.execute("BEGIN IMMEDIATE")
@@ -168,11 +161,11 @@ class ActivityLog:
 
     def _append(
         self,
-        kind: ManualActivityKind,
+        kind: ActivityKind,
         operation_id: UUID,
         started_at: datetime,
         details: dict[str, Any],
-    ) -> ManualActivity:
+    ) -> Activity:
         activity_id = uuid4()
         payload = json.dumps(details, ensure_ascii=False)
         with closing(sqlite3.connect(self.path)) as connection, connection:
@@ -191,7 +184,7 @@ class ActivityLog:
             )
             sequence = row.lastrowid
             assert sequence is not None
-            activity = ManualActivity(
+            activity = Activity(
                 sequence=sequence,
                 activity_id=activity_id,
                 operation_id=operation_id,
@@ -205,7 +198,7 @@ class ActivityLog:
     def _list(
         self, after_sequence: int, limit: int, *,
         turn_id: UUID | None = None, pending_only: bool = False,
-    ) -> list[ManualActivity]:
+    ) -> list[Activity]:
         if not self.path.is_file():
             return []
         with closing(sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
@@ -227,7 +220,7 @@ class ActivityLog:
                 parameters,
             ).fetchall()
         return [
-            ManualActivity(
+            Activity(
                 sequence=sequence, activity_id=activity_id, operation_id=operation_id,
                 kind=kind, started_at=started_at, recorded_at=recorded_at,
                 details=json.loads(details_json),

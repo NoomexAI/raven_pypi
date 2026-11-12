@@ -22,7 +22,7 @@ from ..core.operations import (
     RetryPolicy,
 )
 from ..core.retrieval_scope import RetrievalScope
-from ..data_management.activity import ManualActivity
+from ..data_management.activity import Activity
 from ..providers import ModelRole, ModelSpec
 
 
@@ -656,16 +656,57 @@ class ManualRetrievalRequest(BaseModel):
     retrieval_mode: RetrievalMode
 
 
-class ManualActivityPageResponse(BaseModel):
+class _ScopedRetrievalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    query: str = Field(min_length=1, max_length=MAX_USER_QUERY_LENGTH)
+    scope: RetrievalScope
+
+
+class EmbeddedRetrievalRequest(_ScopedRetrievalRequest):
+    """Search an explicit document scope by vector similarity."""
+
+    top_k: int | None = Field(default=None, ge=1, strict=True)
+
+
+class _ScoredRetrievalRequest(_ScopedRetrievalRequest):
+    max_per_read: int | None = Field(default=None, ge=1, strict=True)
+    anchor_count: int | None = Field(default=None, ge=0, strict=True)
+
+
+class HierarchicalRetrievalRequest(_ScoredRetrievalRequest):
+    """Rank section metadata in the selected documents."""
+
+    top_k_section: int | None = Field(default=None, ge=1, strict=True)
+    top_k_knowledge: int | None = Field(default=None, ge=1, strict=True)
+    full_retrieval: bool | None = Field(default=None, strict=True)
+
+
+class AgreementRetrievalRequest(_ScoredRetrievalRequest):
+    """Compare embedded and hierarchical results from the same scope."""
+
+    top_k: int | None = Field(default=None, ge=1, strict=True)
+    top_k_knowledge: int | None = Field(default=None, ge=1, strict=True)
+    full_retrieval: bool | None = Field(default=None, strict=True)
+
+
+class VectorConditionedRetrievalRequest(_ScoredRetrievalRequest):
+    """Shortlist files by embedding and rank their sections."""
+
+    top_k_files: int | None = Field(default=None, ge=1, strict=True)
+    top_k_sections: int | None = Field(default=None, ge=1, strict=True)
+
+
+class ActivityPageResponse(BaseModel):
     """One page of recorded manual actions in sequence order."""
 
     model_config = ConfigDict(extra="forbid")
 
-    items: list[ManualActivity]
+    items: list[Activity]
     next_cursor: int | None = None
 
 
-class ManualActivityRemovalResponse(BaseModel):
+class ActivityRemovalResponse(BaseModel):
     """Whether a pending activity was deleted."""
 
     model_config = ConfigDict(extra="forbid")
