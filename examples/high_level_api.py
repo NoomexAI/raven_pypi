@@ -1,6 +1,6 @@
 """Search selected documents and reconstruct sources directly with the Python API.
 
-Start Ollama and pull gemma4:e2b and bge-m3, then run:
+Set FILE_PATH below. Start Ollama and pull gemma4:e2b and bge-m3, then run:
     python examples/high_level_api.py
 """
 
@@ -11,8 +11,9 @@ from tempfile import TemporaryDirectory
 from nraven import ModelRole, ModelSpec, Raven, RetrievalScope, RetrievalSelection
 
 
-SAMPLE = Path(__file__).resolve().parents[1] / "docs/assets/downloads/test_files/Reaction_wheel.txt"
-QUERY = "What is the safe-hold deadline after the angular momentum anomaly is detected?"
+# Supported formats: .txt, .md, .markdown, .pdf, and .docx.
+FILE_PATH = "<Your-file-path.txt>"
+QUERY = "What is the main topic of this document?"
 
 
 async def main(home: Path) -> None:
@@ -26,7 +27,7 @@ async def main(home: Path) -> None:
         await configured.result()
 
         await (await raven.create_knowledge("engineering")).result()
-        record = await (await raven.ingest("engineering", SAMPLE)).result()
+        record = await (await raven.ingest("engineering", Path(FILE_PATH))).result()
         scope = RetrievalScope(selections=(
             RetrievalSelection(knowledge_name="engineering", file_id=record["file_id"]),
         ))

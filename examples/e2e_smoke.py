@@ -1,7 +1,7 @@
 """Exercise v0.2.1 retrieval, reconstruction, and activity history over HTTP.
 
-Install noomexai-raven[server]==0.2.1. Start Ollama with gemma4:e2b and bge-m3
-available, then run:
+Install noomexai-raven[server]==0.2.1 and set FILE_PATH below. Start Ollama
+with gemma4:e2b and bge-m3 available, then run:
     python examples/e2e_smoke.py
 """
 
@@ -15,8 +15,9 @@ import httpx
 from nraven.server import create_app
 
 
-SAMPLE = Path(__file__).resolve().parents[1] / "docs/assets/downloads/test_files/Reaction_wheel.txt"
-QUERY = "What is the safe-hold deadline after the angular momentum anomaly is detected?"
+# Supported formats: .txt, .md, .markdown, .pdf, and .docx.
+FILE_PATH = "<Your-file-path.txt>"
+QUERY = "What is the main topic of this document?"
 
 
 async def read_events(client, events_url, *, after=None):
@@ -40,6 +41,7 @@ async def complete(client, response):
 
 
 async def main(home: Path) -> None:
+    source_path = Path(FILE_PATH)
     app = create_app(home)
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(
@@ -54,9 +56,9 @@ async def main(home: Path) -> None:
             created = await client.post("/api/v1/knowledges", json={"name": "engineering"})
             created.raise_for_status()
             files_url = "/api/v1/knowledges/engineering/files"
-            with SAMPLE.open("rb") as source:
+            with source_path.open("rb") as source:
                 await complete(client, await client.post(
-                    files_url, files={"file": (SAMPLE.name, source, "text/plain")},
+                    files_url, files={"file": (source_path.name, source)},
                 ))
             files = await client.get(files_url)
             files.raise_for_status()
@@ -68,7 +70,7 @@ async def main(home: Path) -> None:
             events = await complete(client, search)
             result, = (event for event in events if event["type"] == "retrieval.result")
             sections = result["data"]["result"]
-            assert sections and all(section["file_name"] == SAMPLE.name for section in sections)
+            assert sections and all(section["file_name"] == source_path.name for section in sections)
             replay = await read_events(client, search.json()["events_url"], after=result["event_id"] - 1)
             assert replay[0] == result
 
@@ -82,7 +84,7 @@ async def main(home: Path) -> None:
             file_event, = (event for event in reconstructed if event["type"] == "reconstruction.file")
             highlighted = {section["section_id"] for section in file_event["data"]["sections"] if section["highlighted"]}
             assert highlighted == {section["section_id"] for section in references}
-            print(f"Retrieved and reconstructed {SAMPLE.name}, then verified SSE replay.")
+            print(f"Retrieved and reconstructed {source_path.name}, then verified SSE replay.")
 
             # The activity route records the action. GET reads the log for the UI.
             conversation = await client.post("/api/v1/conversations", json={"scope": scope})

@@ -1,6 +1,7 @@
 """Ingest a document and stream progress through the operation task.
 
-Run create_knowledge.py first. Start Ollama and pull gemma4:e2b and bge-m3:
+Run create_knowledge.py first and set FILE_PATH below. Start Ollama and pull
+gemma4:e2b and bge-m3, then run:
     python examples/ingest_knowledge.py
 """
 
@@ -11,7 +12,8 @@ from pathlib import Path
 from nraven import EventType, ModelRole, ModelSpec, Raven
 
 
-SAMPLE = Path(__file__).resolve().parents[1] / "docs/assets/downloads/test_files/Reaction_wheel.txt"
+# Supported formats: .txt, .md, .markdown, .pdf, and .docx.
+FILE_PATH = "<Your-file-path.txt>"
 
 
 async def main(home: Path, name: str, source: Path, llm: str, embedding: str) -> None:
@@ -38,7 +40,7 @@ async def main(home: Path, name: str, source: Path, llm: str, embedding: str) ->
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("source", nargs="?", type=Path, default=SAMPLE)
+    parser.add_argument("source", nargs="?", type=Path, default=FILE_PATH)
     parser.add_argument("--home", type=Path, default=Path("raven-home/examples"))
     parser.add_argument("--knowledge", default="engineering")
     parser.add_argument("--llm", default="gemma4:e2b")

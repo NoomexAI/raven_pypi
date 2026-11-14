@@ -1,6 +1,7 @@
 """Record manual document work, then ask the agent to continue in the same session.
 
-Run create_knowledge.py and ingest_knowledge.py first:
+Run create_knowledge.py and ingest_knowledge.py first. Set FILE_PATH below
+to the path used for ingestion, then run:
     python examples/interact_session.py
 """
 
@@ -11,10 +12,9 @@ from pathlib import Path
 from nraven import EventType, ModelRole, ModelSpec, Raven, RetrievalScope, RetrievalSelection
 
 
-DEFAULT_QUERY = (
-    "According to Reaction_wheel.txt, what is the maximum time in milliseconds for the spacecraft "
-    "to enter magnetic-torquer-only safe-hold after detecting an angular momentum anomaly?"
-)
+# Supported formats: .txt, .md, .markdown, .pdf, and .docx.
+FILE_PATH = "<Your-file-path.txt>"
+DEFAULT_QUERY = "What is the main topic of this document?"
 
 
 async def main(home: Path, name: str, filename: str, query: str, llm: str, embedding: str) -> None:
@@ -65,7 +65,7 @@ if __name__ == "__main__":
     parser.add_argument("query", nargs="?", default=DEFAULT_QUERY)
     parser.add_argument("--home", type=Path, default=Path("raven-home/examples"))
     parser.add_argument("--knowledge", default="engineering")
-    parser.add_argument("--file", default="Reaction_wheel.txt")
+    parser.add_argument("--file", default=Path(FILE_PATH).name, help="Filename as stored in the knowledge.")
     parser.add_argument("--llm", default="gemma4:e2b")
     parser.add_argument("--embedding", default="bge-m3:latest")
     args = parser.parse_args()
