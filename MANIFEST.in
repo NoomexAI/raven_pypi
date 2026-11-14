@@ -1,0 +1,3 @@
+recursive-include examples *.py
+prune tests
+prune local_tests

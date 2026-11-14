@@ -70,7 +70,7 @@ disallow_untyped_defs = false
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+testpaths = ["local_tests"]
 markers = [
     "integration: tests that require external services or real model assets",
 ]
