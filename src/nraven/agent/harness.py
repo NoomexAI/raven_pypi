@@ -23,7 +23,7 @@ from ..pipelines.reconstructor import Reconstructor
 from .contracts import AgentRun, AgentTranscript, RetrievalPipelines
 from .policy import AgentPolicy, RetrievalMode
 from .prompts import PromptBuilder, PromptBundle
-from .tools import ToolBuilder
+from .tools import ActivityReader, ToolBuilder
 from .workflow import WorkflowEventTranslator
 
 
@@ -54,6 +54,7 @@ class AgentHarness:
         max_iterations: int = 10,
         max_cached_prompts: int = DEFAULT_PROMPT_CACHE_SIZE,
         agent_factory: Callable[..., Any] = FunctionAgent,
+        activity_reader: ActivityReader | None = None,
     ) -> None:
         if llm is None:
             raise ValueError("llm is required")
@@ -80,6 +81,7 @@ class AgentHarness:
         self._max_iterations = max_iterations
         self._max_cached_prompts = max_cached_prompts
         self._agent_factory = agent_factory
+        self._activity_reader = activity_reader
         self._prompt_cache: OrderedDict[tuple[Any, ...], _CachedPrompt] = (
             OrderedDict()
         )
@@ -170,6 +172,7 @@ class AgentHarness:
             tools = ToolBuilder(
                 self._knowledge_base,
                 self._retrieval_pipelines,
+                activity_reader=self._activity_reader,
             ).build(
                 conversation,
                 policy,

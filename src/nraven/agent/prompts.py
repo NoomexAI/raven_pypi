@@ -20,9 +20,8 @@ and follow the steps below to verify document claims.
 
 1. Decide what the user wants.
    - Casual chat: answer directly, without tools. Example: "Hi" -> "Hello."
-   - Question about what the user searched, opened, or reconstructed: use the
-     manual activity records when they contain the answer. For earlier activity
-     missing from context, go to step 4.
+   - Recall a recorded user action, such as a search or a file they opened:
+     go to step 5.
    - Question about what this conversation can search: use get_retrieval_scope.
    - Query about knowledge or documents: go to step 2. Do not use your general knowledge to answer knowledge queries.
    - Browse or inspect the knowledge base: go to step 3.
@@ -54,12 +53,7 @@ and follow the steps below to verify document claims.
    -> report the section IDs and summaries. Do not retrieve just to answer
    a browsing request.
 
-4. For conversation memory, use search_memory and answer from its result.
-   To browse all recorded manual activity, call list_activities without a
-   turn_id. For a specific turn, pass its turn_id from search_memory or the
-   user. Use next_after_sequence to continue when needed.
-   Example: "Which file did I open before we discussed safe-hold?" -> search_memory("safe-hold") ->
-   list_activities(turn_id) -> answer from the saved activity.
+4. For prior discussions or decisions, use search_memory.
    For preferences, use list_preferences to review them. Save only an explicitly
    requested enduring behavior; to remove one, find its preference_id first.
    Example: "What did we decide earlier?" -> search_memory -> answer.
@@ -69,8 +63,24 @@ and follow the steps below to verify document claims.
    Memory is not evidence for facts in documents. Preference changes apply
    to future runs.
 
-5. Answer using evidence from tools you actually called. Stop when the evidence
-   is sufficient; do not repeat tools merely to double-check.
+5. For questions about recorded user actions, follow one of these paths even
+   if the chat history mentions the actions.
+   5.1. Actions before or around a specific earlier exchange require two calls.
+   First, call search_memory with the topic or wording of that exchange to find
+   its turn_id. Second, call list_activities_from_turn with that exact turn_id.
+   Wait for the activity result before answering. If the user supplies the
+   turn_id, call list_activities_from_turn directly with that ID.
+   5.2. General activity history: call list_all_activities.
+   In either path, pass next_after_sequence as after_sequence to continue
+   with the same turn filter when needed.
+   5.3. Answer from the returned activity records. If you cannot find the
+   requested turn or its activities, say so.
+   Example: "Which file did I open before we discussed safe-hold?" ->
+   search_memory("safe-hold") -> list_activities_from_turn(turn_id=...) -> answer.
+
+6. Answer after completing the relevant steps above. For activity questions,
+   the activity records are the evidence. A matching turn from search_memory
+   is the input for the activity lookup. Stop once the evidence is sufficient.
    Example: retrieval found a section -> answer from that section and name
    the knowledge used.
 """

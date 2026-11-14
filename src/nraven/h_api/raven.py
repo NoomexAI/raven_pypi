@@ -1757,6 +1757,7 @@ class Raven:
                 reconstructor=self.reconstructor,
                 max_iterations=effective_max_iterations,
                 max_cached_prompts=self.system_config.prompt_cache_size,
+                activity_reader=self.list_activities,
             )
         return Session(
             conversation,

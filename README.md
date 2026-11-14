@@ -2190,11 +2190,30 @@ Compaction does not replace or delete canonical messages in
 LlamaIndex memory layer. Vector memory keeps its entries for the original
 query and response across compactions.
 
-The agent accesses vector memory through `search_memory(query)`. Each match
-contains a `turn_id` and that turn's recalled messages. The agent can pass that
-ID to `list_activities(turn_id)` to read the manual actions linked to the turn
-in the current conversation, even after compaction. Memory results support
-conversation recall and do not count as source evidence for a knowledge claim.
+The agent uses `search_memory(query)` to recall an earlier discussion. Each
+entry in the tool's `result` list contains a `turn_id` and the recalled
+`messages` for that turn. If the turn has linked activities, the entry also
+includes an `activity_action` instruction with the exact ID to pass to
+`list_activities_from_turn`.
+
+For example, asking “Which file did I open before we discussed safe-hold?”
+gives the agent a topic to search for. A match with linked activities looks
+like this:
+
+```json
+{
+  "turn_id": "4dbef684-e9c5-4b4f-8a87-0b390745912c",
+  "messages": [
+    {"role": "user", "content": "Let's review the safe-hold deadline."},
+    {"role": "assistant", "content": "The deadline is 95 milliseconds."}
+  ],
+  "activity_action": "This turn has recorded user activities. If the user asks what they did, call list_activities_from_turn with turn_id \"4dbef684-e9c5-4b4f-8a87-0b390745912c\" before answering."
+}
+```
+
+The activity lookup reads the saved records even after compaction. The hint
+contains no activity records itself. Memory results support conversation
+recall. Document claims still require source evidence.
 
 Compaction emits started, completed, and failed events so a UI can explain a
 delay instead of appearing stalled.
@@ -2392,14 +2411,26 @@ retrieval strategy. Navigation covers the user's entire knowledge base.
 | `list_files` | `knowledge_name` | Returns stored file records in the named knowledge. |
 | `list_sections` | `knowledge_name`, `file_name`. Optional `get_content`, `after_section_index`, `limit`. | Returns section IDs and metadata without `raw_content` by default. Default page size `20`, maximum `50`. With `get_content=true`, default `3`, maximum `5`. Use `ui_summary.next_after_section_index` to continue. |
 | `get_sections` | `knowledge_name`, `section_ids` (1–5 IDs) | Returns sections in requested order with metadata and raw text. Successful lookups supply evidence. |
-| `search_memory` | `query` | Returns semantically relevant messages grouped by `turn_id` within this conversation. |
-| `list_activities` | Optional `turn_id` and `after_sequence` | Reads up to five manual actions in the active conversation in sequence order. Omit `turn_id` to include pending and linked actions. Use `ui_summary.next_after_sequence` for another page with the same filter. |
+| `search_memory` | `query` | Returns semantically relevant messages grouped by `turn_id`. Matches with linked activities include an `activity_action` hint for looking them up. |
+| `list_activities_from_turn` | Required `turn_id`, optional `after_sequence` | Reads up to five recorded actions linked to a specific turn. Use `ui_summary.next_after_sequence` with the same turn ID for another page. |
+| `list_all_activities` | Optional `after_sequence` | Reads up to five recorded actions in conversation sequence order, including pending and turn-linked actions. Use `ui_summary.next_after_sequence` for another page. |
 | `list_preferences` | None | Returns this conversation's preference IDs and text. |
 | `save_preference` | `text` | Persists an explicit enduring preference for future runs. |
 | `remove_preference` | `preference_id` | Removes the exact saved preference. |
 
-These are **agent tool calls**, not FastAPI routes or the high-level Raven
-navigation methods. The latter still return complete stored section records.
+The activity tools read the current conversation and return records in
+ascending `sequence` order. Use `list_activities_from_turn` when the question
+refers to a particular exchange. Use `list_all_activities` for general history,
+including actions that are still pending. Both return up to five records per
+call. If `ui_summary.next_after_sequence` is a number, pass it as
+`after_sequence` on the next call. For a turn-specific lookup, pass the same
+`turn_id` again. A `null` cursor marks the last page.
+
+The harness exposes these tools to the model. Application code reads activity
+history through `Raven.list_activities()` or
+`GET /api/v1/conversations/{conversation_id}/activities`. Reading the history
+creates no activity entry. The high-level Raven navigation methods return
+complete stored section records.
 
 For example, an agent can inspect a section metadata page after
 section index 2 without sending raw section content to the model:

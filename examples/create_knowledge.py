@@ -1,42 +1,40 @@
-"""Task 1: Create a knowledge.
+"""Create an example knowledge. Run this before ingest_knowledge.py.
 
-Boots Ollama (ModelManager is the sole model owner), opens the KnowledgeBase,
-creates a knowledge, and lists what exists. Idempotent: creating a name that
-already exists raises ValueError.
+Install noomexai-raven==0.2.1, then run from the repository root:
+    python examples/create_knowledge.py
 """
 
+import argparse
 import asyncio
+from pathlib import Path
 
-from nraven.events import EventBus
-from nraven.knowledge import KnowledgeBase
-from nraven.model import DEFAULT_EMBED_MODEL, ModelManager
-
-KNOWLEDGE_NAME = "clinical"
+from nraven import Raven
+from nraven.core.errors import ErrorCode, RavenError
 
 
-async def main() -> None:
-    bus = EventBus()
-    mm = ModelManager(bus)
-    await mm.start()
-
-    embed = await mm.load_embed_model(DEFAULT_EMBED_MODEL)
-    kb = KnowledgeBase(bus, embed_model=embed)
-    await kb.start()
-
+async def main(home: Path, name: str) -> None:
+    raven = Raven(home)
+    await raven.start()
     try:
-        knowledge = await kb.create(
-            KNOWLEDGE_NAME, user_summary="Contains clinical files"
-        )
-        print(f"created knowledge: {knowledge.name} @ {knowledge.dir_path}")
-    except ValueError as exc:
-        print(f"already exists: {exc}")
+        task = await raven.create_knowledge(name, "Engineering reference documents.")
+        try:
+            knowledge = await task.result()
+        except RavenError as error:
+            if error.code != ErrorCode.KNOWLEDGE_ALREADY_EXISTS:
+                raise
+            print(f"Knowledge {name!r} already exists.")
+        else:
+            print(f"Created {knowledge.name!r} in {knowledge.dir_path}")
 
-    for entry in kb.list():
-        print(f"  {entry['name']}: {entry['count']} chunks, summary={entry['user_summary']!r}")
-
-    await kb.close()
-    await mm.stop()
+        for item in await raven.list_knowledges():
+            print(f"  {item['name']}: {item['user_summary']}")
+    finally:
+        await raven.close()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--home", type=Path, default=Path("raven-home/examples"))
+    parser.add_argument("--knowledge", default="engineering")
+    args = parser.parse_args()
+    asyncio.run(main(args.home, args.knowledge))

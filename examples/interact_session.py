@@ -1,183 +1,72 @@
-"""Task 3: Create a conversation + session and chat with the model.
+"""Record manual document work, then ask the agent to continue in the same session.
 
-ChatSession is the composition entrypoint: it wraps ONE llama-index FunctionAgent,
-adds memory (summary buffer + vector + facts), exposes retrieval tools filtered by
-conversation type, and routes every tool result through the Reconstructor so the
-agent reasons over full file cards with highlighted sections.
-
-This example:
-- creates a local conversation bound to a knowledge
-- opens a ChatSession with all four retrieval pipelines + the Reconstructor wired
-- runs a constrained-mode turn (model forced to use local_embedded_retrieval) and
-  prints the live chat.* events, the reply, and the reconstructed file cards
+Run create_knowledge.py and ingest_knowledge.py first:
+    python examples/interact_session.py
 """
 
+import argparse
 import asyncio
-import json
-from uuid import uuid4
+from pathlib import Path
 
-from nraven.chat_session import ChatSession
-from nraven.conversation_manager import ConversationManager
-from nraven.events import EventBus, EventType
-from nraven.knowledge import KnowledgeBase
-from nraven.model import DEFAULT_BASE_MODEL, DEFAULT_EMBED_MODEL, ModelManager
-from nraven.pipeline import (
-    AgreementBasedRetrievalPipeline,
-    EmbeddedRetrievalPipeline,
-    HierarchicalRetrievalPipeline,
-    VectorConditionedRetrievalPipeline,
-    LOCAL_EMBEDDED_RETRIEVAL,
+from nraven import EventType, ModelRole, ModelSpec, Raven, RetrievalScope, RetrievalSelection
+
+
+DEFAULT_QUERY = (
+    "According to Reaction_wheel.txt, what is the maximum time in milliseconds for the spacecraft "
+    "to enter magnetic-torquer-only safe-hold after detecting an angular momentum anomaly?"
 )
-from nraven.reconstructor import Reconstructor
-
-KNOWLEDGE_NAME = "engineering"
 
 
-async def main() -> None:
-    bus = EventBus()
-    mm = ModelManager(bus)
-    await mm.start()
-
-    embed = await mm.load_embed_model(DEFAULT_EMBED_MODEL)
-    llm = await mm.load_base_model(DEFAULT_BASE_MODEL)
-
-    kb = KnowledgeBase(bus, embed_model=embed)
-    await kb.start()
-
+async def main(home: Path, name: str, filename: str, query: str, llm: str, embedding: str) -> None:
+    raven = Raven(home)
+    await raven.start()
     try:
-        kb.get(KNOWLEDGE_NAME)
-    except KeyError as exc:
-        print(f"knowledge missing — run create_knowledge.py first: {exc}")
-        await kb.close()
-        await mm.stop()
-        return
-
-    # ---- pipelines + reconstructor (shared by the session) -----------
-    embedded = EmbeddedRetrievalPipeline(kb, embed, bus)
-    hierarchical = HierarchicalRetrievalPipeline(kb, llm, bus)
-    agreement = AgreementBasedRetrievalPipeline(kb, embedded, hierarchical, bus)
-    vector_conditioned = VectorConditionedRetrievalPipeline(kb, embedded, hierarchical, bus)
-    reconstructor = Reconstructor(kb, bus)
-
-    # ---- conversation + session --------------------------------------
-    mgr = ConversationManager(bus, knowledge_base=kb)
-    await mgr.start()
-    conv = await mgr.create(knowledge_name=KNOWLEDGE_NAME)
-    print(f"conversation {conv.conversation_id} ({conv.type})")
-
-    sess = ChatSession(
-        knowledge_base=kb,
-        bus=bus,
-        conversation=conv,
-        llm=llm,
-        embed_model=embed,
-        embedded_pipeline=embedded,
-        hierarchical_pipeline=hierarchical,
-        agreement_pipeline=agreement,
-        vector_conditioned_pipeline=vector_conditioned,
-        reconstructor=reconstructor,
-        token_limit=None,  # None -> llama-index derives it from the model's context window
-    )
-
-    # ---- constrained-mode turn (deterministic: model MUST call the tool)
-    op_id = uuid4().hex
-    task = asyncio.create_task(
-        sess.stream(
-            "What is a reaction wheel?",
-            retrieval_mode=LOCAL_EMBEDDED_RETRIEVAL,
-            op_id=op_id,
+        configured = await raven.configure_models(
+            ModelSpec(provider="ollama", model=llm, role=ModelRole.LLM),
+            ModelSpec(provider="ollama", model=embedding, role=ModelRole.EMBEDDING),
         )
-    )
+        await configured.result()
 
-    # Live renderer: deltas arrive token-by-token, so buffer them and print one
-    # block per kind (thinking / tool call / response) instead of one line per
-    # token. Non-delta events (tool calls, retrievals, errors) flush the current
-    # buffer and print on their own line.
-    #
-    # NOTE: do NOT re-read bus.history() after the turn to collect chat.retrieved
-    # events — the history deque is small and the per-token chat.delta flood evicts
-    # the early events. Collect everything we need live, as it streams.
-    kind: str | None = None
-    buffer: list[str] = []
-    retrieved_sections: list[str] = []
-
-    def flush_block() -> None:
-        nonlocal kind, buffer
-        if kind is not None:
-            text = "".join(buffer).strip()
-            if text:
-                print(f"\n[{kind}]\n{text}")
-            kind = None
-            buffer = []
-
-    async def on_event(ev) -> None:
-        nonlocal kind, buffer
-        if ev.type is EventType.CHAT_DELTA:
-            if ev.data["kind"] == "thinking_chunk":
-                if kind != "thinking":
-                    flush_block()
-                    kind = "thinking"
-                buffer.append(ev.data["delta"])
-            elif ev.data["kind"] == "response_chunk":
-                if kind != "response":
-                    flush_block()
-                    kind = "response"
-                buffer.append(ev.data["delta"])
-        elif ev.type is EventType.CHAT_TOOL_CALL:
-            flush_block()
-            print(
-                f"\n[tool_call] {ev.data['name']} "
-                f"{json.dumps(ev.data['args'], ensure_ascii=False)}"
-            )
-        elif ev.type is EventType.CHAT_TOOL_RESULT:
-            flush_block()
-            print(
-                f"[tool_result] {ev.data['name']} ok={ev.data['ok']}"
-                + (f" error={ev.data['error']}" if ev.data.get("error") else "")
-            )
-        elif ev.type is EventType.CHAT_RETRIEVED:
-            flush_block()
-            retrieved_sections.append(ev.data["section_id"])
-            print(
-                f"[retrieved] {ev.data['knowledge']}/{ev.data['file']} "
-                f"#{ev.data['section_id']}"
-            )
-        elif ev.type is EventType.ERROR:
-            flush_block()
-            print(f"\n[error] {ev.data}")
-        elif ev.type is EventType.CHAT_COMPLETE:
-            flush_block()
-        else:
-            flush_block()
-            print(f"[{ev.type.value}]")
-
-    try:
+        scope = RetrievalScope(selections=(RetrievalSelection(knowledge_name=name, file_name=filename),))
+        conversation = await (await raven.create_conversation(scope=scope)).result()
+        session = raven.session(conversation)
+        await session.start()
         try:
-            async for ev in bus.subscribe(op_id=op_id):
-                await on_event(ev)
-                if ev.type in (EventType.CHAT_COMPLETE, EventType.ERROR):
-                    break
+            # Session operations record the user's work in the conversation activity log.
+            manual_search = await session.retrieve(query, retrieval_mode="embedded")
+            sections = await manual_search.result()
+            if not sections:
+                raise RuntimeError("The manual search returned no sections.")
+            source = sections[0]
+            await (await session.open_section(source["knowledge_name"], source["section_id"])).result()
+
+            # The next turn receives the pending manual actions and uses the same scope.
+            run = await session.generate_response(f"Use embedded retrieval to answer. {query}", retrieval_mode="embedded")
+            async for event in run.stream:
+                if event.type == EventType.CHAT_TOOL_CALL:
+                    print(f"[tool] {event.data['name']}", flush=True)
+                elif event.type == EventType.CHAT_RESPONSE_DELTA:
+                    print(event.data["delta"], end="", flush=True)
+            result = await run.collect()
+            print(f"\nConversation {conversation.conversation_id}, turn {run.turn_id}")
+            for file in result.reconstructed_sources:
+                print(f"Reconstructed {file['file_name']}")
+
+            for activity in await raven.list_activities(conversation.conversation_id, run.turn_id):
+                print(f"Linked activity {activity.sequence}: {activity.kind}")
         finally:
-            if not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-
-        reply = await task
-        print(f"\nreply:\n{reply}\n")
-
-        # ---- reconstructed cards were built inside tool_result; show one ----
-        print(f"highlighted sections from this turn: {retrieved_sections}")
+            await session.close()
     finally:
-        # close/delete must ALWAYS run, even if the turn raised above, otherwise
-        # the local Qdrant stores keep their file locks until process exit.
-        sess.close()  # releases the local Qdrant lock so the dir can be reused/deleted
-        await mgr.delete(conv.conversation_id)
-        await kb.close()
-        await mm.stop()
+        await raven.close()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("query", nargs="?", default=DEFAULT_QUERY)
+    parser.add_argument("--home", type=Path, default=Path("raven-home/examples"))
+    parser.add_argument("--knowledge", default="engineering")
+    parser.add_argument("--file", default="Reaction_wheel.txt")
+    parser.add_argument("--llm", default="gemma4:e2b")
+    parser.add_argument("--embedding", default="bge-m3:latest")
+    args = parser.parse_args()
+    asyncio.run(main(args.home, args.knowledge, args.file, args.query, args.llm, args.embedding))

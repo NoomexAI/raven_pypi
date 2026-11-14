@@ -1,7 +1,7 @@
 ---
 layout: default
 title: Development notes
-description: "The current capabilities and limitations of RAVEN v0.2.0, proposed directions for v0.3.0, and how to provide useful development feedback."
+description: "What changed in RAVEN v0.2.1 and why, current operating boundaries, and proposed directions for v0.3.0."
 ---
 
 # Development notes
@@ -14,36 +14,96 @@ the other.
 
 This page records the current release's boundaries and the directions being
 considered next. **The v0.3.0 items below are proposals, not features available
-in v0.2.0 or commitments to a release date.** Usage instructions on the other
-pages describe the implemented backend, not this roadmap.
+in v0.2.1 or commitments to a release date.** The other pages cover the
+implemented backend and identify the version used in their examples.
 
-## 1. Current release: v0.2.0
+## 1. Current release: v0.2.1
 
-The [v0.2.0 release]({{ site.repository_url }}/releases/tag/v0.2.0) provides
-the document-to-conversation backend described throughout this site:
+RAVEN v0.2.1 lets applications browse documents, retrieve sections, and
+reconstruct sources directly. A session can record those actions so an agent
+can continue the same investigation in a later conversation turn.
 
 | Area | Implemented behavior |
 | --- | --- |
 | Document ingestion | Parse text, Markdown, PDF, and DOCX sources; produce semantic sections with metadata and source ranges where available; store section content alongside searchable vectors. |
-| Knowledge access | Embedded, hierarchical, vector-conditioned, and agreement retrieval, with local and global scope, plus navigation tools for inspecting the knowledge base. |
+| Retrieval scope | Combine individual documents and whole knowledges across the knowledge base. An empty `RetrievalScope` covers the whole knowledge base. A conversation keeps the scope selected at creation. Navigation can still browse the full knowledge base. |
+| Direct retrieval and reconstruction | Run embedded, hierarchical, vector-conditioned, or agreement retrieval through dedicated Python methods and HTTP endpoints. Reconstruct selected sections in their surrounding file context without starting an agent turn. |
+| Session activity | Record browsing, source inspection, retrieval, and reconstruction actions in a conversation's activity log. A later agent turn can receive a batch of pending actions as context. Applications can page through activity history without creating an entry. |
 | Agent execution | A model-directed tool loop with scope and retrieval-mode constraints, structured tool feedback, and distinct thinking, tool, response, and reconstruction events. |
-| Conversations and memory | Persistent turns and tool exchanges, a canonical transcript separate from compacted model context, vector memory, and conversation-local preferences. |
+| Conversations and memory | Persistent turns and tool exchanges, compacted model context, vector memory, and conversation-local preferences. `search_memory` returns matches grouped by turn ID and includes an `activity_action` hint for turns with linked activities. |
 | Observable work | Durable operation and task records, replayable events, cancellation, interrupted-operation recovery, and explicit retry for eligible tasks. |
 | Integration | A Python facade and an optional authenticated FastAPI server; model configuration through Ollama and supported LiteLLM providers. |
 
-These capabilities are backend mechanisms rather than a bundled end-user
-interface. The [In Action walkthrough]({{ '/demo/' | relative_url }}) builds
-a terminal interface with the Python API. The
-[integration guide]({{ '/integration_guides/' | relative_url }}) connects an
-external tool client through HTTP. Both examples deliberately expose a subset
-of RAVEN rather than every available control.
+The agent can use `list_activities_from_turn` to inspect the actions linked
+to a recalled exchange, or `list_all_activities` to browse the conversation's
+activity history. Both tools return paginated records. A local Gemma test
+completed the turn-specific lookup when the question asked about both the
+earlier exchange and the actions. The model's choice of tools can still vary
+with the way the question is phrased.
 
-For exact method signatures, request fields, settings, and error contracts,
-refer to the [README]({{ site.repository_url }}/blob/main/README.md). The
-[architecture page]({{ '/architecture/' | relative_url }}) explains the
-ownership and information flow behind those contracts.
+The conversation metadata schema changed in v0.2.1. Back up the v0.2.0 home
+before upgrading and create new conversations in v0.2.1. Check the upgrade
+notes for the retrieval and conversation API changes. [README and upgrade notes]({{ site.repository_url }}/blob/main/README.md#upgrading-to-v021)
 
-## 2. Known limitations and operating boundaries
+The terminal and MCP walkthroughs use v0.2.0. Follow their pinned dependencies
+to run those examples. [In Action]({{ '/demo/' | relative_url }}) · [Integration guides]({{ '/integration_guides/' | relative_url }})
+
+## 2. What changed from v0.2.0 to v0.2.1
+
+In v0.2.0, the agent turn was the main workflow for investigating documents.
+Python callers could already retrieve and reconstruct sources directly, while
+the HTTP API offered reconstruction from a saved turn. In v0.2.1, an
+application can start with a document selection, let the user investigate it
+directly, and bring an agent into the same investigation later.
+
+### 2.1 Select the documents to search
+
+In v0.2.0, a conversation was either local to one knowledge or global. RAVEN
+v0.2.1 replaces that distinction with `RetrievalScope`. A scope can include
+two files from one knowledge, a third file from another, and a whole knowledge
+for background material. A conversation saves that selection at creation.
+
+This lets a user define which documents retrieval can draw from for a
+particular investigation. The pipelines apply the scope before ranking
+candidates, so other documents cannot take up result slots. Navigation still
+covers the full knowledge base so users can inspect a file or decide what to
+include in another conversation.
+
+### 2.2 Run retrieval and reconstruction without a chat turn
+
+The generic `Raven.retrieve()` method was replaced by four strategy-specific
+methods, each with a matching HTTP endpoint. Standalone reconstruction also has
+an HTTP endpoint. A UI can now offer a search panel and a source viewer that
+follow operation events without opening a chat turn. Dedicated methods and
+routes make each strategy's controls explicit. For example, vector-conditioned
+retrieval can limit the number of shortlisted files separately from the number
+of returned sections.
+
+### 2.3 Carry manual work into the conversation
+
+In v0.2.1, a session can record completed actions such as opening a section,
+running a search, or reconstructing a file. When the user starts an agent
+turn, RAVEN includes a bounded batch of pending actions and links those entries
+to the turn when it commits. An application can also run standalone searches
+when they should stay outside the conversation's history.
+
+The handoff lets the user search and inspect sources first, then ask a question
+without restating what they did. The activity log keeps compact references to
+the sources, so a turn can carry that context without copying the full text of
+every section the user inspected.
+
+### 2.4 Look up recorded actions after compaction
+
+In v0.2.0, semantic recall returned relevant messages. In v0.2.1, `search_memory`
+groups those messages by turn ID. A match with linked actions includes an
+`activity_action` hint that tells the agent how to look them up. The agent can
+fetch a page for that turn or browse the conversation's activity history.
+
+Compaction can omit details from an earlier exchange. The turn ID gives the
+agent a way back to the saved activity records when the summary leaves those
+details out. The lookup hint supplies the exact ID for the next tool call.
+
+## 3. Known limitations and operating boundaries
 
 ### Model behavior and source fidelity
 
@@ -117,14 +177,12 @@ buttons in the demonstration applications. The
 and [recovery architecture]({{ '/architecture/' | relative_url }}#84-crash-recovery-idempotency-and-explicit-retry)
 provide the detailed boundaries.
 
-## 3. Directions for v0.3.0
+## 4. Directions for v0.3.0
 
-The next version is being considered around three related improvements.
-Their interfaces, implementation details, and compatibility implications
-remain design work. Existing v0.2.0 applications should not assume that these
-mechanisms already run underneath the current API.
+The next version has four proposed improvements. Their interfaces,
+implementation details, and compatibility implications remain design work.
 
-### 3.1 Context-efficient, navigation-first exploration
+### 4.1 Context-efficient, navigation-first exploration
 
 The proposed direction is to make navigation the primary path through a
 knowledge base: identify promising knowledges, narrow the candidate files,
@@ -132,7 +190,7 @@ then select relevant sections before reading their contents. The motivation
 is to give the model an explicit exploration process without filling its
 context with large lists or complete source sections at every step.
 
-Navigation tools already exist in v0.2.0. What changes in this proposal is
+Navigation tools already exist in v0.2.1. What changes in this proposal is
 their role and efficiency: they would become the main investigation path,
 with bounded results and query-dependent relevance information at each level.
 The current agent guidance instead treats navigation as support for retrieval
@@ -145,7 +203,7 @@ attention, and which sections should be read next. How those scores become
 useful relevance distributions remains to be designed and evaluated; a score
 should not be presented as a calibrated probability without justification.
 
-### 3.2 A dual reviewer system
+### 4.2 A dual reviewer system
 
 A separate reviewer is proposed to examine the model's selected tool chain.
 The intended default is an additional chat completion from the active LLM,
@@ -158,12 +216,11 @@ impractical. Its role would be to enforce defined sequencing rules. Such
 structural checks are different from judging whether a chain is relevant or
 whether its eventual answer is correct.
 
-Neither reviewer exists in v0.2.0. Current scope filtering, tool validation,
-corrective tool results, and prompt guidance should not be interpreted as an
-already implemented review stage. A reviewer would supplement those boundaries,
-not make source verification unnecessary.
+The v0.2.1 harness uses scope filtering, tool validation, corrective tool
+results, and prompt guidance. The proposed reviewer would add a separate check
+of the model's selected tool chain.
 
-### 3.3 Ollama model-options support
+### 4.3 Ollama model-options support
 
 The proposed provider improvement is to carry supported `ModelSpec.options`
 through `Provider` and `OllamaManager` into the appropriate LlamaIndex adapters
@@ -181,9 +238,20 @@ compatibility checks.
 Completion means verifying the effective values sent by both adapter paths,
 including repeated configurations of the same model with different settings,
 and updating the public contracts and documentation. Until then, adding an
-Ollama option to a v0.2.0 specification is not a supported workaround.
+Ollama option to a v0.2.1 specification is not a supported workaround.
 
-## 4. Development and feedback
+### 4.4 llama.cpp as a local model provider
+
+The proposal is to add llama.cpp alongside Ollama as a provider for local
+models. Applications would select llama.cpp through RAVEN's model
+configuration and use the same ingestion, retrieval, and conversation APIs.
+
+The integration would need to define how applications supply local model
+files and runtime options, and which chat, tool-calling, and embedding
+capabilities the provider supports. Those capabilities would be tested
+against RAVEN's existing workflows before the provider is released.
+
+## 5. Development and feedback
 
 Useful feedback distinguishes a backend failure from a model-quality problem.
 An upload rejected before ingestion, an interrupted operation, and an answer

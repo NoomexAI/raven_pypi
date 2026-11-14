@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
+from uuid import UUID
 
 from llama_index.core.tools import FunctionTool
 
 from ..core.errors import ErrorCode, RavenError, error_payload
 from ..core.operations import Operation
+from ..data_management.activity import Activity
 from ..data_management.conversation_manager import Conversation
 from ..data_management.knowledge_base import Knowledge, KnowledgeBase
 from .contracts import RetrievalPipelines
@@ -94,6 +96,17 @@ class ToolResult:
 
 
 
+class ActivityReader(Protocol):
+    def __call__(
+        self,
+        conversation_id: str,
+        turn_id: UUID | str | None = None,
+        *,
+        after_sequence: int = 0,
+        limit: int = 50,
+    ) -> Awaitable[list[Activity]]: ...
+
+
 class ToolBuilder:
     """Build retrieval, navigation, memory, and preference tools for one run."""
 
@@ -101,9 +114,12 @@ class ToolBuilder:
         self,
         knowledge_base: KnowledgeBase,
         retrieval_pipelines: RetrievalPipelines,
+        *,
+        activity_reader: ActivityReader | None = None,
     ) -> None:
         self._knowledge_base = knowledge_base
         self._retrieval_pipelines = retrieval_pipelines
+        self._activity_reader = activity_reader
 
 
     def build(
@@ -482,14 +498,32 @@ class ToolBuilder:
         operation: Operation,
         on_preferences_changed: Callable[[str], None],
     ) -> list[FunctionTool]:
+        async def read_activities(turn_id: str | None, *, after_sequence: int = 0, limit: int) -> list[Activity]:
+            if self._activity_reader is None:
+                return await conversation.list_activities(
+                    turn_id=turn_id, after_sequence=after_sequence, limit=limit,
+                )
+            return await self._activity_reader(
+                conversation.conversation_id, turn_id, after_sequence=after_sequence, limit=limit,
+            )
+
         async def search_memory(query: str) -> str:
             try:
                 operation.raise_if_cancelled()
                 turns = await conversation.search_memory_turns(query)
-                result = [
-                    {"turn_id": turn_id, "messages": [message_record(message) for message in messages]}
-                    for turn_id, messages in turns
-                ]
+                result: list[dict[str, Any]] = []
+                for turn_id, messages in turns:
+                    operation.raise_if_cancelled()
+                    match: dict[str, Any] = {
+                        "turn_id": turn_id,
+                        "messages": [message_record(message) for message in messages],
+                    }
+                    if await read_activities(turn_id, limit=1):
+                        match["activity_action"] = (
+                            "This turn has recorded user activities. If the user asks what they did, "
+                            f'call list_activities_from_turn with turn_id "{turn_id}" before answering.'
+                        )
+                    result.append(match)
                 return ToolResult(
                     ok=True,
                     result=result,
@@ -504,13 +538,13 @@ class ToolBuilder:
                     "Provide a non-empty memory query and retry.",
                 )
 
-        async def list_activities(turn_id: str | None = None, after_sequence: int = 0) -> str:
+        async def activity_page(tool_name: str, turn_id: str | None, after_sequence: int) -> str:
             try:
                 operation.raise_if_cancelled()
-                if turn_id is not None and (not isinstance(turn_id, str) or not turn_id.strip()):
+                if tool_name == "list_activities_from_turn" and (not isinstance(turn_id, str) or not turn_id.strip()):
                     raise RavenError(ErrorCode.INVALID_METADATA, "turn_id must be a valid UUID.")
-                activities = await conversation.list_activities(
-                    turn_id=turn_id, after_sequence=after_sequence, limit=ACTIVITY_PAGE_SIZE + 1,
+                activities = await read_activities(
+                    turn_id, after_sequence=after_sequence, limit=ACTIVITY_PAGE_SIZE + 1,
                 )
                 page = activities[:ACTIVITY_PAGE_SIZE]
                 return ToolResult(
@@ -527,10 +561,17 @@ class ToolBuilder:
                 raise
             except Exception as exc:
                 return self._recoverable_result(
-                    "list_activities", exc,
-                    "Omit turn_id for all activities or use a turn_id from search_memory. "
-                    "Omit after_sequence for the first page.",
+                    tool_name, exc,
+                    "Use a turn_id from search_memory and omit after_sequence for the first page."
+                    if tool_name == "list_activities_from_turn"
+                    else "Omit after_sequence for the first page or use the previous page's next_after_sequence.",
                 )
+
+        async def list_activities_from_turn(turn_id: str, after_sequence: int = 0) -> str:
+            return await activity_page("list_activities_from_turn", turn_id, after_sequence)
+
+        async def list_all_activities(after_sequence: int = 0) -> str:
+            return await activity_page("list_all_activities", None, after_sequence)
 
         async def list_preferences() -> str:
             try:
@@ -613,17 +654,27 @@ class ToolBuilder:
                 description=(
                     "Find prior discussion, decisions, or information by a non-empty query. "
                     "Results group relevant messages by turn_id in this conversation. "
-                    "Use a returned turn_id with list_activities to inspect the manual actions linked to that turn."
+                    "Use a returned turn_id with list_activities_from_turn to inspect the user actions linked to that turn."
                 ),
             ),
             FunctionTool.from_defaults(
-                async_fn=list_activities,
-                name="list_activities",
+                async_fn=list_activities_from_turn,
+                name="list_activities_from_turn",
                 description=(
-                    "Read recorded manual actions in the current conversation in sequence order. "
-                    "Pass turn_id to filter by turn, or omit it to include all pending and linked actions. "
-                    "Omit after_sequence for the first page and use ui_summary.next_after_sequence for more. "
-                    "Keep the same turn filter on subsequent pages."
+                    "Read recorded user actions linked to a specific exchange. Pass the required turn_id UUID "
+                    "from search_memory or the user. An activity_id identifies an action, so use the turn_id instead. "
+                    "Omit after_sequence for the first page. For more, pass ui_summary.next_after_sequence "
+                    "as after_sequence with the same turn_id."
+                ),
+            ),
+            FunctionTool.from_defaults(
+                async_fn=list_all_activities,
+                name="list_all_activities",
+                description=(
+                    "Browse the current conversation's general activity history in sequence order, including "
+                    "pending and turn-linked user actions. For a specific earlier exchange, use "
+                    "list_activities_from_turn. Omit after_sequence for the first page and use "
+                    "ui_summary.next_after_sequence as after_sequence for more."
                 ),
             ),
             FunctionTool.from_defaults(
