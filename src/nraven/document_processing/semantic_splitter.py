@@ -62,7 +62,8 @@ class ProvenanceAwareSemanticSplitter:
 
     async def split(self, document: ParsedDocument) -> list[SemanticSection]:
         """Return semantic sections with aggregated source metadata."""
-        units = self._build_units(document)
+        # LlamaIndex initializes its sentence tokenizer lazily on first use.
+        units = await asyncio.to_thread(self._build_units, document)
         if not units:
             return []
 
