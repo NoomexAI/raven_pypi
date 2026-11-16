@@ -18,6 +18,10 @@ def embedding_identity(embed_model: Any) -> str:
         "query_instruction": getattr(embed_model, "query_instruction", None),
         "text_instruction": getattr(embed_model, "text_instruction", None),
     }
+    ollama_options = getattr(embed_model, "ollama_additional_kwargs", None)
+    if isinstance(ollama_options, dict) and ollama_options.get("num_ctx") is not None:
+        # The context window can change which input tokens are embedded.
+        identity["ollama_num_ctx"] = ollama_options["num_ctx"]
     serialized = json.dumps(identity, sort_keys=True, default=str)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 

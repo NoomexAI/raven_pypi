@@ -67,9 +67,9 @@ class Provider:
                 "load_llm requires a model specification with role='llm'.",
             )
         if spec.provider == "ollama":
-            self._reject_ollama_options(spec)
             return await self.ollama.load_llm(
                 spec.model,
+                options=spec.options,
                 operation=operation,
             )
         return await self.litellm.load_llm(
@@ -94,9 +94,9 @@ class Provider:
                 "load_embedding requires a model specification with role='embedding'.",
             )
         if spec.provider == "ollama":
-            self._reject_ollama_options(spec)
             return await self.ollama.load_embedding(
                 spec.model,
+                options=spec.options,
                 operation=operation,
             )
         return await self.litellm.load_embedding(
@@ -122,16 +122,6 @@ class Provider:
                 "One or more model providers could not be closed cleanly.",
                 details={"failure_count": len(failures)},
             ) from failures[0]
-
-
-    @staticmethod
-    def _reject_ollama_options(spec: ModelSpec) -> None:
-        if spec.options:
-            raise RavenError(
-                ErrorCode.INVALID_MODEL_SPEC,
-                "Ollama model options are not supported by this provider interface.",
-                details={"fields": sorted(spec.options)},
-            )
 
 
     @staticmethod

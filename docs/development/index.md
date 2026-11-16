@@ -1,7 +1,7 @@
 ---
 layout: default
 title: Development notes
-description: "What changed in RAVEN v0.2.1 and why, current operating boundaries, and proposed directions for v0.3.0."
+description: "What changed from RAVEN v0.2.0 to v0.2.2, current operating boundaries, and proposed directions for v0.3.0."
 ---
 
 # Development notes
@@ -13,26 +13,28 @@ finishes. Improving either side should not obscure the responsibilities of
 the other.
 
 This page records the current release's boundaries and the directions being
-considered next. **The v0.3.0 items below are proposals, not features available
-in v0.2.1 or commitments to a release date.** The other pages cover the
-implemented backend and identify the version used in their examples.
+considered next. **The scope and timing of the v0.3.0 proposals are open.** The
+other pages cover the implemented backend and identify the version used in
+their examples.
 
-## 1. Current release: v0.2.1
+## 1. Current release: v0.2.2
 
-RAVEN v0.2.1 lets applications browse documents, retrieve sections, and
-reconstruct sources directly. A session can record those actions so an agent
-can continue the same investigation in a later conversation turn.
+RAVEN v0.2.2 retains the document-first workflow introduced in v0.2.1.
+Applications can browse documents, retrieve sections, and reconstruct sources
+directly. A session can record those actions so an agent can continue the same
+investigation in a later turn. This patch adds Ollama model options and keeps
+the HTTP server responsive during the first use of the sentence tokenizer.
 
 | Area | Implemented behavior |
 | --- | --- |
-| Document ingestion | Parse text, Markdown, PDF, and DOCX sources; produce semantic sections with metadata and source ranges where available; store section content alongside searchable vectors. |
+| Document ingestion | Parse text, Markdown, PDF, and DOCX sources; produce semantic sections with metadata and source ranges where available; store section content alongside searchable vectors. Sentence tokenization runs on a worker thread. |
 | Retrieval scope | Combine individual documents and whole knowledges across the knowledge base. An empty `RetrievalScope` covers the whole knowledge base. A conversation keeps the scope selected at creation. Navigation can still browse the full knowledge base. |
 | Direct retrieval and reconstruction | Run embedded, hierarchical, vector-conditioned, or agreement retrieval through dedicated Python methods and HTTP endpoints. Reconstruct selected sections in their surrounding file context without starting an agent turn. |
 | Session activity | Record browsing, source inspection, retrieval, and reconstruction actions in a conversation's activity log. A later agent turn can receive a batch of pending actions as context. Applications can page through activity history without creating an entry. |
 | Agent execution | A model-directed tool loop with scope and retrieval-mode constraints, structured tool feedback, and distinct thinking, tool, response, and reconstruction events. |
 | Conversations and memory | Persistent turns and tool exchanges, compacted model context, vector memory, and conversation-local preferences. `search_memory` returns matches grouped by turn ID and includes an `activity_action` hint for turns with linked activities. |
 | Observable work | Durable operation and task records, replayable events, cancellation, interrupted-operation recovery, and explicit retry for eligible tasks. |
-| Integration | A Python facade and an optional authenticated FastAPI server; model configuration through Ollama and supported LiteLLM providers. |
+| Integration | A Python facade and an optional authenticated FastAPI server; model configuration with provider-specific options for Ollama and supported LiteLLM providers. |
 
 The agent can use `list_activities_from_turn` to inspect the actions linked
 to a recalled exchange, or `list_all_activities` to browse the conversation's
@@ -41,25 +43,26 @@ completed the turn-specific lookup when the question asked about both the
 earlier exchange and the actions. The model's choice of tools can still vary
 with the way the question is phrased.
 
-The conversation metadata schema changed in v0.2.1. Back up the v0.2.0 home
-before upgrading and create new conversations in v0.2.1. Check the upgrade
-notes for the retrieval and conversation API changes. [README and upgrade notes]({{ site.repository_url }}/blob/main/README.md#upgrading-to-v021)
+v0.2.2 uses the same storage schemas as v0.2.1. For a v0.2.0 upgrade, back up
+the old home and create new conversations using v0.2.2 because the conversation
+metadata schema changed in v0.2.1. The upgrade notes cover the retrieval and
+conversation API changes. [README and upgrade notes]({{ site.repository_url }}/blob/main/README.md#upgrading-to-v022)
 
 The terminal and MCP walkthroughs use v0.2.0. Follow their pinned dependencies
 to run those examples. [In Action]({{ '/demo/' | relative_url }}) · [Integration guides]({{ '/integration_guides/' | relative_url }})
 
-## 2. What changed from v0.2.0 to v0.2.1
+## 2. What changed from v0.2.0 to v0.2.2
 
 In v0.2.0, the agent turn was the main workflow for investigating documents.
 Python callers could already retrieve and reconstruct sources directly, while
-the HTTP API offered reconstruction from a saved turn. In v0.2.1, an
+the HTTP API offered reconstruction from a saved turn. In v0.2.2, an
 application can start with a document selection, let the user investigate it
 directly, and bring an agent into the same investigation later.
 
 ### 2.1 Select the documents to search
 
 In v0.2.0, a conversation was either local to one knowledge or global. RAVEN
-v0.2.1 replaces that distinction with `RetrievalScope`. A scope can include
+v0.2.2 uses `RetrievalScope` to represent that selection. A scope can include
 two files from one knowledge, a third file from another, and a whole knowledge
 for background material. A conversation saves that selection at creation.
 
@@ -81,7 +84,7 @@ of returned sections.
 
 ### 2.3 Carry manual work into the conversation
 
-In v0.2.1, a session can record completed actions such as opening a section,
+In v0.2.2, a session can record completed actions such as opening a section,
 running a search, or reconstructing a file. When the user starts an agent
 turn, RAVEN includes a bounded batch of pending actions and links those entries
 to the turn when it commits. An application can also run standalone searches
@@ -94,7 +97,7 @@ every section the user inspected.
 
 ### 2.4 Look up recorded actions after compaction
 
-In v0.2.0, semantic recall returned relevant messages. In v0.2.1, `search_memory`
+In v0.2.0, semantic recall returned relevant messages. In v0.2.2, `search_memory`
 groups those messages by turn ID. A match with linked actions includes an
 `activity_action` hint that tells the agent how to look them up. The agent can
 fetch a page for that turn or browse the conversation's activity history.
@@ -102,6 +105,32 @@ fetch a page for that turn or browse the conversation's activity history.
 Compaction can omit details from an earlier exchange. The turn ID gives the
 agent a way back to the saved activity records when the summary leaves those
 details out. The lookup hint supplies the exact ID for the next tool call.
+
+### 2.5 Configure Ollama model options
+
+Both `Raven.configure_models()` and `POST /api/v1/provider/models/configure`
+accept Ollama settings in `ModelSpec.options`. For example, `num_ctx` sets the
+context window for either model role, while `num_predict` and `temperature`
+apply to the LLM. RAVEN validates the settings for each role and forwards them
+to Ollama during preload and inference. Changing settings on the same model
+selects an adapter configured for those settings. [Supported options]({{ site.repository_url }}/blob/main/README.md#ollama-model-options)
+
+The embedding `num_ctx` is part of the stored embedding identity because it
+can change which input tokens are embedded. Existing indexes keep the value
+they were built with, including the default when no value was supplied.
+
+### 2.6 Keep HTTP ingestion responsive during first-use tokenization
+
+The first ingestion after server startup could pause the event loop during
+semantic sectioning. Sentence tokenization initialized LlamaIndex's tokenizer
+and loaded dependencies including SciPy on that same loop. While it was busy,
+the server could delay SSE progress events and fail to answer status requests
+before the client timed out.
+
+v0.2.2 runs sentence tokenization on a worker thread with `asyncio.to_thread()`.
+In a fresh `nraven serve` process, the patched server kept responding to status
+requests during sectioning, streamed `operation.completed`, and listed the
+uploaded file in the knowledge after ingestion.
 
 ## 3. Known limitations and operating boundaries
 
@@ -129,10 +158,6 @@ Several practical boundaries matter when building an application:
   searched with the embedding model that generated them. Replacing that model
   requires an appropriate rebuilding or re-ingestion workflow, not just a new
   configuration value. Matching vector dimensions alone is not sufficient.
-- **Ollama options are restricted in this release.** Nonempty
-  `ModelSpec.options` are rejected for Ollama by the provider interface. This
-  restriction does not apply uniformly to the LiteLLM path; the proposed
-  Ollama wiring work is described below.
 - **Local storage does not imply local inference.** Using cloud LLMs or cloud
   embedding models can send document and conversation material to those
   providers. The application must choose providers and communicate that
@@ -179,7 +204,7 @@ provide the detailed boundaries.
 
 ## 4. Directions for v0.3.0
 
-The next version has four proposed improvements. Their interfaces,
+The next version has three proposed improvements. Their interfaces,
 implementation details, and compatibility implications remain design work.
 
 ### 4.1 Context-efficient, navigation-first exploration
@@ -190,7 +215,7 @@ then select relevant sections before reading their contents. The motivation
 is to give the model an explicit exploration process without filling its
 context with large lists or complete source sections at every step.
 
-Navigation tools already exist in v0.2.1. What changes in this proposal is
+Navigation tools already exist in v0.2.2. What changes in this proposal is
 their role and efficiency: they would become the main investigation path,
 with bounded results and query-dependent relevance information at each level.
 The current agent guidance instead treats navigation as support for retrieval
@@ -216,31 +241,11 @@ impractical. Its role would be to enforce defined sequencing rules. Such
 structural checks are different from judging whether a chain is relevant or
 whether its eventual answer is correct.
 
-The v0.2.1 harness uses scope filtering, tool validation, corrective tool
+The v0.2.2 harness uses scope filtering, tool validation, corrective tool
 results, and prompt guidance. The proposed reviewer would add a separate check
 of the model's selected tool chain.
 
-### 4.3 Ollama model-options support
-
-The proposed provider improvement is to carry supported `ModelSpec.options`
-through `Provider` and `OllamaManager` into the appropriate LlamaIndex adapters
-and Ollama requests. The current rejection of nonempty options avoids silently
-accepting settings that the RAVEN provider path does not forward. This is a
-RAVEN integration limitation, not a claim that Ollama itself lacks model options.
-
-The work needs to distinguish adapter-construction settings from request
-options, define which controls apply to generation and embeddings, and reject
-unsupported or conflicting values. Context-window settings, generation limits,
-and sampling controls are among the intended areas to examine where applicable.
-Embedding-affecting settings must also be accounted for in model identity and
-compatibility checks.
-
-Completion means verifying the effective values sent by both adapter paths,
-including repeated configurations of the same model with different settings,
-and updating the public contracts and documentation. Until then, adding an
-Ollama option to a v0.2.1 specification is not a supported workaround.
-
-### 4.4 llama.cpp as a local model provider
+### 4.3 llama.cpp as a local model provider
 
 The proposal is to add llama.cpp alongside Ollama as a provider for local
 models. Applications would select llama.cpp through RAVEN's model

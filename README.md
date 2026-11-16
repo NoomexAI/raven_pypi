@@ -50,7 +50,7 @@ control.
 - [HTTP request reference](#http-request-reference)
 - [Configuration](#configuration)
 - [Persistence and recovery](#persistence-and-recovery)
-- [Upgrading to v0.2.1](#upgrading-to-v021)
+- [Upgrading to v0.2.2](#upgrading-to-v022)
 - [Backup, restore, and cleanup](#backup-restore-and-cleanup)
 - [Security and deployment responsibilities](#security-and-deployment-responsibilities)
 - [Server troubleshooting](#server-troubleshooting)
@@ -1019,7 +1019,7 @@ public types:
 | `model` | string | Yes | Provider-specific model name. It is trimmed but otherwise preserved and cannot be empty. For Ollama, use the name shown by `ollama list`, including its tag where applicable. |
 | `role` | `ModelRole` | Yes | Exactly `ModelRole.LLM` (`"llm"`) or `ModelRole.EMBEDDING` (`"embedding"`). The two arguments to `configure_models()` must have the corresponding roles. |
 | `api_key_ref` | string or `None` | No | Name of an environment variable containing the API key. It is resolved when a non-Ollama adapter is loaded; the value is not stored in the spec. Omit it when the provider uses ambient credentials or no key. |
-| `options` | object | No | Non-secret LiteLLM adapter options. Defaults to `{}`. Ollama specs currently reject non-empty options. Reserved model/provider/key fields and credential-like keys are rejected. |
+| `options` | object | No | Non-secret provider-specific model settings. Defaults to `{}`. Reserved model/provider/key fields and credential-like keys are rejected. |
 
 `ModelSpec` is immutable and rejects unknown fields. It describes one role,
 not a complete model pair. RAVEN requires one LLM spec and one embedding spec:
@@ -1029,6 +1029,7 @@ llm_spec = ModelSpec(
     provider="ollama",
     model="qwen3:8b",
     role=ModelRole.LLM,
+    options={"num_ctx": 8192, "num_predict": 1024, "temperature": 0.2},
 )
 
 embedding_spec = ModelSpec(
@@ -1037,6 +1038,26 @@ embedding_spec = ModelSpec(
     role=ModelRole.EMBEDDING,
 )
 ```
+
+#### Ollama model options
+
+Pass Ollama settings as a flat `options` object in `ModelSpec` or in the
+[HTTP model configuration request](#configuring-models). Omit `options` or
+pass `{}` to use the defaults. The accepted fields depend on the model role.
+
+| Role | Supported options |
+| --- | --- |
+| LLM and embedding | `num_ctx`, `num_batch`, `num_thread`, `num_gpu`, `main_gpu`, `use_mmap` |
+| LLM only | `num_predict`, `num_keep`, `temperature`, `top_k`, `top_p`, `min_p`, `seed`, `repeat_last_n`, `repeat_penalty`, `presence_penalty`, `frequency_penalty`, `stop` |
+
+`num_ctx` sets the context window in tokens. `num_predict` caps generated
+tokens, and `stop` takes a list of strings. Ollama receives these settings on
+preload and inference. LlamaIndex also uses the configured LLM `num_ctx` as its
+context limit. To change generation settings, configure the pair again with
+the updated LLM spec. RAVEN checks the embedding `num_ctx` as part of the
+persisted embedding identity because it affects which input tokens can be
+embedded. Keep the same embedding `num_ctx` for an existing index, including
+leaving it unset if it was unset when the index was built.
 
 > **WARNING — Choose your embedding model before ingesting data.** Knowledge
 > vectors and conversation vector memory are generated in that model's vector
@@ -1124,8 +1145,9 @@ asyncio.run(main())
 
 By default RAVEN connects to `http://127.0.0.1:11434`. Set `OLLAMA_HOST` in the
 RAVEN process environment before constructing `Raven` to use another Ollama
-endpoint. RAVEN does not choose Ollama's CPU/GPU backend; that is a property of
-the externally managed Ollama process.
+endpoint. The externally managed Ollama process selects its compute backend,
+such as CUDA or Vulkan. RAVEN forwards per-model settings such as `num_gpu`
+through `ModelSpec.options`.
 
 Configuration verifies both adapters and checks the embedding model against
 existing knowledge stores before installing the new pair. When no models are
@@ -1313,7 +1335,7 @@ When `performed` is `false`, the result also includes a `reason`, such as
 | Symptom/code | Meaning | Corrective action |
 | --- | --- | --- |
 | `model_api_key_not_found` | The environment variable named by `api_key_ref` is absent or empty. | Set it in the process environment and configure again. Do not place the value in `options`. |
-| `invalid_model_spec` | Roles are reversed, required strings are empty, Ollama options were supplied, or options contain reserved/secret fields. | Correct the spec using the field table above. |
+| `invalid_model_spec` | Roles are reversed, required strings are empty, or options include unsupported fields, invalid values, or reserved or secret fields. | Correct the spec using the field table above. |
 | `model_capability_missing` | The selected adapter does not provide the async LLM or embedding capability RAVEN requires. | Select a compatible chat or embedding model/adapter. |
 | `embedding_identity_mismatch` | Existing knowledge was created with another embedding identity. | Restore the original embedding model or deliberately rebuild/re-ingest that knowledge. |
 | `embedding_dimension_mismatch` | Produced vectors do not match the stored Qdrant collection dimension. | Use the original compatible embedding model or rebuild the knowledge. |
@@ -2992,7 +3014,8 @@ logs.
 
 ### Configuring models
 
-Configure one validated LLM and embedding pair:
+Configure one validated LLM and embedding pair. This example sets Ollama chat
+options and keeps the embedding defaults.
 
 ```http
 POST /api/v1/provider/models/configure HTTP/1.1
@@ -3005,7 +3028,7 @@ Content-Type: application/json
     "model": "qwen3:8b",
     "role": "llm",
     "api_key_ref": null,
-    "options": {}
+    "options": {"num_ctx": 8192, "num_predict": 1024, "temperature": 0.2}
   },
   "embedding": {
     "provider": "ollama",
@@ -3031,7 +3054,9 @@ Long-running commands return `202 Accepted` with an operation reference:
 ```
 
 The initial status may be `queued` or `running`. Follow `events_url` for
-progress and terminal state, or inspect the task directly.
+progress and terminal state, or inspect the task directly. See the
+[Ollama model options](#ollama-model-options) table for the fields each role
+accepts.
 
 ### Uploading and ingesting a document
 
@@ -3796,7 +3821,12 @@ state. They are rebuilt or reconfigured after process restart rather than being
 treated as durable application state.
 
 
-## Upgrading to v0.2.1
+## Upgrading to v0.2.2
+
+An existing v0.2.1 home can be opened with v0.2.2. Ollama options are optional,
+so existing model specifications with no options still work.
+
+When upgrading from v0.2.0, update calls that use retrieval or conversations.
 
 - Use `RetrievalScope` when creating conversations and making direct searches.
   A whole-knowledge selection uses only `knowledge_name`. An empty selection
@@ -3810,7 +3840,7 @@ treated as durable application state.
 Conversation metadata is now schema version `2`. Back up your v0.2.0 home
 before switching versions. Version `1` conversations are rejected during
 discovery and reported through discovery issues. Create new conversations in
-v0.2.1 and keep the backup if you need to open the earlier histories with
+v0.2.2 and keep the backup if you need to open the earlier histories with
 v0.2.0.
 
 
@@ -4077,8 +4107,8 @@ Before release, test the generated wheel in fresh environments in both
 supported installation forms:
 
 ```bash
-python -m pip install ./dist/noomexai_raven-0.2.1-py3-none-any.whl
-python -m pip install "./dist/noomexai_raven-0.2.1-py3-none-any.whl[server]"
+python -m pip install ./dist/noomexai_raven-0.2.2-py3-none-any.whl
+python -m pip install "./dist/noomexai_raven-0.2.2-py3-none-any.whl[server]"
 ```
 
 Use the wheel filename produced by your build.

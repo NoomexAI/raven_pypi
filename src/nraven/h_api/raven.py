@@ -636,6 +636,11 @@ class Raven:
     ) -> OperationTask:
         """Configure both model adapters and model-dependent components."""
         self._validate_model_specs(llm_spec, embedding_spec)
+        # A frozen ModelSpec can still contain a mutable options dict.
+        if llm_spec.provider == "ollama":
+            llm_spec = llm_spec.model_copy(deep=True)
+        if embedding_spec.provider == "ollama":
+            embedding_spec = embedding_spec.model_copy(deep=True)
         active_operation = operation or await self.operation_manager.create(
             OperationType.RAVEN_CONFIGURE_MODELS
         )
@@ -779,7 +784,7 @@ class Raven:
             if spec.role == ModelRole.LLM
             else self.provider.ollama.preload_embedding
         )
-        task = await loader(spec.model, keep_alive, operation=operation)
+        task = await loader(spec.model, keep_alive, options=spec.options, operation=operation)
         await task.result()
         return self._model_residency_result(
             spec,

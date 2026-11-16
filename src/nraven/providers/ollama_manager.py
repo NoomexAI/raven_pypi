@@ -7,6 +7,7 @@ service, but it does not start or stop the Ollama process.
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import os
 from collections import OrderedDict
@@ -18,6 +19,7 @@ from typing import Any
 import ollama
 from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.llms.ollama import Ollama
+from pydantic import BaseModel, ConfigDict, PositiveInt, ValidationError
 
 from ..core.config import (
     DEFAULT_EMBEDDING_ADAPTER_CACHE_SIZE,
@@ -35,6 +37,31 @@ class _KeyedLock:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     users: int = 0
 
+
+class _OllamaRunnerOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+
+    num_ctx: PositiveInt | None = None
+    num_batch: PositiveInt | None = None
+    num_thread: int | None = None
+    num_gpu: int | None = None
+    main_gpu: int | None = None
+    use_mmap: bool | None = None
+
+
+class _OllamaChatOptions(_OllamaRunnerOptions):
+    num_predict: int | None = None
+    num_keep: int | None = None
+    temperature: float | None = None
+    top_k: int | None = None
+    top_p: float | None = None
+    min_p: float | None = None
+    seed: int | None = None
+    repeat_last_n: int | None = None
+    repeat_penalty: float | None = None
+    presence_penalty: float | None = None
+    frequency_penalty: float | None = None
+    stop: list[str] | None = None
 
 
 class OllamaManager:
@@ -71,8 +98,8 @@ class OllamaManager:
         )
         self._max_cached_llms = max_cached_llms
         self._max_cached_embeddings = max_cached_embeddings
-        self._llms: OrderedDict[str, Ollama] = OrderedDict()
-        self._embeddings: OrderedDict[str, OllamaEmbedding] = OrderedDict()
+        self._llms: OrderedDict[tuple[str, str], Ollama] = OrderedDict()
+        self._embeddings: OrderedDict[tuple[str, str], OllamaEmbedding] = OrderedDict()
         self._model_locks: dict[str, _KeyedLock] = {}
         self._pull_locks: dict[str, _KeyedLock] = {}
         self._closed = False
@@ -250,8 +277,8 @@ class OllamaManager:
         try:
             async with self._model_guard(model), self._pull_guard(model):
                 await self._client.delete(model)
-                self._llms.pop(model, None)
-                self._embeddings.pop(model, None)
+                self._evict_model(self._llms, model)
+                self._evict_model(self._embeddings, model)
         except Exception as exc:
             error = self._provider_error("delete model", model)
             await self._emit(
@@ -263,7 +290,14 @@ class OllamaManager:
         await self._emit(operation, EventType.MODEL_DELETE_COMPLETED, {"model": model})
 
 
-    async def load_llm(self, model: str, *, operation: Operation | None = None) -> OperationTask:
+    async def load_llm(
+        self,
+        model: str,
+        *,
+        options: dict[str, Any] | None = None,
+        operation: Operation | None = None,
+    ) -> OperationTask:
+        model_options = self._validate_options(options, _OllamaChatOptions)
         active_operation = operation or await self._operation_manager.create(
             OperationType.MODEL_LOAD_LLM
         )
@@ -271,6 +305,7 @@ class OllamaManager:
             OperationType.MODEL_LOAD_LLM,
             lambda active_operation: self._load_llm(
                 model,
+                model_options,
                 operation=active_operation,
             ),
         )
@@ -279,6 +314,7 @@ class OllamaManager:
     async def _load_llm(
         self,
         model: str,
+        options: dict[str, Any],
         *,
         operation: Operation,
     ) -> Ollama:
@@ -287,18 +323,21 @@ class OllamaManager:
         try:
             async with self._model_guard(model):
                 await self.ensure_available(model, operation=operation)
-                cached = model in self._llms
-                if cached:
-                    self._llms.move_to_end(model)
-                    adapter = self._llms[model]
-                else:
-                    self._llms[model] = Ollama(
+                key = (model, json.dumps(options, sort_keys=True))
+                adapter = self._llms.get(key)
+                cached = adapter is not None
+                if adapter is None:
+                    adapter = Ollama(
                         model=model,
                         base_url=self.host,
                         request_timeout=self.request_timeout,
+                        context_window=options.get("num_ctx", -1),
+                        additional_kwargs=options,
                     )
+                    self._llms[key] = adapter
                     self._trim_cache(self._llms, self._max_cached_llms)
-                    adapter = self._llms[model]
+                else:
+                    self._llms.move_to_end(key)
         except Exception as exc:
             error = self._provider_error("load LLM", model)
             await self._emit(
@@ -315,8 +354,10 @@ class OllamaManager:
         self,
         model: str,
         *,
+        options: dict[str, Any] | None = None,
         operation: Operation | None = None,
     ) -> OperationTask:
+        model_options = self._validate_options(options, _OllamaRunnerOptions)
         active_operation = operation or await self._operation_manager.create(
             OperationType.MODEL_LOAD_EMBEDDING
         )
@@ -324,6 +365,7 @@ class OllamaManager:
             OperationType.MODEL_LOAD_EMBEDDING,
             lambda active_operation: self._load_embedding(
                 model,
+                model_options,
                 operation=active_operation,
             ),
         )
@@ -332,6 +374,7 @@ class OllamaManager:
     async def _load_embedding(
         self,
         model: str,
+        options: dict[str, Any],
         *,
         operation: Operation,
     ) -> OllamaEmbedding:
@@ -340,22 +383,24 @@ class OllamaManager:
         try:
             async with self._model_guard(model):
                 await self.ensure_available(model, operation=operation)
-                cached = model in self._embeddings
-                if cached:
-                    self._embeddings.move_to_end(model)
-                    adapter = self._embeddings[model]
-                else:
-                    self._embeddings[model] = OllamaEmbedding(
+                key = (model, json.dumps(options, sort_keys=True))
+                adapter = self._embeddings.get(key)
+                cached = adapter is not None
+                if adapter is None:
+                    adapter = OllamaEmbedding(
                         model_name=model,
                         base_url=self.host,
                         embed_batch_size=self.embedding_batch_size,
                         client_kwargs={"timeout": self.request_timeout},
+                        ollama_additional_kwargs=options,
                     )
+                    self._embeddings[key] = adapter
                     self._trim_cache(
                         self._embeddings,
                         self._max_cached_embeddings,
                     )
-                    adapter = self._embeddings[model]
+                else:
+                    self._embeddings.move_to_end(key)
         except Exception as exc:
             error = self._provider_error("load embedding model", model)
             await self._emit(
@@ -389,9 +434,11 @@ class OllamaManager:
         model: str,
         keep_alive: str | float | None = None,
         *,
+        options: dict[str, Any] | None = None,
         operation: Operation | None = None,
     ) -> OperationTask:
         self._validate_keep_alive(keep_alive)
+        model_options = self._validate_options(options, _OllamaChatOptions)
         active_operation = operation or await self._operation_manager.create(
             OperationType.MODEL_PRELOAD_LLM
         )
@@ -400,6 +447,7 @@ class OllamaManager:
             lambda active_operation: self._preload_llm(
                 model,
                 keep_alive,
+                model_options,
                 operation=active_operation,
             ),
         )
@@ -409,6 +457,7 @@ class OllamaManager:
         self,
         model: str,
         keep_alive: str | float | None,
+        options: dict[str, Any],
         *,
         operation: Operation,
     ) -> None:
@@ -422,6 +471,7 @@ class OllamaManager:
                     prompt="",
                     stream=False,
                     keep_alive=keep_alive,
+                    options=options or None,
                 )
                 await self._wait_for_residency(model, resident=True)
         except Exception as exc:
@@ -440,9 +490,11 @@ class OllamaManager:
         model: str,
         keep_alive: str | float | None = None,
         *,
+        options: dict[str, Any] | None = None,
         operation: Operation | None = None,
     ) -> OperationTask:
         self._validate_keep_alive(keep_alive)
+        model_options = self._validate_options(options, _OllamaRunnerOptions)
         active_operation = operation or await self._operation_manager.create(
             OperationType.MODEL_PRELOAD_EMBEDDING
         )
@@ -451,6 +503,7 @@ class OllamaManager:
             lambda active_operation: self._preload_embedding(
                 model,
                 keep_alive,
+                model_options,
                 operation=active_operation,
             ),
         )
@@ -460,6 +513,7 @@ class OllamaManager:
         self,
         model: str,
         keep_alive: str | float | None,
+        options: dict[str, Any],
         *,
         operation: Operation,
     ) -> None:
@@ -472,6 +526,7 @@ class OllamaManager:
                     model=model,
                     input="",
                     keep_alive=keep_alive,
+                    options=options or None,
                 )
                 await self._wait_for_residency(model, resident=True)
         except Exception as exc:
@@ -513,7 +568,7 @@ class OllamaManager:
                     options={"num_predict": 1},
                 )
                 await self._wait_for_residency(model, resident=False)
-                self._llms.pop(model, None)
+                self._evict_model(self._llms, model)
         except Exception as exc:
             error = self._provider_error("unload LLM", model)
             await self._emit(
@@ -554,7 +609,7 @@ class OllamaManager:
             async with self._model_guard(model):
                 await self._client.embed(model=model, input="", keep_alive=0)
                 await self._wait_for_residency(model, resident=False)
-                self._embeddings.pop(model, None)
+                self._evict_model(self._embeddings, model)
         except Exception as exc:
             error = self._provider_error("unload embedding model", model)
             await self._emit(
@@ -642,9 +697,32 @@ class OllamaManager:
 
 
     @staticmethod
-    def _trim_cache(cache: OrderedDict[str, Any], maximum: int) -> None:
+    def _trim_cache(cache: OrderedDict[tuple[str, str], Any], maximum: int) -> None:
         while len(cache) > maximum:
             cache.popitem(last=False)
+
+
+    @staticmethod
+    def _evict_model(cache: OrderedDict[tuple[str, str], Any], model: str) -> None:
+        for key in list(cache):
+            if key[0] == model:
+                del cache[key]
+
+
+    @staticmethod
+    def _validate_options(
+        options: dict[str, Any] | None,
+        schema: type[_OllamaRunnerOptions],
+    ) -> dict[str, Any]:
+        try:
+            return schema.model_validate(options if options is not None else {}).model_dump(exclude_none=True)
+        except ValidationError as exc:
+            fields = sorted({str(error["loc"][0]) for error in exc.errors() if error["loc"]})
+            raise RavenError(
+                ErrorCode.INVALID_MODEL_SPEC,
+                "Invalid or unsupported Ollama model options.",
+                details={"fields": fields},
+            ) from None
 
 
     @staticmethod
